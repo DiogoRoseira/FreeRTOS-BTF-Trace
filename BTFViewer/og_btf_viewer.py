@@ -143,7 +143,7 @@ from typing import Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import (
     QBuffer, QByteArray, QEasingCurve, QEvent, QEventLoop, QIODevice, QLineF, QMimeData,
-    QPoint, QPointF, QRect, QRectF, QSize, Qt, QThread, QTimer,
+    QPoint, QPointF, QRectF, QSize, Qt, QThread, QTimer,
     QPropertyAnimation, pyqtSignal,
 )
 from PyQt5.QtGui import (
@@ -163,7 +163,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QScrollArea, QShortcut, QDoubleSpinBox, QSpinBox, QStackedWidget,
     QStyleOptionGraphicsItem, QAbstractItemView,
     QTabWidget, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget, QSizePolicy, QSplitter,
+    QVBoxLayout, QWidget,
 )
 
 # ===========================================================================
@@ -192,9 +192,6 @@ RULER_WIDTH              = 120  # Width of the time ruler column (px) — vertic
 ROW_HEIGHT               =  22  # Height of each task / core row (px).
 ROW_GAP                  =   4  # Vertical gap between rows (px).
 STI_ROW_H                =  18  # Height of a collapsed STI row (px)
-CPU_LOAD_ROW_H           = 115  # CPU load graph row height (px) — independent of timeline rows.
-CPU_LOAD_ROW_GAP         =   2  # Gap between CPU load rows (px).
-CPU_LOAD_COLLAPSED_H     =  20  # Height of a collapsed CPU load row (px — enough to show label).
 STI_WAVEFORM_H           =  80  # Height of an expanded STI waveform row (px).
 STI_LINE_STYLE           = "linear"  # Default STI waveform draw style: "step" or "linear".
 
@@ -362,10 +359,6 @@ _IC_1TO1     = ("M6.5 1a5.5 5.5 0 1 0 3.89 9.4l3.4 3.4.7-.7-3.4-3.4A5.5 5.5 0 0 
                "M5.8 6.9h1.4v1.2H5.8z"     # ":"   bottom dot
                "M7.8 4h1.5v5H7.8z"         # right "1" bar
                )
-_IC_CPU_LOAD = ("M1 11a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1v-3z"
-                "M5 7a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7z"
-                "M9 3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1V3z"
-                "M13 1a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1V1z")
 _IC_SETTINGS = ("M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17"
                 "c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1"
                 "c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31"
@@ -9032,8 +9025,6 @@ class _SettingsDialog(QDialog):
                  sti_row_h: int, sti_waveform_h: int, sti_line_style: str,
                  timescale_per_px_default: float,
                  is_dark: bool,
-                 cpu_load_row_h: int = CPU_LOAD_ROW_H,
-                 cpu_load: bool = True,
                  colorblind_safe: bool = False):
         super().__init__(parent, Qt.Dialog)
         self.setWindowTitle("Settings")
@@ -9161,9 +9152,6 @@ class _SettingsDialog(QDialog):
         v2.addWidget(self._indented(self._legend_cb))
         v2.addWidget(self._indented(self._stats_cb))
         v2.addWidget(self._indented(self._marks_cb))
-        self._cpu_load_cb = QCheckBox("CPU load graph")
-        self._cpu_load_cb.setChecked(cpu_load)
-        v2.addWidget(self._indented(self._cpu_load_cb))
 
         v2.addSpacing(6)
         v2.addWidget(self._hline())
@@ -9269,16 +9257,6 @@ class _SettingsDialog(QDialog):
         self._cursor_spin.setToolTip(f"Maximum number of simultaneous cursors (4\u2013{_MAX_CURSORS})")
         f3.addRow("Max cursors:", _inp(self._cursor_spin))
 
-        f3.addRow(self._hline())
-        f3.addRow("", self._section("CPU Load Graph"))
-
-        self._cpu_row_h_spin = QSpinBox()
-        self._cpu_row_h_spin.setRange(16, 120)
-        self._cpu_row_h_spin.setSuffix(" px")
-        self._cpu_row_h_spin.setValue(cpu_load_row_h)
-        self._cpu_row_h_spin.setToolTip("Height of each CPU load row (16\u2013120 px) \u2014 independent of timeline row height")
-        f3.addRow("Row height:", _inp(self._cpu_row_h_spin))
-
         self._content_stack.addWidget(p3)
 
         # -- Sidebar ↔ stack sync ---------------------------------------------
@@ -9346,7 +9324,6 @@ class _SettingsDialog(QDialog):
             self._legend_cb.stateChanged,
             self._stats_cb.stateChanged,
             self._marks_cb.stateChanged,
-            self._cpu_load_cb.stateChanged,
             self._hover_hl_cb.stateChanged,
             self._vert_label_pixmap_cb.stateChanged,
             self._label_width_spin.valueChanged,
@@ -9356,7 +9333,6 @@ class _SettingsDialog(QDialog):
             self._sti_waveform_h_spin.valueChanged,
             self._sti_line_style_combo.currentIndexChanged,
             self._timescale_per_px_spin.valueChanged,
-            self._cpu_row_h_spin.valueChanged,
         ):
             _sig.connect(self._schedule_live_preview)
 
@@ -9374,7 +9350,6 @@ class _SettingsDialog(QDialog):
         self._legend_cb.setChecked(True)
         self._stats_cb.setChecked(True)
         self._marks_cb.setChecked(True)
-        self._cpu_load_cb.setChecked(True)
         self._hover_hl_cb.setChecked(_HOVER_HIGHLIGHT_ENABLED)
         self._vert_label_pixmap_cb.setChecked(_VERTICAL_LABEL_USE_PIXMAP_DEFAULT)
         self._label_width_spin.setValue(LABEL_WIDTH)
@@ -9385,7 +9360,6 @@ class _SettingsDialog(QDialog):
         self._sti_line_style_combo.setCurrentIndex(1 if STI_LINE_STYLE == "linear" else 0)
         self._timescale_per_px_spin.setValue(_TIMESCALE_PER_PX_DEFAULT)
         self._cursor_spin.setValue(_DEFAULT_MAX_CURSORS)
-        self._cpu_row_h_spin.setValue(CPU_LOAD_ROW_H)
 
     # -- result accessors (read after exec_() == Accepted) ------------------
     @property
@@ -9400,8 +9374,6 @@ class _SettingsDialog(QDialog):
     def show_sti(self) -> bool:           return self._sti_cb.isChecked()
     @property
     def show_grid(self) -> bool:          return self._grid_cb.isChecked()
-    @property
-    def cpu_load(self) -> bool:           return self._cpu_load_cb.isChecked()
     @property
     def show_legend(self) -> bool:        return self._legend_cb.isChecked()
     @property
@@ -9420,8 +9392,6 @@ class _SettingsDialog(QDialog):
     def sti_line_style(self) -> str:      return self._sti_line_style_combo.currentData()
     @property
     def timescale_per_px_default(self) -> float: return self._timescale_per_px_spin.value()
-    @property
-    def cpu_load_row_h(self) -> int:      return self._cpu_row_h_spin.value()
     @property
     def is_dark(self) -> bool:            return self._theme_combo.currentIndex() == 0
     @property
@@ -10361,430 +10331,6 @@ def _exec_centred(dlg, parent):
     return dlg.exec_()
 
 
-# ===========================================================================
-# CPU Load Graph
-# ===========================================================================
-
-# ===========================================================================
-# CPU Load Graph
-# ===========================================================================
-
-
-class _CpuLoadGraph(QWidget):
-    """Synchronised CPU load chart below the main timeline.
-
-    View modes
-    ----------
-    Task view + no selection  → 1 row: total CPU usage across all cores
-    Task view + task selected → 1 row: selected task's CPU usage
-    Core view + no selection  → 1 row per core at full row height
-    Core view + task selected → 1 row per core showing that task's usage on each core
-
-    Rows can be collapsed (core view only): collapsed height = CPU_LOAD_COLLAPSED_H px,
-    label still visible. Click label to toggle. Expand/Collapse All button syncs via
-    set_all_expanded().
-    """
-
-    _NUM_BINS = 1024
-
-    def __init__(self, view: "TimelineView", parent: QWidget = None) -> None:
-        super().__init__(parent)
-        self._view                                          = view
-        self._trace                                         = None
-        self._is_dark: bool                                 = True
-        self._view_mode: str                                = "task"
-        self._selected_task: Optional[str]                  = None
-        self._collapsed_cores: set                          = set()
-        self._row_h: int                                    = CPU_LOAD_ROW_H
-        self._core_bins:      Dict[str, List[float]]        = {}
-        self._task_bins:      Dict[str, List[float]]        = {}
-        self._task_core_bins: Dict[str, Dict[str, List[float]]] = {}
-        self._total_bins:     List[float]                   = []
-        self._avg_load:       Dict[str, float]              = {}
-        self._bin_w_ns: float                               = 1.0
-        self._font_size: int                                = 8
-        self.setMinimumSize(40, 40)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.setToolTip(
-            "CPU load over time — synchronised with timeline\n"
-            "Core view: click a label to collapse/expand that core row"
-        )
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def set_trace(self, trace) -> None:
-        self._trace           = trace
-        self._selected_task   = None
-        self._core_bins       = {}
-        self._task_bins       = {}
-        self._task_core_bins  = {}
-        self._total_bins      = []
-        self._avg_load        = {}
-        if trace is not None:
-            self._compute_bins(trace)
-        self.updateGeometry()
-        self.update()
-
-    def set_task(self, task_name, locked: bool) -> None:
-        self._selected_task = task_name if (locked and task_name) else None
-        self.updateGeometry()
-        self.update()
-
-    def set_dark(self, is_dark: bool) -> None:
-        self._is_dark = is_dark
-        self.update()
-
-    def set_view_mode(self, mode: str) -> None:
-        self._view_mode = mode
-        self.updateGeometry()
-        self.update()
-
-    def set_row_h(self, h: int) -> None:
-        self._row_h = max(12, h)
-        self.updateGeometry()
-        self.update()
-
-    def set_font_size(self, size: int) -> None:
-        self._font_size = max(6, size)
-        self.update()
-
-    def set_core_expanded(self, core: str, expanded: bool) -> None:
-        if expanded:
-            self._collapsed_cores.discard(core)
-        else:
-            self._collapsed_cores.add(core)
-        self.updateGeometry()
-        self.update()
-
-    def set_all_expanded(self, expanded: bool) -> None:
-        if expanded:
-            self._collapsed_cores.clear()
-        else:
-            if self._trace:
-                self._collapsed_cores = set(self._trace.core_names or [])
-        self.updateGeometry()
-        self.update()
-
-    # ------------------------------------------------------------------
-    # Size hint — drives QScrollArea scrollbar
-    # ------------------------------------------------------------------
-
-    def sizeHint(self) -> "QSize":
-        return self.minimumSizeHint()
-
-    def minimumSizeHint(self) -> "QSize":
-        _TITLE_H = 22
-        rows    = self._get_rows()
-        total_h = _TITLE_H + sum(self._row_effective_h(k, key) + CPU_LOAD_ROW_GAP
-                                  for k, key, _, _ in rows)
-        return QSize(200, max(40, total_h))
-
-    # ------------------------------------------------------------------
-    # Pre-computation  (difference-array trick — O(n_segs + n_bins))
-    # ------------------------------------------------------------------
-
-    def _compute_bins(self, trace) -> None:
-        n     = self._NUM_BINS
-        t_min = trace.time_min
-        t_max = trace.time_max
-        span  = max(t_max - t_min, 1)
-        bin_w = span / n
-        self._bin_w_ns = bin_w
-
-        cores = trace.core_names or []
-        core_busy: Dict[str, List[float]]                        = {c: [0.0] * n for c in cores}
-        core_diff: Dict[str, List[float]]                        = {c: [0.0] * (n + 2) for c in cores}
-        task_busy: Dict[str, List[float]]                        = {}
-        task_diff: Dict[str, List[float]]                        = {}
-        task_core_busy: Dict[str, Dict[str, List[float]]]        = {}
-        task_core_diff: Dict[str, Dict[str, List[float]]]        = {}
-
-        for seg in trace.segments:
-            mk   = _task_merge_key(seg.task)
-            name = _parse_task_name(seg.task)[2]
-            skip = _is_idle_task_name(name) or name.upper() == "TICK"
-
-            b0 = max(0, min(n - 1, int((seg.start - t_min) / bin_w)))
-            b1 = max(0, min(n - 1, int((seg.end   - t_min) / bin_w)))
-
-            first_end = t_min + (b0 + 1) * bin_w
-            first_c   = min(seg.end, first_end) - seg.start
-
-            # Per-core accumulation (skip IDLE / TICK for core load)
-            if not skip and seg.core in core_busy:
-                cb = core_busy[seg.core]; cd = core_diff[seg.core]
-                cb[b0] += first_c
-                if b1 > b0:
-                    cb[b1] += max(0.0, seg.end - (t_min + b1 * bin_w))
-                    if b1 > b0 + 1:
-                        cd[b0 + 1] += bin_w; cd[b1] -= bin_w
-
-            # Per-task total accumulation
-            if mk not in task_busy:
-                task_busy[mk] = [0.0] * n
-                task_diff[mk] = [0.0] * (n + 2)
-            tb = task_busy[mk]; td = task_diff[mk]
-            tb[b0] += first_c
-            if b1 > b0:
-                tb[b1] += max(0.0, seg.end - (t_min + b1 * bin_w))
-                if b1 > b0 + 1:
-                    td[b0 + 1] += bin_w; td[b1] -= bin_w
-
-            # Per-task per-core accumulation
-            if mk not in task_core_busy:
-                task_core_busy[mk] = {}
-                task_core_diff[mk] = {}
-            if seg.core not in task_core_busy[mk]:
-                task_core_busy[mk][seg.core] = [0.0] * n
-                task_core_diff[mk][seg.core] = [0.0] * (n + 2)
-            tc  = task_core_busy[mk][seg.core]
-            tcd = task_core_diff[mk][seg.core]
-            tc[b0] += first_c
-            if b1 > b0:
-                tc[b1] += max(0.0, seg.end - (t_min + b1 * bin_w))
-                if b1 > b0 + 1:
-                    tcd[b0 + 1] += bin_w; tcd[b1] -= bin_w
-
-        inv = 1.0 / bin_w
-
-        # Materialise core bins
-        for core in cores:
-            run = 0.0; bb, bd = core_busy[core], core_diff[core]
-            for i in range(n):
-                run += bd[i]; bb[i] += run
-            self._core_bins[core] = [min(1.0, max(0.0, v * inv)) for v in bb]
-
-        # Materialise task bins
-        for mk in task_busy:
-            run = 0.0; tb2, td2 = task_busy[mk], task_diff[mk]
-            for i in range(n):
-                run += td2[i]; tb2[i] += run
-            self._task_bins[mk] = [min(1.0, max(0.0, v * inv)) for v in tb2]
-
-        # Materialise task-core bins
-        for mk in task_core_busy:
-            self._task_core_bins[mk] = {}
-            for core in task_core_busy[mk]:
-                run = 0.0; tc2 = task_core_busy[mk][core]; tcd2 = task_core_diff[mk][core]
-                for i in range(n):
-                    run += tcd2[i]; tc2[i] += run
-                self._task_core_bins[mk][core] = [min(1.0, max(0.0, v * inv)) for v in tc2]
-
-        # Total bins — average non-IDLE load across all cores
-        nc = max(1, len(cores))
-        self._total_bins = [
-            min(1.0, sum(self._core_bins[c][i] for c in cores) / nc)
-            for i in range(n)
-        ] if cores else []
-
-        # Average load per key (for label percentage display)
-        self._avg_load = {}
-        for core in cores:
-            b = self._core_bins.get(core, [])
-            self._avg_load[core] = sum(b) / len(b) if b else 0.0
-        for mk, b in self._task_bins.items():
-            self._avg_load[mk] = sum(b) / len(b) if b else 0.0
-        if self._total_bins:
-            self._avg_load["total"] = sum(self._total_bins) / len(self._total_bins)
-
-    # ------------------------------------------------------------------
-    # Row helpers
-    # ------------------------------------------------------------------
-
-    def _get_rows(self) -> List[tuple]:
-        """Return [(kind, key, label, QColor), ...] for currently displayed rows."""
-        if not self._trace:
-            return []
-        task  = self._selected_task
-        cores = self._trace.core_names or []
-
-        if self._view_mode == "task":
-            if task and task in self._task_bins:
-                raw = self._trace.task_repr.get(task, task)
-                return [("task", task, _task_display_name(raw), _task_color(raw))]
-            return [("total", "total", "CPU Load", QColor("#4CAF50"))]
-
-        # Core view — one row per core
-        return [("core", c, c, QColor(_core_color(c))) for c in cores]
-
-    def _row_effective_h(self, kind: str, key: str) -> int:
-        if kind == "core" and key in self._collapsed_cores:
-            return CPU_LOAD_COLLAPSED_H
-        return self._row_h
-
-    def _bins_for_row(self, kind: str, key: str):
-        task = self._selected_task
-        if kind == "total":
-            return self._total_bins or None
-        if kind == "task":
-            return self._task_bins.get(key)
-        # "core" — show task's load on this core if a task is selected
-        if task:
-            return self._task_core_bins.get(task, {}).get(key)
-        return self._core_bins.get(key)
-
-    # ------------------------------------------------------------------
-    # Mouse — click label strip (core view) to collapse / expand
-    # ------------------------------------------------------------------
-
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() != Qt.LeftButton or not self._trace:
-            return
-        if self._view_mode != "core":
-            return
-        scene = self._view._scene
-        if not scene or not hasattr(scene, '_label_width'):
-            return
-        if event.x() >= scene._label_width:
-            return
-        _TITLE_H = 22
-        ry = _TITLE_H
-        for kind, key, _, _ in self._get_rows():
-            rh = self._row_effective_h(kind, key)
-            if ry <= event.y() < ry + rh:
-                self.set_core_expanded(key, key in self._collapsed_cores)
-                return
-            ry += rh + CPU_LOAD_ROW_GAP
-
-    # ------------------------------------------------------------------
-    # Paint
-    # ------------------------------------------------------------------
-
-    def paintEvent(self, event) -> None:  # noqa: N802
-        scene = self._view._scene
-        if self._trace is None or scene is None:
-            return
-        if not (hasattr(scene, '_timescale_per_px') and hasattr(scene, '_label_width')):
-            return
-
-        tpp    = scene._timescale_per_px
-        lw     = scene._label_width
-        scroll = self._view.horizontalScrollBar().value()
-        t_min  = self._trace.time_min
-        t_max  = self._trace.time_max
-        n      = self._NUM_BINS
-        bin_w  = self._bin_w_ns
-        if bin_w <= 0 or tpp <= 0:
-            return
-
-        rows = self._get_rows()
-        w    = self.width()
-        h    = self.height()
-
-        dark = self._is_dark
-        bg   = QColor("#1E1E1E") if dark else QColor("#F0F0F0")
-        lblb = QColor("#252525") if dark else QColor("#E0E0E0")
-        sepc = QColor("#444444") if dark else QColor("#AAAAAA")
-        txtc = QColor("#AAAAAA") if dark else QColor("#444444")
-        grdc = QColor("#2E2E2E") if dark else QColor("#D0D0D0")
-
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing, False)
-        p.fillRect(0, 0, w, h, bg)
-
-        # Pre-compute pixel→bin mapping once (reused for every row)
-        sx_to_bi: Dict[int, int] = {}
-        for sx in range(lw, w):
-            t = t_min + (scroll + sx - lw) * tpp
-            if t_min <= t <= t_max:
-                sx_to_bi[sx] = min(n - 1, max(0, int((t - t_min) / bin_w)))
-
-        _TITLE_H  = 22
-        sf_title  = QFont(); sf_title.setPointSize(self._font_size)
-        sf_norm   = QFont(); sf_norm.setPointSize(self._font_size)
-        sf_small  = QFont(); sf_small.setPointSize(max(6, self._font_size - 1))
-        sf_pct    = QFont(); sf_pct.setPointSize(max(5, self._font_size - 3))
-        pct_muted = QColor("#555555") if dark else QColor("#AAAAAA")
-        white_col = QColor("#FFFFFF") if dark else QColor("#111111")
-        green_col = QColor("#4CAF50")
-
-        # ── Title bar (same bg as rows) ────────────────────────────────
-        p.setFont(sf_title)
-        p.setPen(txtc)
-        p.drawText(QRect(4, 0, lw - 6, _TITLE_H), Qt.AlignVCenter | Qt.AlignLeft, "CPU LOAD")
-        p.setPen(QPen(sepc, 1))
-        p.drawLine(0, _TITLE_H, w, _TITLE_H)
-
-        ry = _TITLE_H
-        for kind, key, lbl_text, color in rows:
-            rh = self._row_effective_h(kind, key)
-            if ry >= h:
-                break
-            effective_h = min(rh, h - ry)
-            collapsed   = (kind == "core" and key in self._collapsed_cores)
-            avg_pct     = self._avg_load.get(key, 0.0)
-            pct_text    = f"{avg_pct * 100:.0f}%"
-            indicator   = "▶" if collapsed else "▼"
-
-            # ── Label: white triangle → coloured circle → white name → green % ─
-            dot_r  = min(5, effective_h // 4)
-            dot_cy = ry + effective_h // 2
-
-            # 1. Triangle (white)
-            p.setFont(sf_small if collapsed else sf_norm)
-            p.setPen(white_col)
-            p.drawText(QRect(2, ry, 14, effective_h), Qt.AlignVCenter | Qt.AlignLeft, indicator)
-
-            # 2. Coloured circle
-            dot_cx = 20 + dot_r
-            p.setRenderHint(QPainter.Antialiasing, True)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QBrush(color))
-            p.drawEllipse(dot_cx - dot_r, dot_cy - dot_r, dot_r * 2, dot_r * 2)
-            p.setRenderHint(QPainter.Antialiasing, False)
-
-            # 3. Core name (white)
-            name_x = dot_cx + dot_r + 4
-            p.setPen(white_col)
-            p.drawText(QRect(name_x, ry, lw - name_x - 44, effective_h), Qt.AlignVCenter | Qt.AlignLeft, lbl_text)
-
-            # 4. Percentage (green)
-            p.setPen(green_col)
-            p.drawText(QRect(lw - 42, ry, 38, effective_h), Qt.AlignVCenter | Qt.AlignRight, pct_text)
-
-            if not collapsed:
-                # Grid lines at 25 / 50 / 75 / 100 % with labels
-                # "0" at bottom; "100" omitted (would overflow above the row)
-                p.setFont(sf_pct)
-                p.setPen(pct_muted)
-                p.drawText(QRect(lw + 3, ry + effective_h - 12, 28, 12),
-                           Qt.AlignLeft | Qt.AlignBottom, "0")
-                for pct in (0.25, 0.5, 0.75, 1.0):
-                    gy = ry + effective_h - 1 - int(pct * effective_h)
-                    p.setPen(QPen(grdc, 1, Qt.DotLine))
-                    p.drawLine(lw + 1, gy, w, gy)
-                    if pct < 1.0:   # skip "100" — would overflow into row above
-                        p.setPen(pct_muted)
-                        p.drawText(QRect(lw + 3, gy - 12, 28, 12),
-                                   Qt.AlignLeft | Qt.AlignBottom, str(int(pct * 100)))
-
-                # Load bars
-                bins = self._bins_for_row(kind, key)
-                if bins:
-                    p.setPen(Qt.NoPen)
-                    p.setBrush(QBrush(color))
-                    for sx, bi in sx_to_bi.items():
-                        load = bins[bi]
-                        if load <= 0.001:
-                            continue
-                        bh = max(1, int(load * effective_h))
-                        p.drawRect(sx, ry + effective_h - bh, 1, bh)
-
-            # Row separator
-            p.setPen(QPen(sepc, 1))
-            p.drawLine(0, ry + effective_h, w, ry + effective_h)
-
-            ry += rh + CPU_LOAD_ROW_GAP
-
-        # Label column separator (full height)
-        p.setPen(QPen(sepc, 1))
-        p.drawLine(lw, 0, lw, h)
-
-        p.end()
-
-
 def _dialog_guard(fn):
     """Decorator: prevents a dialog-opening method from being entered while it
     is already running (e.g. due to spurious double-trigger on Linux/X11).
@@ -10828,7 +10374,6 @@ class MainWindow(QMainWindow):
         self._show_grid:             bool  = True
         self._show_legend:           bool  = True
         self._show_stats:            bool  = True
-        self._show_cpu_load:         bool  = True
         self._show_marks:            bool  = True
         self._font_size_val:         int   = FONT_SIZE
         self._ui_font_size_val:      int   = UI_FONT_SIZE
@@ -10842,7 +10387,6 @@ class MainWindow(QMainWindow):
         self._timescale_per_px_default_val:  float = _TIMESCALE_PER_PX_DEFAULT
         self._hover_highlight_val:    bool  = _HOVER_HIGHLIGHT_ENABLED
         self._vert_label_pixmap_val:  bool  = _RENDER_RUNTIME.vertical_label_use_pixmap
-        self._cpu_load_row_h_val:     int   = CPU_LOAD_ROW_H
         self._colorblind_val:         bool  = False
         self._bookmarks: List[TraceBookmark] = []
         self._annotations: List[TraceAnnotation] = []
@@ -10999,20 +10543,6 @@ class MainWindow(QMainWindow):
         if saved_nppd != _TIMESCALE_PER_PX_DEFAULT:
             self._timescale_per_px_default_val = saved_nppd
             self._view._scene.set_timescale_per_px_default(saved_nppd)
-
-        # CPU load graph visibility
-        saved_cpl = s.get_bool("view", "show_cpu_load", True)
-        if not saved_cpl:
-            self._show_cpu_load = False
-            self._cpu_load_scroll.hide()
-            if hasattr(self, '_tb_cpu_load_btn'):
-                self._tb_cpu_load_btn.setChecked(False)
-
-        # CPU load graph row height
-        saved_clrh = s.get_int("view", "cpu_load_row_h", CPU_LOAD_ROW_H)
-        if saved_clrh != CPU_LOAD_ROW_H:
-            self._cpu_load_row_h_val = saved_clrh
-            self._cpu_load_graph.set_row_h(saved_clrh)
 
         # STI row heights and line style
         saved_srh = s.get_int("view", "sti_row_h", STI_ROW_H)
@@ -11313,7 +10843,6 @@ class MainWindow(QMainWindow):
         # thread is not killed prematurely at interpreter shutdown (a daemon
         # thread killed before it finishes would bounce the reference back to
         # the main-thread teardown, negating the benefit).
-        self._cpu_load_graph.set_trace(None)
         _trace_to_free = self._trace
         self._trace = None
         if _trace_to_free is not None:
@@ -11578,8 +11107,6 @@ class MainWindow(QMainWindow):
             _host_pal.setColor(QPalette.Window, QColor(c['win_bg']))
             _host_pal.setColor(QPalette.Base, QColor(c['win_bg']))
             _legend_host.setPalette(_host_pal)
-        if hasattr(self, '_cpu_load_graph'):
-            self._cpu_load_graph.set_dark(is_dark)
         if hasattr(self, '_stats_panel'):
             self._stats_panel._ui_font_size = _ui_font_size
             if self._trace is not None:
@@ -11643,27 +11170,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._welcome_page)   # index 0
         self._stack.addWidget(self._view)            # index 1
         self._stack.setCurrentIndex(0)
-
-        # --- CPU load graph (below timeline, wrapped in a scroll area) ---
-        self._cpu_load_graph = _CpuLoadGraph(self._view)
-        self._cpu_load_scroll = QScrollArea()
-        self._cpu_load_scroll.setWidget(self._cpu_load_graph)
-        self._cpu_load_scroll.setWidgetResizable(True)
-        self._cpu_load_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._cpu_load_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._cpu_splitter = QSplitter(Qt.Vertical)
-        self._cpu_splitter.addWidget(self._stack)
-        self._cpu_splitter.addWidget(self._cpu_load_scroll)
-        self._cpu_splitter.setStretchFactor(0, 1)
-        self._cpu_splitter.setStretchFactor(1, 0)
-        self._cpu_splitter.setSizes([600, CPU_LOAD_ROW_H])
-        self._cpu_splitter.setCollapsible(0, False)
-        self.setCentralWidget(self._cpu_splitter)
-
-        # Synchronise CPU graph with timeline zoom / pan / task highlight
-        self._view.zoom_changed.connect(self._cpu_load_graph.update)
-        self._view.horizontalScrollBar().valueChanged.connect(self._cpu_load_graph.update)
-        self._view._scene.highlight_changed.connect(self._cpu_load_graph.set_task)
+        self.setCentralWidget(self._stack)
 
         # --- Legend dock (right panel) ---
         self._build_legend_dock()
@@ -12062,13 +11569,6 @@ class MainWindow(QMainWindow):
         self._tb_expand_all_btn.setCheckable(True)
         self._tb_expand_all_btn.setChecked(True)   # default: all expanded
         self._tb_expand_all_btn.setEnabled(False)   # only active in core view
-        self._tb_cpu_load_btn = _ia("Load", self._toggle_cpu_load_graph, _IC_CPU_LOAD,
-                                    "Show / hide CPU load graph")
-        self._tb_cpu_load_btn.setCheckable(True)
-        self._tb_cpu_load_btn.setChecked(True)
-        _clw = tb.widgetForAction(self._tb_cpu_load_btn)
-        if _clw:
-            _clw.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         tb.addSeparator()
 
         # --- Cursor controls ---
@@ -12276,23 +11776,11 @@ class MainWindow(QMainWindow):
                 self._tb_expand_all_btn.setChecked(all_expanded)
         self._view.set_view_mode(mode)
         self._refresh_find_marker()
-        self._cpu_load_graph.set_view_mode(mode)
 
     def _toggle_expand_all_cores(self) -> None:
         """Expand or collapse all cores based on the button's checked state."""
         expanded = self._tb_expand_all_btn.isChecked()
         self._view.set_all_cores_expanded(expanded)
-        self._cpu_load_graph.set_all_expanded(expanded)
-
-    def _toggle_cpu_load_graph(self) -> None:
-        """Show or hide the CPU load graph panel."""
-        visible = self._tb_cpu_load_btn.isChecked()
-        self._cpu_load_scroll.setVisible(visible)
-        if visible:
-            sizes = self._cpu_splitter.sizes()
-            if sizes[1] < 40:
-                total = sum(sizes)
-                self._cpu_splitter.setSizes([max(100, total - 300), 300])
 
     # -- File actions ---------------------------------------------------
 
@@ -12929,8 +12417,6 @@ class MainWindow(QMainWindow):
         self._legend.rebuild(trace, show_sti=self._show_sti)
         self._stats_panel._ui_font_size = self._ui_font_size_val
         self._stats_panel.rebuild(trace)
-        self._cpu_load_graph.set_trace(trace)
-        self._cpu_load_graph.set_font_size(self._font_size_val)
 
         self._undo_stack.clear()
         self._redo_stack.clear()
@@ -12938,8 +12424,6 @@ class MainWindow(QMainWindow):
         self._act_redo.setEnabled(False)
         if self._show_stats:
             self._stats_dock.show()
-        if self._show_cpu_load:
-            self._cpu_load_scroll.show()
         self._act_save_img.setEnabled(True)
         self._act_save_svg.setEnabled(True)
         self._act_copy_img.setEnabled(True)
@@ -12964,19 +12448,7 @@ class MainWindow(QMainWindow):
     def _on_save_image(self) -> None:
         if self._trace is None:
             return
-        tl_pix = self._view._capture_pixmap()
-        if self._show_cpu_load and self._cpu_load_scroll.isVisible():
-            cpu_pix = self._cpu_load_graph.grab()
-            combined = QPixmap(max(tl_pix.width(), cpu_pix.width()),
-                               tl_pix.height() + cpu_pix.height())
-            combined.fill(Qt.transparent)
-            _p = QPainter(combined)
-            _p.drawPixmap(0, 0, tl_pix)
-            _p.drawPixmap(0, tl_pix.height(), cpu_pix)
-            _p.end()
-            pixmap = combined
-        else:
-            pixmap = tl_pix
+        pixmap = self._view._capture_pixmap()
         dlg = SnapshotEditorDialog(pixmap, self)
         _exec_centred(dlg, self)
 
@@ -13044,7 +12516,6 @@ class MainWindow(QMainWindow):
         if vals["font_size"] != self._font_size_val:
             self._font_size_val = vals["font_size"]
             self._view.set_font_size(self._font_size_val)
-            self._cpu_load_graph.set_font_size(self._font_size_val)
         if vals["max_cursors"] != self._max_cursors_val:
             self._max_cursors_val = vals["max_cursors"]
             self._view.set_max_cursors(self._max_cursors_val)
@@ -13062,10 +12533,6 @@ class MainWindow(QMainWindow):
         if vals["show_marks"] != self._show_marks:
             self._show_marks = vals["show_marks"]
             self._marks_dock.setVisible(self._show_marks)
-        if vals.get("show_cpu_load", self._show_cpu_load) != self._show_cpu_load:
-            self._show_cpu_load = vals["show_cpu_load"]
-            self._cpu_load_scroll.setVisible(self._show_cpu_load)
-            self._tb_cpu_load_btn.setChecked(self._show_cpu_load)
         if vals["show_hover_highlight"] != self._hover_highlight_val:
             self._hover_highlight_val = vals["show_hover_highlight"]
             self._view._scene.set_hover_highlight(self._hover_highlight_val)
@@ -13096,9 +12563,6 @@ class MainWindow(QMainWindow):
             self._timescale_per_px_default_val = vals["timescale_per_px_default"]
             self._view._scene.set_timescale_per_px_default(self._timescale_per_px_default_val)
             self._refresh_zoom_ui_unit()
-        if vals.get("cpu_load_row_h", self._cpu_load_row_h_val) != self._cpu_load_row_h_val:
-            self._cpu_load_row_h_val = vals["cpu_load_row_h"]
-            self._cpu_load_graph.set_row_h(self._cpu_load_row_h_val)
 
     def _persist_settings_after_dlg(self, snap: dict) -> None:
         """Write to disk any settings that differ from the pre-dialog snapshot."""
@@ -13121,8 +12585,6 @@ class MainWindow(QMainWindow):
             updates["show_stats"] = str(self._show_stats).lower()
         if snap["show_marks"] != self._show_marks:
             updates["show_marks"] = str(self._show_marks).lower()
-        if snap.get("show_cpu_load", self._show_cpu_load) != self._show_cpu_load:
-            updates["show_cpu_load"] = str(self._show_cpu_load).lower()
         if snap["show_hover_highlight"] != self._hover_highlight_val:
             updates["hover_highlight"] = str(self._hover_highlight_val).lower()
         if snap["vert_label_pixmap"] != self._vert_label_pixmap_val:
@@ -13143,8 +12605,6 @@ class MainWindow(QMainWindow):
             updates["sti_line_style"] = self._sti_line_style_val
         if snap["timescale_per_px_default"] != self._timescale_per_px_default_val:
             updates["timescale_per_px_default"] = str(self._timescale_per_px_default_val)
-        if snap.get("cpu_load_row_h", self._cpu_load_row_h_val) != self._cpu_load_row_h_val:
-            updates["cpu_load_row_h"] = str(self._cpu_load_row_h_val)
         if updates:
             self._settings.set_many("view", updates)
             self._report_settings_io_failure(prefix="Settings save warning")
@@ -13162,7 +12622,6 @@ class MainWindow(QMainWindow):
             "show_legend":              self._show_legend,
             "show_stats":               self._show_stats,
             "show_marks":               self._show_marks,
-            "show_cpu_load":            self._show_cpu_load,
             "show_hover_highlight":     self._hover_highlight_val,
             "vert_label_pixmap":        self._vert_label_pixmap_val,
             "colorblind_safe":          self._colorblind_val,
@@ -13173,7 +12632,6 @@ class MainWindow(QMainWindow):
             "sti_waveform_h":           self._sti_waveform_h_val,
             "sti_line_style":           self._sti_line_style_val,
             "timescale_per_px_default": self._timescale_per_px_default_val,
-            "cpu_load_row_h":           self._cpu_load_row_h_val,
         }
         dlg = _SettingsDialog(
             self,
@@ -13185,7 +12643,6 @@ class MainWindow(QMainWindow):
             show_legend=self._show_legend,
             show_stats=self._show_stats,
             show_marks=self._show_marks,
-            cpu_load=self._show_cpu_load,
             label_width=self._label_width_val,
             row_height=self._row_height_val,
             row_gap=self._row_gap_val,
@@ -13198,7 +12655,6 @@ class MainWindow(QMainWindow):
             vert_label_pixmap=self._vert_label_pixmap_val,
             colorblind_safe=self._colorblind_val,
             zoom_unit=self._current_time_unit(),
-            cpu_load_row_h=self._cpu_load_row_h_val,
         )
         dlg.live_preview.connect(lambda: self._apply_settings_preview({
             "is_dark":                  dlg.is_dark,
@@ -13210,7 +12666,6 @@ class MainWindow(QMainWindow):
             "show_legend":              dlg.show_legend,
             "show_stats":               dlg.show_stats,
             "show_marks":               dlg.show_marks,
-            "show_cpu_load":            dlg.cpu_load,
             "show_hover_highlight":     dlg.show_hover_highlight,
             "vert_label_pixmap":        dlg.vert_label_pixmap,
             "colorblind_safe":          dlg.colorblind_safe,
@@ -13221,7 +12676,6 @@ class MainWindow(QMainWindow):
             "sti_waveform_h":           dlg.sti_waveform_h,
             "sti_line_style":           dlg.sti_line_style,
             "timescale_per_px_default": dlg.timescale_per_px_default,
-            "cpu_load_row_h":           dlg.cpu_load_row_h,
         }))
         # The dialog carries its own scoped stylesheet (set at construction
         # time).  Re-apply it on every live_preview so that switching the
