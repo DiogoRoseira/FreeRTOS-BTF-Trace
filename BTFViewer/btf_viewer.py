@@ -7846,6 +7846,26 @@ class _StatsPanel(QWidget):
             _format_time(vals[p95_idx], scale),
         )
 
+    def _summarize_samples_export(self, samples: List[int], scale: str) -> Optional[Tuple[str, str, str, str, str, str]]:
+        if not samples:
+            return None
+        vals = sorted(samples)
+        n = len(vals)
+        p50_idx = min(n - 1, math.ceil(n * 0.50) - 1)
+        p95_idx = min(n - 1, math.ceil(n * 0.95) - 1)
+        avg = int(round(sum(vals) / n))
+        trim_n = int(math.floor(n * 0.05))
+        trim_vals = vals[trim_n:n - trim_n] if (2 * trim_n) < n else vals
+        trim_avg = int(round(sum(trim_vals) / len(trim_vals)))
+        return (
+            _format_time(vals[0], scale),
+            _format_time(avg, scale),
+            _format_time(trim_avg, scale),
+            _format_time(vals[-1], scale),
+            _format_time(vals[p50_idx], scale),
+            _format_time(vals[p95_idx], scale),
+        )
+
     def _exec_slice_rows(self, trace: "BtfTrace") -> List[Tuple[str, int, float, str, str, str, str]]:
         rows: List[Tuple[str, int, float, str, str, str, str]] = []
         total_ns = trace.time_max - trace.time_min
@@ -7884,6 +7904,47 @@ class _StatsPanel(QWidget):
                 continue
             mn, avg, mx, p95 = summary
             rows.append((_task_display_name(raw), len(starts), mn, avg, mx, p95))
+        rows.sort(key=lambda r: (-r[1], r[0].lower()))
+        return rows
+
+    def _exec_slice_rows_export(self, trace: "BtfTrace") -> List[Tuple[str, int, float, str, str, str, str, str, str]]:
+        rows: List[Tuple[str, int, float, str, str, str, str, str, str]] = []
+        total_ns = trace.time_max - trace.time_min
+        if total_ns <= 0:
+            return rows
+        for mk, segs in trace.seg_map_by_merge_key.items():
+            if not segs:
+                continue
+            raw = trace.task_repr.get(mk, mk)
+            _, _, tname = _parse_task_name(raw)
+            if _is_idle_task_name(tname) or tname == "TICK":
+                continue
+            samples = [s.end - s.start for s in segs if (s.end - s.start) > 0]
+            summary = self._summarize_samples_export(samples, trace.time_scale)
+            if summary is None:
+                continue
+            mn, avg, tmean, mx, p50, p95 = summary
+            cpu_pct = 100.0 * sum(samples) / total_ns
+            rows.append((_task_display_name(raw), len(samples), cpu_pct, mn, avg, tmean, mx, p50, p95))
+        rows.sort(key=lambda r: (-r[2], -r[1], r[0].lower()))
+        return rows
+
+    def _inter_arrival_rows_export(self, trace: "BtfTrace") -> List[Tuple[str, int, str, str, str, str, str, str]]:
+        rows: List[Tuple[str, int, str, str, str, str, str, str]] = []
+        for mk, segs in trace.seg_map_by_merge_key.items():
+            if len(segs) < 2:
+                continue
+            raw = trace.task_repr.get(mk, mk)
+            _, _, tname = _parse_task_name(raw)
+            if _is_idle_task_name(tname) or tname == "TICK":
+                continue
+            starts = sorted(s.start for s in segs)
+            samples = [starts[i] - starts[i - 1] for i in range(1, len(starts)) if (starts[i] - starts[i - 1]) > 0]
+            summary = self._summarize_samples_export(samples, trace.time_scale)
+            if summary is None:
+                continue
+            mn, avg, tmean, mx, p50, p95 = summary
+            rows.append((_task_display_name(raw), len(starts), mn, avg, tmean, mx, p50, p95))
         rows.sort(key=lambda r: (-r[1], r[0].lower()))
         return rows
 
@@ -7976,32 +8037,32 @@ class _StatsPanel(QWidget):
         sti_count = sum(1 for ev in trace.sti_events if not _is_tag_sti_channel(ev.target))
         core_rows = self._core_util_rows(trace)
         task_rows = self._task_cpu_rows(trace)
-        exec_rows = self._exec_slice_rows(trace)
-        inter_rows = self._inter_arrival_rows(trace)
+        exec_rows = self._exec_slice_rows_export(trace)
+        inter_rows = self._inter_arrival_rows_export(trace)
 
         def _esc(v: object) -> str:
             return html.escape(str(v), quote=True)
 
         def _render_stats_table(title: str,
-                                rows: List[Tuple[str, int, str, str, str, str]]) -> str:
+                                rows: List[Tuple[str, int, str, str, str, str, str, str]]) -> str:
             body = "".join(
-                f"<tr><td>{_esc(name)}</td><td>{runs}</td><td>{_esc(mn)}</td><td>{_esc(avg)}</td><td>{_esc(mx)}</td><td>{_esc(p95)}</td></tr>"
-                for name, runs, mn, avg, mx, p95 in rows
-            ) or '<tr><td colspan="6" class="empty">No data</td></tr>'
+                f"<tr><td>{_esc(name)}</td><td>{runs}</td><td>{_esc(mn)}</td><td>{_esc(avg)}</td><td>{_esc(tmean)}</td><td>{_esc(mx)}</td><td>{_esc(p50)}</td><td>{_esc(p95)}</td></tr>"
+                for name, runs, mn, avg, tmean, mx, p50, p95 in rows
+            ) or '<tr><td colspan="8" class="empty">No data</td></tr>'
             return (
-                f"<section><h2>{_esc(title)}</h2>"
-                "<table><thead><tr><th>Task</th><th>Runs</th><th>Min</th><th>Avg</th><th>Max</th><th>p95</th></tr></thead>"
+                f"<section class=\"report-card\"><h2>{_esc(title)}</h2>"
+                "<table><thead><tr><th>Task</th><th>Runs</th><th>Min</th><th>Avg</th><th>TrimMean(5%)</th><th>Max</th><th>p50</th><th>p95</th></tr></thead>"
                 f"<tbody>{body}</tbody></table></section>"
             )
 
-        def _render_exec_table(rows: List[Tuple[str, int, float, str, str, str, str]]) -> str:
+        def _render_exec_table(rows: List[Tuple[str, int, float, str, str, str, str, str, str]]) -> str:
             body = "".join(
-                f"<tr><td>{_esc(name)}</td><td>{runs}</td><td>{cpu:.1f}%</td><td>{_esc(mn)}</td><td>{_esc(avg)}</td><td>{_esc(mx)}</td><td>{_esc(p95)}</td></tr>"
-                for name, runs, cpu, mn, avg, mx, p95 in rows
-            ) or '<tr><td colspan="7" class="empty">No data</td></tr>'
+                f"<tr><td>{_esc(name)}</td><td>{runs}</td><td>{cpu:.1f}%</td><td>{_esc(mn)}</td><td>{_esc(avg)}</td><td>{_esc(tmean)}</td><td>{_esc(mx)}</td><td>{_esc(p50)}</td><td>{_esc(p95)}</td></tr>"
+                for name, runs, cpu, mn, avg, tmean, mx, p50, p95 in rows
+            ) or '<tr><td colspan="9" class="empty">No data</td></tr>'
             return (
-                "<section><h2>Execution Time Per Slice</h2>"
-                "<table><thead><tr><th>Task</th><th>Runs</th><th>CPU%</th><th>Min</th><th>Avg</th><th>Max</th><th>p95</th></tr></thead>"
+                "<section class=\"report-card\"><h2>Execution Time Per Slice</h2>"
+                "<table><thead><tr><th>Task</th><th>Runs</th><th>CPU%</th><th>Min</th><th>Avg</th><th>TrimMean(5%)</th><th>Max</th><th>p50</th><th>p95</th></tr></thead>"
                 f"<tbody>{body}</tbody></table></section>"
             )
 
@@ -8021,35 +8082,93 @@ class _StatsPanel(QWidget):
   <meta charset=\"utf-8\" />
   <title>BTF Statistics Report</title>
   <style>
-    body {{ font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; color: #1e1e1e; }}
-    h1 {{ margin: 0 0 4px 0; }}
-    .sub {{ color: #666; margin-bottom: 16px; }}
-    section {{ margin: 16px 0; }}
-        .notes {{ background: #f8fafc; border: 1px solid #d8dde6; border-radius: 8px; padding: 10px 12px; max-width: 980px; }}
+        :root {{
+            --bg: #e9edf3;
+            --paper: #ffffff;
+            --ink: #182230;
+            --muted: #5f6f82;
+            --line: #d9e0ea;
+            --line-strong: #c8d2e0;
+            --header: #16324f;
+            --accent: #2a6fb2;
+            --stripe: #f7f9fc;
+        }}
+        * {{ box-sizing: border-box; }}
+        body {{
+            margin: 0;
+            padding: 28px;
+            font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+            color: var(--ink);
+            background: radial-gradient(circle at top right, #f6f8fb 0%, var(--bg) 52%, #dde4ee 100%);
+        }}
+        .report {{ max-width: 1160px; margin: 0 auto; }}
+        .report-head {{
+            background: linear-gradient(135deg, var(--header) 0%, #21496f 100%);
+            color: #f3f7fd;
+            border-radius: 14px;
+            padding: 20px 24px;
+            box-shadow: 0 10px 28px rgba(17, 44, 69, 0.24);
+            margin-bottom: 18px;
+        }}
+        h1 {{ margin: 0; font-size: 28px; letter-spacing: 0.2px; }}
+        .sub {{ margin-top: 6px; color: #cfe1f7; font-size: 13px; }}
+        .kpi-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+            gap: 10px;
+            margin-bottom: 16px;
+        }}
+        .kpi {{
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            padding: 12px 14px;
+            box-shadow: 0 2px 8px rgba(30, 60, 90, 0.06);
+        }}
+        .kpi .k {{ color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; }}
+        .kpi .v {{ margin-top: 4px; font-size: 20px; font-weight: 700; color: #0f2b47; }}
+        .report-card {{
+            margin: 14px 0;
+            background: var(--paper);
+            border: 1px solid var(--line);
+            border-radius: 12px;
+            padding: 12px 14px 14px;
+            box-shadow: 0 2px 10px rgba(30, 60, 90, 0.06);
+        }}
+        h2 {{ margin: 0 0 10px 0; color: #123355; font-size: 17px; }}
+        .notes {{ border-left: 4px solid var(--accent); }}
         .notes ul {{ margin: 8px 0 0 18px; padding: 0; }}
         .notes li {{ margin: 6px 0; line-height: 1.45; }}
-    table {{ border-collapse: collapse; width: 100%; max-width: 980px; }}
-    th, td {{ border: 1px solid #ddd; padding: 6px 8px; font-size: 13px; text-align: right; }}
-    th:first-child, td:first-child {{ text-align: left; }}
-    thead th {{ background: #f2f4f7; }}
-    .empty {{ text-align: center !important; color: #666; }}
+        table {{ border-collapse: separate; border-spacing: 0; width: 100%; }}
+        th, td {{ border-bottom: 1px solid var(--line); padding: 8px 10px; font-size: 13px; text-align: right; }}
+        th:first-child, td:first-child {{ text-align: left; }}
+        thead th {{
+            background: #f1f5fb;
+            color: #284563;
+            font-weight: 600;
+            border-top: 1px solid var(--line-strong);
+            border-bottom: 1px solid var(--line-strong);
+        }}
+        tbody tr:nth-child(even) td {{ background: var(--stripe); }}
+        .empty {{ text-align: center !important; color: var(--muted); }}
+        .report-foot {{ margin-top: 14px; color: var(--muted); font-size: 12px; text-align: right; }}
   </style>
 </head>
 <body>
-  <h1>BTF Statistics Report</h1>
-  <div class=\"sub\">Generated: {_esc(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}</div>
+    <div class=\"report\">
+        <header class=\"report-head\">
+            <h1>BTF Statistics Report</h1>
+            <div class=\"sub\">Generated: {_esc(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}</div>
+        </header>
 
-  <section>
-    <h2>Summary</h2>
-    <table><tbody>
-      <tr><th>Span</th><td>{_esc(span_str)}</td></tr>
-      <tr><th>Tasks</th><td>{len(trace.tasks)}</td></tr>
-      <tr><th>Segments</th><td>{len(trace.segments):,}</td></tr>
-      <tr><th>STI Events</th><td>{sti_count:,}</td></tr>
-    </tbody></table>
-  </section>
+        <section class=\"kpi-grid\">
+            <article class=\"kpi\"><div class=\"k\">Span</div><div class=\"v\">{_esc(span_str)}</div></article>
+            <article class=\"kpi\"><div class=\"k\">Tasks</div><div class=\"v\">{len(trace.tasks):,}</div></article>
+            <article class=\"kpi\"><div class=\"k\">Segments</div><div class=\"v\">{len(trace.segments):,}</div></article>
+            <article class=\"kpi\"><div class=\"k\">STI Events</div><div class=\"v\">{sti_count:,}</div></article>
+        </section>
 
-    <section class=\"notes\">
+        <section class=\"report-card notes\">
         <h2>Statistics Notes</h2>
         <ul>
             <li><strong>Execution Time Per Slice:</strong> Duration of each continuous task run between two context switches. Lower and tighter values indicate more predictable execution.</li>
@@ -8057,11 +8176,13 @@ class _StatsPanel(QWidget):
             <li><strong>Min (Minimum):</strong> The fastest execution time recorded. It represents the best-case scenario under zero system load.</li>
             <li><strong>Max (Maximum):</strong> The slowest execution time recorded. It identifies worst-case bottlenecks, spikes, or resource contention.</li>
             <li><strong>Average (Mean):</strong> Total execution time divided by the number of slices. It shows general performance but is heavily skewed by extreme outliers.</li>
+            <li><strong>TrimMean(5%):</strong> Average after removing the fastest 5% and slowest 5% slices. It reflects typical performance while reducing outlier impact.</li>
+            <li><strong>P50 (Median):</strong> The midpoint latency where half of slices are faster and half are slower. It captures typical-case behaviour.</li>
             <li><strong>P95 (95th Percentile):</strong> The threshold under which 95% of all slices execute. It is the best metric for user experience because it ignores rare anomalies while capturing real-world slowdowns.</li>
         </ul>
     </section>
 
-  <section>
+    <section class=\"report-card\">
     <h2>Core Utilisation (excl. IDLE/TICK)</h2>
     <table>
       <thead><tr><th>Core</th><th>CPU %</th></tr></thead>
@@ -8069,7 +8190,7 @@ class _StatsPanel(QWidget):
     </table>
   </section>
 
-  <section>
+    <section class=\"report-card\">
     <h2>Top Tasks by CPU (excl. IDLE/TICK)</h2>
     <table>
       <thead><tr><th>Task</th><th>CPU %</th></tr></thead>
@@ -8078,6 +8199,8 @@ class _StatsPanel(QWidget):
   </section>
     {_render_exec_table(exec_rows)}
     {_render_stats_table('Inter-Arrival Time', inter_rows)}
+        <div class=\"report-foot\">Generated by BTF Viewer</div>
+    </div>
 </body>
 </html>
 """
@@ -8113,8 +8236,8 @@ class _StatsPanel(QWidget):
         sti_count = sum(1 for ev in trace.sti_events if not _is_tag_sti_channel(ev.target))
         core_rows = self._core_util_rows(trace)
         task_rows = self._task_cpu_rows(trace)
-        exec_rows = self._exec_slice_rows(trace)
-        inter_rows = self._inter_arrival_rows(trace)
+        exec_rows = self._exec_slice_rows_export(trace)
+        inter_rows = self._inter_arrival_rows_export(trace)
 
         def _us(v: object) -> str:
             return str(v).replace("µs", "us").replace("μs", "us")
@@ -8150,21 +8273,21 @@ class _StatsPanel(QWidget):
 
                 writer.writerow([])
                 writer.writerow(["Execution Time Per Slice"])
-                writer.writerow(["Task", "Runs", "CPU%", "Min", "Avg", "Max", "p95"])
+                writer.writerow(["Task", "Runs", "CPU%", "Min", "Avg", "TrimMean(5%)", "Max", "p50", "p95"])
                 if exec_rows:
-                    for name, runs, cpu, mn, avg, mx, p95 in exec_rows:
-                        writer.writerow([name, runs, f"{cpu:.1f}%", _us(mn), _us(avg), _us(mx), _us(p95)])
+                    for name, runs, cpu, mn, avg, tmean, mx, p50, p95 in exec_rows:
+                        writer.writerow([name, runs, f"{cpu:.1f}%", _us(mn), _us(avg), _us(tmean), _us(mx), _us(p50), _us(p95)])
                 else:
-                    writer.writerow(["No data", "", "", "", "", "", ""])
+                    writer.writerow(["No data", "", "", "", "", "", "", "", ""])
 
                 writer.writerow([])
                 writer.writerow(["Inter-Arrival Time"])
-                writer.writerow(["Task", "Runs", "Min", "Avg", "Max", "p95"])
+                writer.writerow(["Task", "Runs", "Min", "Avg", "TrimMean(5%)", "Max", "p50", "p95"])
                 if inter_rows:
-                    for name, runs, mn, avg, mx, p95 in inter_rows:
-                        writer.writerow([name, runs, _us(mn), _us(avg), _us(mx), _us(p95)])
+                    for name, runs, mn, avg, tmean, mx, p50, p95 in inter_rows:
+                        writer.writerow([name, runs, _us(mn), _us(avg), _us(tmean), _us(mx), _us(p50), _us(p95)])
                 else:
-                    writer.writerow(["No data", "", "", "", "", ""])
+                    writer.writerow(["No data", "", "", "", "", "", "", ""])
 
             wnd = self.window()
             if isinstance(wnd, QMainWindow):

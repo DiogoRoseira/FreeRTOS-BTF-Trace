@@ -408,18 +408,18 @@ const interArrivalStats = computed(() => {
   return rows.sort((a, b) => b.runs - a.runs || a.name.localeCompare(b.name))
 })
 
-function _csvCell(v) {
-  const s = String(v ?? '').replace(/[µμ]s/g, 'us')
-  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`
-  return s
-}
-
 function _htmlCell(v) {
   return String(v ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
+}
+
+function _csvCell(v) {
+  const s = String(v ?? '').replace(/[µμ]s/g, 'us')
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+  return s
 }
 
 function _downloadText(filename, text, mime) {
@@ -440,6 +440,10 @@ function _stamp() {
 
 function exportCsv() {
   const tr = props.trace
+  const execReportRows = _execSliceRowsForReport(tr)
+  const interReportRows = _interArrivalRowsForReport(tr)
+  const coreRows = _coreUtilRows(tr)
+  const taskRows = _taskCpuRows(tr)
   const lines = []
 
   lines.push('Summary')
@@ -462,36 +466,155 @@ function exportCsv() {
   }
 
   lines.push('')
+  lines.push('Core Utilisation (excl. IDLE/TICK)')
+  lines.push('Core,CPU %')
+  if (coreRows.length > 0) {
+    for (const r of coreRows) {
+      lines.push(`${_csvCell(r.core)},${_csvCell(`${r.pct}%`)}`)
+    }
+  } else {
+    lines.push('No data,')
+  }
+
+  lines.push('')
+  lines.push('Top Tasks by CPU (excl. IDLE/TICK)')
+  lines.push('Task,CPU %')
+  if (taskRows.length > 0) {
+    for (const r of taskRows) {
+      lines.push(`${_csvCell(r.name)},${_csvCell(`${r.pct}%`)}`)
+    }
+  } else {
+    lines.push('No data,')
+  }
+
+  lines.push('')
   lines.push('Execution Time Per Slice')
-  lines.push('Task,Runs,CPU%,Min,Avg,Max,p95')
-  for (const r of execSliceStats.value) {
+  lines.push('Task,Runs,CPU%,Min,Avg,TrimMean(5%),Max,p50,p95')
+  for (const r of execReportRows) {
     lines.push([
       _csvCell(r.name),
       _csvCell(r.runs),
       _csvCell(`${r.cpuPct.toFixed(1)}%`),
       _csvCell(r.min),
       _csvCell(r.avg),
+      _csvCell(r.trimMean),
       _csvCell(r.max),
+      _csvCell(r.p50),
       _csvCell(r.p95),
     ].join(','))
   }
 
   lines.push('')
   lines.push('Inter-Arrival Time')
-  lines.push('Task,Runs,Min,Avg,Max,p95')
-  for (const r of interArrivalStats.value) {
+  lines.push('Task,Runs,Min,Avg,TrimMean(5%),Max,p50,p95')
+  for (const r of interReportRows) {
     lines.push([
       _csvCell(r.name),
       _csvCell(r.runs),
       _csvCell(r.min),
       _csvCell(r.avg),
+      _csvCell(r.trimMean),
       _csvCell(r.max),
+      _csvCell(r.p50),
       _csvCell(r.p95),
     ].join(','))
   }
 
-  // Prefix BOM so Excel on non-UTF8 locales decodes UTF-8 CSV correctly.
   _downloadText(`statistics-${_stamp()}.csv`, `\uFEFF${lines.join('\n')}`, 'text/csv;charset=utf-8')
+}
+
+function _summarizeSamplesReport(samples, scale) {
+  if (!samples || samples.length === 0) return null
+  const sorted = [...samples].sort((a, b) => a - b)
+  const n = sorted.length
+  const p50Idx = Math.min(n - 1, Math.ceil(n * 0.50) - 1)
+  const p95Idx = Math.min(n - 1, Math.ceil(n * 0.95) - 1)
+  const sum = sorted.reduce((a, b) => a + b, 0)
+  const trimCount = Math.floor(n * 0.05)
+  const trimVals = (trimCount * 2) < n ? sorted.slice(trimCount, n - trimCount) : sorted
+  const trimSum = trimVals.reduce((a, b) => a + b, 0)
+  return {
+    min: formatTime(sorted[0], scale),
+    avg: formatTime(Math.round(sum / n), scale),
+    trimMean: formatTime(Math.round(trimSum / trimVals.length), scale),
+    max: formatTime(sorted[n - 1], scale),
+    p50: formatTime(sorted[p50Idx], scale),
+    p95: formatTime(sorted[p95Idx], scale),
+  }
+}
+
+function _execSliceRowsForReport(tr) {
+  if (!tr || !tr.segByMergeKey) return []
+  const scale = tr.timeScale
+  const total = tr.timeMax - tr.timeMin
+  const rows = []
+
+  for (const [mk, segs] of tr.segByMergeKey) {
+    if (!segs || segs.length === 0) continue
+    const repr = tr.taskRepr.get(mk) || mk
+    const { name } = parseTaskName(repr)
+    if (isIdleTaskName(name) || name === 'TICK') continue
+
+    const samples = []
+    for (const s of segs) {
+      const d = s.end - s.start
+      if (d > 0) samples.push(d)
+    }
+    const summary = _summarizeSamplesReport(samples, scale)
+    if (!summary) continue
+    const taskTotal = samples.reduce((a, b) => a + b, 0)
+
+    rows.push({
+      mk,
+      name: taskDisplayName(repr),
+      runs: samples.length,
+      cpuPct: total > 0 ? (100.0 * taskTotal / total) : 0,
+      min: summary.min,
+      avg: summary.avg,
+      trimMean: summary.trimMean,
+      max: summary.max,
+      p50: summary.p50,
+      p95: summary.p95,
+    })
+  }
+
+  return rows.sort((a, b) => b.runs - a.runs || a.name.localeCompare(b.name))
+}
+
+function _interArrivalRowsForReport(tr) {
+  if (!tr || !tr.segByMergeKey) return []
+  const scale = tr.timeScale
+  const rows = []
+
+  for (const [mk, segs] of tr.segByMergeKey) {
+    if (!segs || segs.length < 2) continue
+    const repr = tr.taskRepr.get(mk) || mk
+    const { name } = parseTaskName(repr)
+    if (isIdleTaskName(name) || name === 'TICK') continue
+
+    const starts = [...segs].map(s => s.start).sort((a, b) => a - b)
+    const samples = []
+    for (let i = 1; i < starts.length; i++) {
+      const d = starts[i] - starts[i - 1]
+      if (d > 0) samples.push(d)
+    }
+    const summary = _summarizeSamplesReport(samples, scale)
+    if (!summary) continue
+
+    rows.push({
+      mk,
+      name: taskDisplayName(repr),
+      runs: starts.length,
+      min: summary.min,
+      avg: summary.avg,
+      trimMean: summary.trimMean,
+      max: summary.max,
+      p50: summary.p50,
+      p95: summary.p95,
+    })
+  }
+
+  return rows.sort((a, b) => b.runs - a.runs || a.name.localeCompare(b.name))
 }
 
 function _renderHtmlTable(title, rows, includeCpu = false) {
@@ -504,7 +627,20 @@ function _renderHtmlTable(title, rows, includeCpu = false) {
       : `<tr><td>${_htmlCell(r.name)}</td><td>${_htmlCell(r.runs)}</td><td>${_htmlCell(r.min)}</td><td>${_htmlCell(r.avg)}</td><td>${_htmlCell(r.max)}</td><td>${_htmlCell(r.p95)}</td></tr>`,
     ).join('')
     : `<tr><td colspan="${includeCpu ? 7 : 6}" class="empty">No data</td></tr>`
-  return `<section><h2>${_htmlCell(title)}</h2><table><thead>${head}</thead><tbody>${body}</tbody></table></section>`
+  return `<section class="report-card"><h2>${_htmlCell(title)}</h2><table><thead>${head}</thead><tbody>${body}</tbody></table></section>`
+}
+
+function _renderHtmlTableReport(title, rows, includeCpu = false) {
+  const head = includeCpu
+    ? '<tr><th>Task</th><th>Runs</th><th>CPU%</th><th>Min</th><th>Avg</th><th>TrimMean(5%)</th><th>Max</th><th>p50</th><th>p95</th></tr>'
+    : '<tr><th>Task</th><th>Runs</th><th>Min</th><th>Avg</th><th>TrimMean(5%)</th><th>Max</th><th>p50</th><th>p95</th></tr>'
+  const body = rows.length
+    ? rows.map(r => includeCpu
+      ? `<tr><td>${_htmlCell(r.name)}</td><td>${_htmlCell(r.runs)}</td><td>${_htmlCell(r.cpuPct.toFixed(1))}%</td><td>${_htmlCell(r.min)}</td><td>${_htmlCell(r.avg)}</td><td>${_htmlCell(r.trimMean)}</td><td>${_htmlCell(r.max)}</td><td>${_htmlCell(r.p50)}</td><td>${_htmlCell(r.p95)}</td></tr>`
+      : `<tr><td>${_htmlCell(r.name)}</td><td>${_htmlCell(r.runs)}</td><td>${_htmlCell(r.min)}</td><td>${_htmlCell(r.avg)}</td><td>${_htmlCell(r.trimMean)}</td><td>${_htmlCell(r.max)}</td><td>${_htmlCell(r.p50)}</td><td>${_htmlCell(r.p95)}</td></tr>`,
+    ).join('')
+    : `<tr><td colspan="${includeCpu ? 9 : 8}" class="empty">No data</td></tr>`
+  return `<section class="report-card"><h2>${_htmlCell(title)}</h2><table><thead>${head}</thead><tbody>${body}</tbody></table></section>`
 }
 
 function _coreUtilRows(tr) {
@@ -551,10 +687,12 @@ function _taskCpuRows(tr) {
 function exportHtml() {
   const tr = props.trace
   const range = rangeStats.value
+  const execReportRows = _execSliceRowsForReport(tr)
+  const interReportRows = _interArrivalRowsForReport(tr)
   const coreRows = _coreUtilRows(tr)
   const taskRows = _taskCpuRows(tr)
   const rangeHtml = range
-    ? `<section><h2>Cursor Range</h2><table><tbody>
+    ? `<section class="report-card"><h2>Cursor Range</h2><table><tbody>
         <tr><th>Span</th><td>${_htmlCell(range.span)}</td></tr>
         <tr><th>Slices</th><td>${_htmlCell(range.switches)}</td></tr>
         ${range.topTask ? `<tr><th>Top task</th><td>${_htmlCell(`${range.topTask} (${range.topPct}%)`)}</td></tr>` : ''}
@@ -563,11 +701,11 @@ function exportHtml() {
         ${range.dMax ? `<tr><th>Seg max</th><td>${_htmlCell(range.dMax)}</td></tr>` : ''}
       </tbody></table></section>`
     : ''
-  const coreHtml = `<section><h2>Core Utilisation (excl. IDLE/TICK)</h2><table><thead><tr><th>Core</th><th>CPU %</th></tr></thead><tbody>${coreRows.length
+  const coreHtml = `<section class="report-card"><h2>Core Utilisation (excl. IDLE/TICK)</h2><table><thead><tr><th>Core</th><th>CPU %</th></tr></thead><tbody>${coreRows.length
     ? coreRows.map(r => `<tr><td>${_htmlCell(r.core)}</td><td>${_htmlCell(r.pct)}%</td></tr>`).join('')
     : '<tr><td colspan="2" class="empty">No data</td></tr>'
   }</tbody></table></section>`
-  const taskHtml = `<section><h2>Top Tasks by CPU (excl. IDLE/TICK)</h2><table><thead><tr><th>Task</th><th>CPU %</th></tr></thead><tbody>${taskRows.length
+  const taskHtml = `<section class="report-card"><h2>Top Tasks by CPU (excl. IDLE/TICK)</h2><table><thead><tr><th>Task</th><th>CPU %</th></tr></thead><tbody>${taskRows.length
     ? taskRows.map(r => `<tr><td>${_htmlCell(r.name)}</td><td>${_htmlCell(r.pct)}%</td></tr>`).join('')
     : '<tr><td colspan="2" class="empty">No data</td></tr>'
   }</tbody></table></section>`
@@ -578,33 +716,91 @@ function exportHtml() {
   <meta charset="utf-8" />
   <title>BTF Statistics Report</title>
   <style>
-    body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; color: #1e1e1e; }
-    h1 { margin: 0 0 4px 0; }
-    .sub { color: #666; margin-bottom: 16px; }
-    section { margin: 16px 0; }
-    .notes { background: #f8fafc; border: 1px solid #d8dde6; border-radius: 8px; padding: 10px 12px; max-width: 980px; }
+    :root {
+      --bg: #e9edf3;
+      --paper: #ffffff;
+      --ink: #182230;
+      --muted: #5f6f82;
+      --line: #d9e0ea;
+      --line-strong: #c8d2e0;
+      --header: #16324f;
+      --accent: #2a6fb2;
+      --stripe: #f7f9fc;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 28px;
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      color: var(--ink);
+      background: radial-gradient(circle at top right, #f6f8fb 0%, var(--bg) 52%, #dde4ee 100%);
+    }
+    .report { max-width: 1160px; margin: 0 auto; }
+    .report-head {
+      background: linear-gradient(135deg, var(--header) 0%, #21496f 100%);
+      color: #f3f7fd;
+      border-radius: 14px;
+      padding: 20px 24px;
+      box-shadow: 0 10px 28px rgba(17, 44, 69, 0.24);
+      margin-bottom: 18px;
+    }
+    h1 { margin: 0; font-size: 28px; letter-spacing: 0.2px; }
+    .sub { margin-top: 6px; color: #cfe1f7; font-size: 13px; }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .kpi {
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 14px;
+      box-shadow: 0 2px 8px rgba(30, 60, 90, 0.06);
+    }
+    .kpi .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; }
+    .kpi .v { margin-top: 4px; font-size: 20px; font-weight: 700; color: #0f2b47; }
+    .report-card {
+      margin: 14px 0;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 14px 14px;
+      box-shadow: 0 2px 10px rgba(30, 60, 90, 0.06);
+    }
+    h2 { margin: 0 0 10px 0; color: #123355; font-size: 17px; }
+    .notes { border-left: 4px solid var(--accent); }
     .notes ul { margin: 8px 0 0 18px; padding: 0; }
     .notes li { margin: 6px 0; line-height: 1.45; }
-    table { border-collapse: collapse; width: 100%; max-width: 980px; }
-    th, td { border: 1px solid #ddd; padding: 6px 8px; font-size: 13px; text-align: right; }
+    table { border-collapse: separate; border-spacing: 0; width: 100%; }
+    th, td { border-bottom: 1px solid var(--line); padding: 8px 10px; font-size: 13px; text-align: right; }
     th:first-child, td:first-child { text-align: left; }
-    thead th { background: #f2f4f7; }
-    .empty { text-align: center !important; color: #666; }
+    thead th {
+      background: #f1f5fb;
+      color: #284563;
+      font-weight: 600;
+      border-top: 1px solid var(--line-strong);
+      border-bottom: 1px solid var(--line-strong);
+    }
+    tbody tr:nth-child(even) td { background: var(--stripe); }
+    .empty { text-align: center !important; color: var(--muted); }
+    .report-foot { margin-top: 14px; color: var(--muted); font-size: 12px; text-align: right; }
   </style>
 </head>
 <body>
-  <h1>BTF Statistics Report</h1>
-  <div class="sub">Generated: ${_htmlCell(new Date().toLocaleString())}</div>
-  <section>
-    <h2>Summary</h2>
-    <table><tbody>
-      <tr><th>Span</th><td>${_htmlCell(spanStr.value)}</td></tr>
-      <tr><th>Tasks</th><td>${_htmlCell(tr.tasks.length)}</td></tr>
-      <tr><th>Segments</th><td>${_htmlCell(tr.segments.length.toLocaleString())}</td></tr>
-      <tr><th>STI Events</th><td>${_htmlCell(tr.stiEvents.length.toLocaleString())}</td></tr>
-    </tbody></table>
-  </section>
-  <section class="notes">
+  <div class="report">
+    <header class="report-head">
+      <h1>BTF Statistics Report</h1>
+      <div class="sub">Generated: ${_htmlCell(new Date().toLocaleString())}</div>
+    </header>
+    <section class="kpi-grid">
+      <article class="kpi"><div class="k">Span</div><div class="v">${_htmlCell(spanStr.value)}</div></article>
+      <article class="kpi"><div class="k">Tasks</div><div class="v">${_htmlCell(tr.tasks.length.toLocaleString())}</div></article>
+      <article class="kpi"><div class="k">Segments</div><div class="v">${_htmlCell(tr.segments.length.toLocaleString())}</div></article>
+      <article class="kpi"><div class="k">STI Events</div><div class="v">${_htmlCell(tr.stiEvents.length.toLocaleString())}</div></article>
+    </section>
+    <section class="report-card notes">
     <h2>Statistics Notes</h2>
     <ul>
       <li><strong>Execution Time Per Slice:</strong> Duration of each continuous task run between two context switches. Lower and tighter values indicate more predictable execution.</li>
@@ -612,14 +808,18 @@ function exportHtml() {
       <li><strong>Min (Minimum):</strong> The fastest execution time recorded. It represents the best-case scenario under zero system load.</li>
       <li><strong>Max (Maximum):</strong> The slowest execution time recorded. It identifies worst-case bottlenecks, spikes, or resource contention.</li>
       <li><strong>Average (Mean):</strong> Total execution time divided by the number of slices. It shows general performance but is heavily skewed by extreme outliers.</li>
+      <li><strong>TrimMean(5%):</strong> Average after removing the fastest 5% and slowest 5% slices. It reflects typical performance while reducing outlier impact.</li>
+      <li><strong>P50 (Median):</strong> The midpoint latency where half of slices are faster and half are slower. It captures typical-case behaviour.</li>
       <li><strong>P95 (95th Percentile):</strong> The threshold under which 95% of all slices execute. It is the best metric for user experience because it ignores rare anomalies while capturing real-world slowdowns.</li>
     </ul>
-  </section>
-  ${rangeHtml}
-  ${coreHtml}
-  ${taskHtml}
-  ${_renderHtmlTable('Execution Time Per Slice', execSliceStats.value, true)}
-  ${_renderHtmlTable('Inter-Arrival Time', interArrivalStats.value)}
+    </section>
+    ${rangeHtml}
+    ${coreHtml}
+    ${taskHtml}
+    ${_renderHtmlTableReport('Execution Time Per Slice', execReportRows, true)}
+    ${_renderHtmlTableReport('Inter-Arrival Time', interReportRows)}
+    <div class="report-foot">Generated by BTF Viewer</div>
+  </div>
 </body>
 </html>`
 
