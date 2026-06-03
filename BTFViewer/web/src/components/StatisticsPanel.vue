@@ -20,56 +20,6 @@
       </div>
     </div>
 
-    <!-- Range stats (from cursors) -->
-    <template v-if="rangeStats">
-      <div class="stats-sep" />
-      <div class="stats-section-title">
-        Cursor Range
-      </div>
-      <div class="summary-row">
-        <span class="summary-key">Span</span>
-        <span class="summary-val">{{ rangeStats.span }}</span>
-      </div>
-      <div class="summary-row">
-        <span class="summary-key">Slices</span>
-        <span class="summary-val">{{ rangeStats.switches }}</span>
-      </div>
-      <div
-        v-if="rangeStats.topTask"
-        class="summary-row"
-      >
-        <span class="summary-key">Top task</span>
-        <span class="summary-val">{{ rangeStats.topTask }} ({{ rangeStats.topPct }}%)</span>
-      </div>
-      <div
-        v-if="rangeStats.dMin"
-        class="summary-row"
-      >
-        <span class="summary-key">Seg min</span>
-        <span class="summary-val">{{ rangeStats.dMin }}</span>
-      </div>
-      <div
-        v-if="rangeStats.dMax"
-        class="summary-row"
-      >
-        <span class="summary-key">Seg max</span>
-        <span class="summary-val">{{ rangeStats.dMax }}</span>
-      </div>
-      <div
-        v-if="rangeStats.dAvg"
-        class="summary-row"
-      >
-        <span class="summary-key">Seg avg</span>
-        <span class="summary-val">{{ rangeStats.dAvg }}</span>
-      </div>
-    </template>
-    <template v-else>
-      <div class="stats-sep" />
-      <div class="range-hint">
-        Place 2+ cursors to measure range
-      </div>
-    </template>
-
     <!-- Core utilization -->
     <template v-if="trace.coreNames && trace.coreNames.length > 0">
       <div class="stats-sep" />
@@ -159,6 +109,150 @@
         <span class="task-stat-pct">{{ t.pct.toFixed(1) }}%</span>
       </div>
     </template>
+
+    <!-- Execution time per slice -->
+    <div class="stats-sep" />
+    <div
+      class="stats-section-title collapsible"
+      @click="execSliceCollapsed = !execSliceCollapsed"
+    >
+      <svg
+        class="chevron"
+        :class="{ collapsed: execSliceCollapsed }"
+        viewBox="0 0 10 10"
+        width="10"
+        height="10"
+      >
+        <polyline
+          points="2,3 5,7 8,3"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
+      Execution Time Per Slice
+    </div>
+    <template v-if="!execSliceCollapsed">
+      <div
+        v-if="execSliceStats.length === 0"
+        class="range-hint"
+      >
+        No user-task slices found
+      </div>
+      <div
+        v-else
+        class="stats-table-wrap"
+      >
+        <table class="stats-table">
+          <thead>
+            <tr>
+              <th>Task</th>
+              <th>Runs</th>
+              <th>CPU%</th>
+              <th>Min</th>
+              <th>Avg</th>
+              <th>Max</th>
+              <th>p95</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="row in execSliceStats"
+              :key="row.mk"
+            >
+              <td class="task-col">{{ row.name }}</td>
+              <td>{{ row.runs }}</td>
+              <td>{{ row.cpuPct.toFixed(1) }}%</td>
+              <td>{{ row.min }}</td>
+              <td>{{ row.avg }}</td>
+              <td>{{ row.max }}</td>
+              <td>{{ row.p95 }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </template>
+
+    <!-- Inter-arrival time -->
+    <div class="stats-sep" />
+    <div
+      class="stats-section-title collapsible"
+      @click="interArrivalCollapsed = !interArrivalCollapsed"
+    >
+      <svg
+        class="chevron"
+        :class="{ collapsed: interArrivalCollapsed }"
+        viewBox="0 0 10 10"
+        width="10"
+        height="10"
+      >
+        <polyline
+          points="2,3 5,7 8,3"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
+      Inter-Arrival Time
+    </div>
+    <template v-if="!interArrivalCollapsed">
+      <div
+        v-if="interArrivalStats.length === 0"
+        class="range-hint"
+      >
+        Need at least 2 activations per task
+      </div>
+      <div
+        v-else
+        class="stats-table-wrap"
+      >
+        <table class="stats-table">
+          <thead>
+            <tr>
+              <th>Task</th>
+              <th>Runs</th>
+              <th>Min</th>
+              <th>Avg</th>
+              <th>Max</th>
+              <th>p95</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="row in interArrivalStats"
+              :key="row.mk"
+            >
+              <td class="task-col">{{ row.name }}</td>
+              <td>{{ row.runs }}</td>
+              <td>{{ row.min }}</td>
+              <td>{{ row.avg }}</td>
+              <td>{{ row.max }}</td>
+              <td>{{ row.p95 }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </template>
+
+    <!-- Export -->
+    <div class="stats-export-row">
+      <button
+        class="action-btn"
+        @click="exportCsv"
+      >
+        Export CSV
+      </button>
+      <button
+        class="action-btn"
+        @click="exportHtml"
+      >
+        Export HTML
+      </button>
+    </div>
   </div>
 </template>
 
@@ -172,8 +266,10 @@ const props = defineProps({
   cursors: { type: Array, default: () => [] },
 })
 
-const coresCollapsed = ref(true)
+const coresCollapsed = ref(false)
 const tasksCollapsed = ref(false)
+const execSliceCollapsed = ref(false)
+const interArrivalCollapsed = ref(false)
 
 function clampPct(v) { return Math.max(0, Math.min(100, v)).toFixed(1) }
 
@@ -223,6 +319,312 @@ const topTasks = computed(() => {
       pct: 100.0 * t / total,
     }))
 })
+
+function _summarizeSamples(samples, scale) {
+  if (!samples || samples.length === 0) return null
+  const sorted = [...samples].sort((a, b) => a - b)
+  const n = sorted.length
+  const sum = sorted.reduce((a, b) => a + b, 0)
+  const p95Idx = Math.min(n - 1, Math.ceil(n * 0.95) - 1)
+  return {
+    min: formatTime(sorted[0], scale),
+    avg: formatTime(Math.round(sum / n), scale),
+    max: formatTime(sorted[n - 1], scale),
+    p95: formatTime(sorted[p95Idx], scale),
+  }
+}
+
+const execSliceStats = computed(() => {
+  if (execSliceCollapsed.value) return []
+  const tr = props.trace
+  if (!tr || !tr.segByMergeKey) return []
+  const scale = tr.timeScale
+  const total = tr.timeMax - tr.timeMin
+  const rows = []
+
+  for (const [mk, segs] of tr.segByMergeKey) {
+    if (!segs || segs.length === 0) continue
+    const repr = tr.taskRepr.get(mk) || mk
+    const { name } = parseTaskName(repr)
+    if (isIdleTaskName(name) || name === 'TICK') continue
+
+    const samples = []
+    for (const s of segs) {
+      const d = s.end - s.start
+      if (d > 0) samples.push(d)
+    }
+    const summary = _summarizeSamples(samples, scale)
+    if (!summary) continue
+    const taskTotal = samples.reduce((a, b) => a + b, 0)
+
+    rows.push({
+      mk,
+      name: taskDisplayName(repr),
+      runs: samples.length,
+      cpuPct: total > 0 ? (100.0 * taskTotal / total) : 0,
+      min: summary.min,
+      avg: summary.avg,
+      max: summary.max,
+      p95: summary.p95,
+    })
+  }
+
+  return rows.sort((a, b) => b.runs - a.runs || a.name.localeCompare(b.name))
+})
+
+const interArrivalStats = computed(() => {
+  if (interArrivalCollapsed.value) return []
+  const tr = props.trace
+  if (!tr || !tr.segByMergeKey) return []
+  const scale = tr.timeScale
+  const rows = []
+
+  for (const [mk, segs] of tr.segByMergeKey) {
+    if (!segs || segs.length < 2) continue
+    const repr = tr.taskRepr.get(mk) || mk
+    const { name } = parseTaskName(repr)
+    if (isIdleTaskName(name) || name === 'TICK') continue
+
+    const starts = [...segs].map(s => s.start).sort((a, b) => a - b)
+    const samples = []
+    for (let i = 1; i < starts.length; i++) {
+      const d = starts[i] - starts[i - 1]
+      if (d > 0) samples.push(d)
+    }
+    const summary = _summarizeSamples(samples, scale)
+    if (!summary) continue
+
+    rows.push({
+      mk,
+      name: taskDisplayName(repr),
+      runs: starts.length,
+      min: summary.min,
+      avg: summary.avg,
+      max: summary.max,
+      p95: summary.p95,
+    })
+  }
+
+  return rows.sort((a, b) => b.runs - a.runs || a.name.localeCompare(b.name))
+})
+
+function _csvCell(v) {
+  const s = String(v ?? '').replace(/[µμ]s/g, 'us')
+  if (/[",\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+  return s
+}
+
+function _htmlCell(v) {
+  return String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function _downloadText(filename, text, mime) {
+  const blob = new Blob([text], { type: mime })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function _stamp() {
+  const d = new Date()
+  const pad = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+}
+
+function exportCsv() {
+  const tr = props.trace
+  const lines = []
+
+  lines.push('Summary')
+  lines.push('Metric,Value')
+  lines.push(`Span,${_csvCell(spanStr.value)}`)
+  lines.push(`Tasks,${_csvCell(tr.tasks.length)}`)
+  lines.push(`Segments,${_csvCell(tr.segments.length)}`)
+  lines.push(`STI Events,${_csvCell(tr.stiEvents.length)}`)
+
+  if (rangeStats.value) {
+    lines.push('')
+    lines.push('Cursor Range')
+    lines.push('Metric,Value')
+    lines.push(`Span,${_csvCell(rangeStats.value.span)}`)
+    lines.push(`Slices,${_csvCell(rangeStats.value.switches)}`)
+    if (rangeStats.value.topTask) lines.push(`Top task,${_csvCell(`${rangeStats.value.topTask} (${rangeStats.value.topPct}%)`)}`)
+    if (rangeStats.value.dMin) lines.push(`Seg min,${_csvCell(rangeStats.value.dMin)}`)
+    if (rangeStats.value.dAvg) lines.push(`Seg avg,${_csvCell(rangeStats.value.dAvg)}`)
+    if (rangeStats.value.dMax) lines.push(`Seg max,${_csvCell(rangeStats.value.dMax)}`)
+  }
+
+  lines.push('')
+  lines.push('Execution Time Per Slice')
+  lines.push('Task,Runs,CPU%,Min,Avg,Max,p95')
+  for (const r of execSliceStats.value) {
+    lines.push([
+      _csvCell(r.name),
+      _csvCell(r.runs),
+      _csvCell(`${r.cpuPct.toFixed(1)}%`),
+      _csvCell(r.min),
+      _csvCell(r.avg),
+      _csvCell(r.max),
+      _csvCell(r.p95),
+    ].join(','))
+  }
+
+  lines.push('')
+  lines.push('Inter-Arrival Time')
+  lines.push('Task,Runs,Min,Avg,Max,p95')
+  for (const r of interArrivalStats.value) {
+    lines.push([
+      _csvCell(r.name),
+      _csvCell(r.runs),
+      _csvCell(r.min),
+      _csvCell(r.avg),
+      _csvCell(r.max),
+      _csvCell(r.p95),
+    ].join(','))
+  }
+
+  // Prefix BOM so Excel on non-UTF8 locales decodes UTF-8 CSV correctly.
+  _downloadText(`statistics-${_stamp()}.csv`, `\uFEFF${lines.join('\n')}`, 'text/csv;charset=utf-8')
+}
+
+function _renderHtmlTable(title, rows, includeCpu = false) {
+  const head = includeCpu
+    ? '<tr><th>Task</th><th>Runs</th><th>CPU%</th><th>Min</th><th>Avg</th><th>Max</th><th>p95</th></tr>'
+    : '<tr><th>Task</th><th>Runs</th><th>Min</th><th>Avg</th><th>Max</th><th>p95</th></tr>'
+  const body = rows.length
+    ? rows.map(r => includeCpu
+      ? `<tr><td>${_htmlCell(r.name)}</td><td>${_htmlCell(r.runs)}</td><td>${_htmlCell(r.cpuPct.toFixed(1))}%</td><td>${_htmlCell(r.min)}</td><td>${_htmlCell(r.avg)}</td><td>${_htmlCell(r.max)}</td><td>${_htmlCell(r.p95)}</td></tr>`
+      : `<tr><td>${_htmlCell(r.name)}</td><td>${_htmlCell(r.runs)}</td><td>${_htmlCell(r.min)}</td><td>${_htmlCell(r.avg)}</td><td>${_htmlCell(r.max)}</td><td>${_htmlCell(r.p95)}</td></tr>`,
+    ).join('')
+    : `<tr><td colspan="${includeCpu ? 7 : 6}" class="empty">No data</td></tr>`
+  return `<section><h2>${_htmlCell(title)}</h2><table><thead>${head}</thead><tbody>${body}</tbody></table></section>`
+}
+
+function _coreUtilRows(tr) {
+  if (!tr || !tr.coreNames || tr.coreNames.length === 0) return []
+  const total = tr.timeMax - tr.timeMin
+  if (total <= 0) return []
+  return tr.coreNames.map(core => {
+    const segs = tr.coreSegs.get(core) || []
+    let active = 0
+    for (const s of segs) {
+      const { name } = parseTaskName(s.task)
+      if (name === 'TICK' || isIdleTaskName(name)) continue
+      active += s.end - s.start
+    }
+    return {
+      core,
+      pct: (100.0 * active / total).toFixed(1),
+    }
+  })
+}
+
+function _taskCpuRows(tr) {
+  if (!tr || !tr.segByMergeKey) return []
+  const total = tr.timeMax - tr.timeMin
+  if (total <= 0) return []
+  const accum = new Map()
+  for (const [mk, segs] of tr.segByMergeKey) {
+    const repr = tr.taskRepr.get(mk) || mk
+    const { name } = parseTaskName(repr)
+    if (isIdleTaskName(name) || name === 'TICK') continue
+    let t = 0
+    for (const s of segs) t += s.end - s.start
+    if (t > 0) accum.set(mk, t)
+  }
+  return [...accum.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([mk, t]) => ({
+      name: taskDisplayName(tr.taskRepr.get(mk) || mk),
+      pct: (100.0 * t / total).toFixed(1),
+    }))
+}
+
+function exportHtml() {
+  const tr = props.trace
+  const range = rangeStats.value
+  const coreRows = _coreUtilRows(tr)
+  const taskRows = _taskCpuRows(tr)
+  const rangeHtml = range
+    ? `<section><h2>Cursor Range</h2><table><tbody>
+        <tr><th>Span</th><td>${_htmlCell(range.span)}</td></tr>
+        <tr><th>Slices</th><td>${_htmlCell(range.switches)}</td></tr>
+        ${range.topTask ? `<tr><th>Top task</th><td>${_htmlCell(`${range.topTask} (${range.topPct}%)`)}</td></tr>` : ''}
+        ${range.dMin ? `<tr><th>Seg min</th><td>${_htmlCell(range.dMin)}</td></tr>` : ''}
+        ${range.dAvg ? `<tr><th>Seg avg</th><td>${_htmlCell(range.dAvg)}</td></tr>` : ''}
+        ${range.dMax ? `<tr><th>Seg max</th><td>${_htmlCell(range.dMax)}</td></tr>` : ''}
+      </tbody></table></section>`
+    : ''
+  const coreHtml = `<section><h2>Core Utilisation (excl. IDLE/TICK)</h2><table><thead><tr><th>Core</th><th>CPU %</th></tr></thead><tbody>${coreRows.length
+    ? coreRows.map(r => `<tr><td>${_htmlCell(r.core)}</td><td>${_htmlCell(r.pct)}%</td></tr>`).join('')
+    : '<tr><td colspan="2" class="empty">No data</td></tr>'
+  }</tbody></table></section>`
+  const taskHtml = `<section><h2>Top Tasks by CPU (excl. IDLE/TICK)</h2><table><thead><tr><th>Task</th><th>CPU %</th></tr></thead><tbody>${taskRows.length
+    ? taskRows.map(r => `<tr><td>${_htmlCell(r.name)}</td><td>${_htmlCell(r.pct)}%</td></tr>`).join('')
+    : '<tr><td colspan="2" class="empty">No data</td></tr>'
+  }</tbody></table></section>`
+
+  const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>BTF Statistics Report</title>
+  <style>
+    body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; color: #1e1e1e; }
+    h1 { margin: 0 0 4px 0; }
+    .sub { color: #666; margin-bottom: 16px; }
+    section { margin: 16px 0; }
+    .notes { background: #f8fafc; border: 1px solid #d8dde6; border-radius: 8px; padding: 10px 12px; max-width: 980px; }
+    .notes ul { margin: 8px 0 0 18px; padding: 0; }
+    .notes li { margin: 6px 0; line-height: 1.45; }
+    table { border-collapse: collapse; width: 100%; max-width: 980px; }
+    th, td { border: 1px solid #ddd; padding: 6px 8px; font-size: 13px; text-align: right; }
+    th:first-child, td:first-child { text-align: left; }
+    thead th { background: #f2f4f7; }
+    .empty { text-align: center !important; color: #666; }
+  </style>
+</head>
+<body>
+  <h1>BTF Statistics Report</h1>
+  <div class="sub">Generated: ${_htmlCell(new Date().toLocaleString())}</div>
+  <section>
+    <h2>Summary</h2>
+    <table><tbody>
+      <tr><th>Span</th><td>${_htmlCell(spanStr.value)}</td></tr>
+      <tr><th>Tasks</th><td>${_htmlCell(tr.tasks.length)}</td></tr>
+      <tr><th>Segments</th><td>${_htmlCell(tr.segments.length.toLocaleString())}</td></tr>
+      <tr><th>STI Events</th><td>${_htmlCell(tr.stiEvents.length.toLocaleString())}</td></tr>
+    </tbody></table>
+  </section>
+  <section class="notes">
+    <h2>Statistics Notes</h2>
+    <ul>
+      <li><strong>Execution Time Per Slice:</strong> Duration of each continuous task run between two context switches. Lower and tighter values indicate more predictable execution.</li>
+      <li><strong>Inter-Arrival Time:</strong> Time between consecutive activations of the same task (slice start to next slice start). It reflects activation cadence and jitter.</li>
+      <li><strong>Min (Minimum):</strong> The fastest execution time recorded. It represents the best-case scenario under zero system load.</li>
+      <li><strong>Max (Maximum):</strong> The slowest execution time recorded. It identifies worst-case bottlenecks, spikes, or resource contention.</li>
+      <li><strong>Average (Mean):</strong> Total execution time divided by the number of slices. It shows general performance but is heavily skewed by extreme outliers.</li>
+      <li><strong>P95 (95th Percentile):</strong> The threshold under which 95% of all slices execute. It is the best metric for user experience because it ignores rare anomalies while capturing real-world slowdowns.</li>
+    </ul>
+  </section>
+  ${rangeHtml}
+  ${coreHtml}
+  ${taskHtml}
+  ${_renderHtmlTable('Execution Time Per Slice', execSliceStats.value, true)}
+  ${_renderHtmlTable('Inter-Arrival Time', interArrivalStats.value)}
+</body>
+</html>`
+
+  _downloadText(`statistics-${_stamp()}.html`, html, 'text/html;charset=utf-8')
+}
 
 // ---- Range statistics (from 2+ cursor positions) -----------------------
 // Computed via a debounced watcher so cursor placement never blocks the UI.
@@ -420,5 +822,73 @@ watch(() => props.cursors, (cursors) => {
   min-width: 38px;
   text-align: right;
   flex-shrink: 0;
+}
+
+.stats-table-wrap {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: auto;
+  max-height: 220px;
+}
+
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10px;
+}
+
+.stats-table th,
+.stats-table td {
+  padding: 3px 5px;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.stats-table th {
+  position: sticky;
+  top: 0;
+  background: var(--panel-bg);
+  color: var(--fg-dim);
+  font-weight: 600;
+  z-index: 1;
+}
+
+.stats-table th:first-child,
+.stats-table td.task-col {
+  text-align: left;
+}
+
+.stats-table td.task-col {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stats-table tr:last-child td {
+  border-bottom: none;
+}
+
+.stats-export-row {
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+}
+
+.action-btn {
+  flex: 1;
+  padding: 3px 8px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.action-btn:hover {
+  background: var(--tb-btn-hover);
+  color: var(--fg);
 }
 </style>

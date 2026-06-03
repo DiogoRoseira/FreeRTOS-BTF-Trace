@@ -1,5 +1,7 @@
 # BTF Trace Viewer
 
+Current version: **1.2.0** (Desktop Python app + Web app)
+
 A PyQt5-based interactive visualiser for FreeRTOS context-switch traces in **Best Trace Format** (`.btf`).
 
 ## Screenshot
@@ -20,11 +22,13 @@ A PyQt5-based interactive visualiser for FreeRTOS context-switch traces in **Bes
 - **Default zoom 2 timescale units/px** — the **1:1** toolbar button resets to 2 timescale units per pixel (for `ns` timescale, the UI shows `2 ns/px`; configurable in Settings)
 - **Zoom to cursor range** — `Ctrl+R` or the **⊡ Range** toolbar button fits the viewport exactly between cursor C1 (left/top edge) and the last cursor (right/bottom edge)
 - **Viewport culling** — only visible rows/columns and segments are rendered; no slowdown on large traces
-- **2–8 measurement cursors** — 4 by default; delta times shown on the timeline and in the status bar; maximum configurable in Settings
-- **Cursor range statistics** — when 2+ cursors are placed, the status bar shows the min/max/average segment duration within the selected range
+- **Measurement cursors** — Desktop supports 2–8 cursors (default: 4); Web supports up to 4 cursors
+- **Cursor range statistics** — with 2+ cursors, Desktop shows range stats in the status bar; Web shows them in the **Cursor / Bookmark** page
 - **Task highlight** — hover or click any task label or Legend row to highlight all its segments
 - **Dockable Legend panel** — colour swatches for every task, with a search box and the same highlight interaction
 - **Dockable Statistics panel** — per-core CPU utilisation and per-task CPU time breakdown
+- **Tag View** — inspect tag channels/events (`tag_event`, `tag0_event` … `tag7_event`) alongside task/core activity
+- **Metrics Table under Statistics Panel** — tabular Execution Time Per Slice and Inter-Arrival metrics (runs, min/avg/max/p95, CPU%)
 - **STI event markers** — software trace items rendered as coloured diamond markers
 - **Find & Jump** — search for any task name; `F3` / `Shift+F3` steps through all matching segments
 - **Bookmarks & Annotations** — mark important timestamps and attach free-text notes; persisted per trace file in `btf_viewer.rc`
@@ -51,33 +55,6 @@ python btf_viewer.py [trace.btf]
 ```
 
 A file can also be opened via **File → Open** (`Ctrl+O`) or dragged onto the window.
-
----
-
-### Web viewer (`web/`)
-
-A browser-based version of the viewer built with **Vue 3 + Vite**.
-See the **[Web Viewer — Features & Usage](#web-viewer--features--usage)** section below for full details.
-
-**Quick start:**
-
-```bash
-cd BTFViewer/web
-make                             # build dist/index.html
-open dist/index.html             # macOS — double-click on other platforms
-```
-
-**Requirements:** [Node.js](https://nodejs.org/) 18+ and npm (build-time only; not needed to run `dist/index.html`).
-
-#### macOS — install Node.js via Homebrew
-
-```bash
-brew install node
-```
-
-#### Windows / Linux
-
-Download the LTS installer from <https://nodejs.org/> or use your system package manager (`winget install OpenJS.NodeJS`, `apt install nodejs npm`, etc.).
 
 ---
 
@@ -296,7 +273,12 @@ Between 2 and 8 cursors can be placed on the timeline (default: 4; adjustable in
 
 ### Cursor Range Statistics
 
-When two or more cursors are placed, the status bar shows three aggregate values computed over all task segments that start **and** end within the cursor range:
+When two or more cursors are placed, range statistics are computed over all task segments that start **and** end within the cursor range.
+
+- **Desktop:** shown in the status bar.
+- **Web:** shown in the **Cursor / Bookmark** page.
+
+The reported values are:
 
 - **min** — shortest segment in the range
 - **max** — longest segment in the range

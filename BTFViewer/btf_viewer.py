@@ -125,6 +125,7 @@ import csv
 import datetime
 import functools
 import hashlib
+import html
 import itertools
 import json
 import math
@@ -193,6 +194,16 @@ ROW_GAP                  =   4  # Vertical gap between rows (px).
 STI_ROW_H                =  18  # Height of a collapsed STI row (px)
 STI_WAVEFORM_H           =  80  # Height of an expanded STI waveform row (px).
 STI_LINE_STYLE           = "linear"  # Default STI waveform draw style: "step" or "linear".
+
+# First-run window geometry defaults (used when btf_viewer.rc is absent).
+DEFAULT_WINDOW_WIDTH     = 1916
+DEFAULT_WINDOW_HEIGHT    = 1088
+DEFAULT_WINDOW_X         = 254
+DEFAULT_WINDOW_Y         = 47
+DEFAULT_DOCK_LAYOUT_VERSION = "7"
+# Keep empty so first run uses code-driven dock sizing/tab defaults instead
+# of a host-dependent serialized Qt dock_state blob.
+DEFAULT_DOCK_STATE_B64 = ""
 
 # Regex pattern: only tag_event and tag0_event…tag7_event channels can be expanded.
 # Uses a capturing group so the digit (if any) can be extracted for sort ordering.
@@ -7732,6 +7743,7 @@ class _StatsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._ui_font_size: int = UI_FONT_SIZE
+        self._trace: Optional["BtfTrace"] = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
@@ -7744,6 +7756,19 @@ class _StatsPanel(QWidget):
         self._ilay.addStretch()
         scroll.setWidget(self._inner)
         outer.addWidget(scroll)
+
+        exp_row = QHBoxLayout()
+        exp_row.setContentsMargins(8, 6, 8, 8)
+        exp_row.setSpacing(8)
+        self._btn_export_csv = QPushButton("Export CSV")
+        self._btn_export_csv.clicked.connect(self._export_csv)
+        self._btn_export_csv.setEnabled(False)
+        exp_row.addWidget(self._btn_export_csv)
+        self._btn_export_html = QPushButton("Export HTML")
+        self._btn_export_html.clicked.connect(self._export_html)
+        self._btn_export_html.setEnabled(False)
+        exp_row.addWidget(self._btn_export_html)
+        outer.addLayout(exp_row)
 
     def _clear(self) -> None:
         while self._ilay.count():
@@ -7774,7 +7799,383 @@ class _StatsPanel(QWidget):
         f.setFrameShape(QFrame.HLine)
         return f
 
+    def _core_util_rows(self, trace: "BtfTrace") -> List[Tuple[str, float]]:
+        total_ns = trace.time_max - trace.time_min
+        if total_ns <= 0:
+            return []
+        rows: List[Tuple[str, float]] = []
+        for core in trace.core_names:
+            segs = trace.core_segs.get(core, [])
+            active_ns = sum(
+                s.end - s.start for s in segs
+                if (_tn := _parse_task_name(s.task)[2]) != "TICK"
+                and not _is_idle_task_name(_tn)
+            )
+            rows.append((core, 100.0 * active_ns / total_ns))
+        return rows
+
+    def _task_cpu_rows(self, trace: "BtfTrace", limit: int = 10) -> List[Tuple[str, str, float]]:
+        total_ns = trace.time_max - trace.time_min
+        if total_ns <= 0:
+            return []
+        task_times: Dict[str, int] = {}
+        for mk, segs in trace.seg_map_by_merge_key.items():
+            raw = trace.task_repr.get(mk, mk)
+            _, _, tname = _parse_task_name(raw)
+            if _is_idle_task_name(tname) or tname == "TICK":
+                continue
+            task_times[mk] = sum(s.end - s.start for s in segs)
+
+        rows: List[Tuple[str, str, float]] = []
+        for mk, t_ns in sorted(task_times.items(), key=lambda kv: kv[1], reverse=True)[:limit]:
+            raw = trace.task_repr.get(mk, mk)
+            rows.append((mk, _task_display_name(raw), 100.0 * t_ns / total_ns))
+        return rows
+
+    def _summarize_samples(self, samples: List[int], scale: str) -> Optional[Tuple[str, str, str, str]]:
+        if not samples:
+            return None
+        vals = sorted(samples)
+        n = len(vals)
+        p95_idx = min(n - 1, math.ceil(n * 0.95) - 1)
+        avg = int(round(sum(vals) / n))
+        return (
+            _format_time(vals[0], scale),
+            _format_time(avg, scale),
+            _format_time(vals[-1], scale),
+            _format_time(vals[p95_idx], scale),
+        )
+
+    def _exec_slice_rows(self, trace: "BtfTrace") -> List[Tuple[str, int, float, str, str, str, str]]:
+        rows: List[Tuple[str, int, float, str, str, str, str]] = []
+        total_ns = trace.time_max - trace.time_min
+        if total_ns <= 0:
+            return rows
+        for mk, segs in trace.seg_map_by_merge_key.items():
+            if not segs:
+                continue
+            raw = trace.task_repr.get(mk, mk)
+            _, _, tname = _parse_task_name(raw)
+            if _is_idle_task_name(tname) or tname == "TICK":
+                continue
+            samples = [s.end - s.start for s in segs if (s.end - s.start) > 0]
+            summary = self._summarize_samples(samples, trace.time_scale)
+            if summary is None:
+                continue
+            mn, avg, mx, p95 = summary
+            cpu_pct = 100.0 * sum(samples) / total_ns
+            rows.append((_task_display_name(raw), len(samples), cpu_pct, mn, avg, mx, p95))
+        rows.sort(key=lambda r: (-r[2], -r[1], r[0].lower()))
+        return rows
+
+    def _inter_arrival_rows(self, trace: "BtfTrace") -> List[Tuple[str, int, str, str, str, str]]:
+        rows: List[Tuple[str, int, str, str, str, str]] = []
+        for mk, segs in trace.seg_map_by_merge_key.items():
+            if len(segs) < 2:
+                continue
+            raw = trace.task_repr.get(mk, mk)
+            _, _, tname = _parse_task_name(raw)
+            if _is_idle_task_name(tname) or tname == "TICK":
+                continue
+            starts = sorted(s.start for s in segs)
+            samples = [starts[i] - starts[i - 1] for i in range(1, len(starts)) if (starts[i] - starts[i - 1]) > 0]
+            summary = self._summarize_samples(samples, trace.time_scale)
+            if summary is None:
+                continue
+            mn, avg, mx, p95 = summary
+            rows.append((_task_display_name(raw), len(starts), mn, avg, mx, p95))
+        rows.sort(key=lambda r: (-r[1], r[0].lower()))
+        return rows
+
+    def _build_stats_table(self, rows: List[tuple], ui_fs: str, empty_hint: str,
+                           include_cpu: bool = False) -> QWidget:
+        host = QWidget()
+        lay = QVBoxLayout(host)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+
+        if not rows:
+            lay.addWidget(self._lbl(empty_hint, color="#888888", ui_fs=ui_fs))
+            return host
+
+        cols = 7 if include_cpu else 6
+        table = QTableWidget(len(rows), cols)
+        headers = ["Task", "Runs", "CPU%", "Min", "Avg", "Max", "p95"] if include_cpu \
+            else ["Task", "Runs", "Min", "Avg", "Max", "p95"]
+        table.setHorizontalHeaderLabels(headers)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.NoSelection)
+        table.setFocusPolicy(Qt.NoFocus)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setStretchLastSection(False)
+        table.setShowGrid(False)
+        table.setFrameShape(QFrame.NoFrame)
+        table.setMaximumHeight(180)
+        table.verticalHeader().setDefaultSectionSize(16)
+        table.verticalHeader().setMinimumSectionSize(14)
+        table.horizontalHeader().setFixedHeight(18)
+        table.setStyleSheet(
+            f"font-size:{ui_fs};"
+            "QTableWidget::item{border:none; padding:0px 3px;}"
+            "QHeaderView::section{border:none; background:transparent; color:#9A9A9A; padding:0px 3px;}"
+        )
+
+        for r, row in enumerate(rows):
+            if include_cpu:
+                name, runs, cpu, mn, avg, mx, p95 = row
+                vals = [name, runs, f"{cpu:.1f}%", mn, avg, mx, p95]
+            else:
+                name, runs, mn, avg, mx, p95 = row
+                vals = [name, runs, mn, avg, mx, p95]
+
+            for c, v in enumerate(vals):
+                item = QTableWidgetItem(str(v))
+                item.setToolTip(str(name) if c == 0 else "")
+                if c == 0:
+                    item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                else:
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                table.setItem(r, c, item)
+
+        table.resizeColumnsToContents()
+        table.horizontalHeader().setStretchLastSection(False)
+        p95_col = 6 if include_cpu else 5
+        table.setColumnWidth(p95_col, min(table.columnWidth(p95_col), 76))
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        table.setAlternatingRowColors(False)
+        table.setShowGrid(False)
+        table.setSortingEnabled(False)
+        table.setMinimumHeight(min(180, 20 + (len(rows) * 16)))
+        table.setMaximumHeight(220)
+        table.setWordWrap(False)
+
+        table.horizontalHeader().setStyleSheet("QHeaderView::section { border: none; }")
+        table.verticalHeader().setStyleSheet("QHeaderView::section { border: none; }")
+
+        lay.addWidget(table)
+        return host
+
+    def _export_html(self) -> None:
+        trace = self._trace
+        if trace is None:
+            return
+
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Statistics HTML",
+            f"statistics-{stamp}.html",
+            "HTML files (*.html);;All files (*)",
+        )
+        if not path:
+            return
+
+        total_ns = trace.time_max - trace.time_min
+        span_str = _format_time(total_ns, trace.time_scale)
+        sti_count = sum(1 for ev in trace.sti_events if not _is_tag_sti_channel(ev.target))
+        core_rows = self._core_util_rows(trace)
+        task_rows = self._task_cpu_rows(trace)
+        exec_rows = self._exec_slice_rows(trace)
+        inter_rows = self._inter_arrival_rows(trace)
+
+        def _esc(v: object) -> str:
+            return html.escape(str(v), quote=True)
+
+        def _render_stats_table(title: str,
+                                rows: List[Tuple[str, int, str, str, str, str]]) -> str:
+            body = "".join(
+                f"<tr><td>{_esc(name)}</td><td>{runs}</td><td>{_esc(mn)}</td><td>{_esc(avg)}</td><td>{_esc(mx)}</td><td>{_esc(p95)}</td></tr>"
+                for name, runs, mn, avg, mx, p95 in rows
+            ) or '<tr><td colspan="6" class="empty">No data</td></tr>'
+            return (
+                f"<section><h2>{_esc(title)}</h2>"
+                "<table><thead><tr><th>Task</th><th>Runs</th><th>Min</th><th>Avg</th><th>Max</th><th>p95</th></tr></thead>"
+                f"<tbody>{body}</tbody></table></section>"
+            )
+
+        def _render_exec_table(rows: List[Tuple[str, int, float, str, str, str, str]]) -> str:
+            body = "".join(
+                f"<tr><td>{_esc(name)}</td><td>{runs}</td><td>{cpu:.1f}%</td><td>{_esc(mn)}</td><td>{_esc(avg)}</td><td>{_esc(mx)}</td><td>{_esc(p95)}</td></tr>"
+                for name, runs, cpu, mn, avg, mx, p95 in rows
+            ) or '<tr><td colspan="7" class="empty">No data</td></tr>'
+            return (
+                "<section><h2>Execution Time Per Slice</h2>"
+                "<table><thead><tr><th>Task</th><th>Runs</th><th>CPU%</th><th>Min</th><th>Avg</th><th>Max</th><th>p95</th></tr></thead>"
+                f"<tbody>{body}</tbody></table></section>"
+            )
+
+        core_body = "".join(
+            f"<tr><td>{_esc(core)}</td><td>{pct:.1f}%</td></tr>"
+            for core, pct in core_rows
+        ) or '<tr><td colspan="2" class="empty">No data</td></tr>'
+
+        task_body = "".join(
+            f"<tr><td>{_esc(name)}</td><td>{pct:.1f}%</td></tr>"
+            for _, name, pct in task_rows
+        ) or '<tr><td colspan="2" class="empty">No data</td></tr>'
+
+        report = f"""<!doctype html>
+<html>
+<head>
+  <meta charset=\"utf-8\" />
+  <title>BTF Statistics Report</title>
+  <style>
+    body {{ font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; color: #1e1e1e; }}
+    h1 {{ margin: 0 0 4px 0; }}
+    .sub {{ color: #666; margin-bottom: 16px; }}
+    section {{ margin: 16px 0; }}
+        .notes {{ background: #f8fafc; border: 1px solid #d8dde6; border-radius: 8px; padding: 10px 12px; max-width: 980px; }}
+        .notes ul {{ margin: 8px 0 0 18px; padding: 0; }}
+        .notes li {{ margin: 6px 0; line-height: 1.45; }}
+    table {{ border-collapse: collapse; width: 100%; max-width: 980px; }}
+    th, td {{ border: 1px solid #ddd; padding: 6px 8px; font-size: 13px; text-align: right; }}
+    th:first-child, td:first-child {{ text-align: left; }}
+    thead th {{ background: #f2f4f7; }}
+    .empty {{ text-align: center !important; color: #666; }}
+  </style>
+</head>
+<body>
+  <h1>BTF Statistics Report</h1>
+  <div class=\"sub\">Generated: {_esc(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}</div>
+
+  <section>
+    <h2>Summary</h2>
+    <table><tbody>
+      <tr><th>Span</th><td>{_esc(span_str)}</td></tr>
+      <tr><th>Tasks</th><td>{len(trace.tasks)}</td></tr>
+      <tr><th>Segments</th><td>{len(trace.segments):,}</td></tr>
+      <tr><th>STI Events</th><td>{sti_count:,}</td></tr>
+    </tbody></table>
+  </section>
+
+    <section class=\"notes\">
+        <h2>Statistics Notes</h2>
+        <ul>
+            <li><strong>Execution Time Per Slice:</strong> Duration of each continuous task run between two context switches. Lower and tighter values indicate more predictable execution.</li>
+            <li><strong>Inter-Arrival Time:</strong> Time between consecutive activations of the same task (slice start to next slice start). It reflects activation cadence and jitter.</li>
+            <li><strong>Min (Minimum):</strong> The fastest execution time recorded. It represents the best-case scenario under zero system load.</li>
+            <li><strong>Max (Maximum):</strong> The slowest execution time recorded. It identifies worst-case bottlenecks, spikes, or resource contention.</li>
+            <li><strong>Average (Mean):</strong> Total execution time divided by the number of slices. It shows general performance but is heavily skewed by extreme outliers.</li>
+            <li><strong>P95 (95th Percentile):</strong> The threshold under which 95% of all slices execute. It is the best metric for user experience because it ignores rare anomalies while capturing real-world slowdowns.</li>
+        </ul>
+    </section>
+
+  <section>
+    <h2>Core Utilisation (excl. IDLE/TICK)</h2>
+    <table>
+      <thead><tr><th>Core</th><th>CPU %</th></tr></thead>
+      <tbody>{core_body}</tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Top Tasks by CPU (excl. IDLE/TICK)</h2>
+    <table>
+      <thead><tr><th>Task</th><th>CPU %</th></tr></thead>
+      <tbody>{task_body}</tbody>
+    </table>
+  </section>
+    {_render_exec_table(exec_rows)}
+    {_render_stats_table('Inter-Arrival Time', inter_rows)}
+</body>
+</html>
+"""
+
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(report)
+        except OSError as exc:
+            QMessageBox.critical(self, "Export Error", f"Could not export HTML:\n{exc}")
+            return
+
+        wnd = self.window()
+        if isinstance(wnd, QMainWindow):
+            wnd.statusBar().showMessage(f"Exported statistics: {path}", 4000)
+
+    def _export_csv(self) -> None:
+        trace = self._trace
+        if trace is None:
+            return
+
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Statistics CSV",
+            f"statistics-{stamp}.csv",
+            "CSV files (*.csv);;All files (*)",
+        )
+        if not path:
+            return
+
+        total_ns = trace.time_max - trace.time_min
+        span_str = _format_time(total_ns, trace.time_scale).replace("µs", "us").replace("μs", "us")
+        sti_count = sum(1 for ev in trace.sti_events if not _is_tag_sti_channel(ev.target))
+        core_rows = self._core_util_rows(trace)
+        task_rows = self._task_cpu_rows(trace)
+        exec_rows = self._exec_slice_rows(trace)
+        inter_rows = self._inter_arrival_rows(trace)
+
+        def _us(v: object) -> str:
+            return str(v).replace("µs", "us").replace("μs", "us")
+
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+                writer = csv.writer(fh, quoting=csv.QUOTE_MINIMAL)
+
+                writer.writerow(["Summary"])
+                writer.writerow(["Metric", "Value"])
+                writer.writerow(["Span", _us(span_str)])
+                writer.writerow(["Tasks", len(trace.tasks)])
+                writer.writerow(["Segments", len(trace.segments)])
+                writer.writerow(["STI Events", sti_count])
+
+                writer.writerow([])
+                writer.writerow(["Core Utilisation (excl. IDLE/TICK)"])
+                writer.writerow(["Core", "CPU %"])
+                if core_rows:
+                    for core, pct in core_rows:
+                        writer.writerow([core, f"{pct:.1f}%"])
+                else:
+                    writer.writerow(["No data", ""])
+
+                writer.writerow([])
+                writer.writerow(["Top Tasks by CPU (excl. IDLE/TICK)"])
+                writer.writerow(["Task", "CPU %"])
+                if task_rows:
+                    for _, name, pct in task_rows:
+                        writer.writerow([name, f"{pct:.1f}%"])
+                else:
+                    writer.writerow(["No data", ""])
+
+                writer.writerow([])
+                writer.writerow(["Execution Time Per Slice"])
+                writer.writerow(["Task", "Runs", "CPU%", "Min", "Avg", "Max", "p95"])
+                if exec_rows:
+                    for name, runs, cpu, mn, avg, mx, p95 in exec_rows:
+                        writer.writerow([name, runs, f"{cpu:.1f}%", _us(mn), _us(avg), _us(mx), _us(p95)])
+                else:
+                    writer.writerow(["No data", "", "", "", "", "", ""])
+
+                writer.writerow([])
+                writer.writerow(["Inter-Arrival Time"])
+                writer.writerow(["Task", "Runs", "Min", "Avg", "Max", "p95"])
+                if inter_rows:
+                    for name, runs, mn, avg, mx, p95 in inter_rows:
+                        writer.writerow([name, runs, _us(mn), _us(avg), _us(mx), _us(p95)])
+                else:
+                    writer.writerow(["No data", "", "", "", "", ""])
+
+            wnd = self.window()
+            if isinstance(wnd, QMainWindow):
+                wnd.statusBar().showMessage(f"Exported statistics: {path}", 4000)
+        except OSError as exc:
+            QMessageBox.critical(self, "Export Error", f"Could not export CSV:\n{exc}")
+
     def rebuild(self, trace: "BtfTrace") -> None:
+        self._trace = trace
+        self._btn_export_csv.setEnabled(True)
+        self._btn_export_html.setEnabled(True)
         self._clear()
         total_ns = trace.time_max - trace.time_min
         span_str = _format_time(total_ns, trace.time_scale)
@@ -7793,12 +8194,7 @@ class _StatsPanel(QWidget):
         if trace.core_names:
             self._ilay.addWidget(self._sep())
             self._ilay.addWidget(self._lbl("Core Utilisation (excl. IDLE/TICK):", bold=True, ui_fs=_fs))
-            for core in trace.core_names:
-                segs = trace.core_segs.get(core, [])
-                act  = sum(s.end - s.start for s in segs
-                           if (_tn := _parse_task_name(s.task)[2]) != "TICK"
-                           and not _is_idle_task_name(_tn))
-                pct  = 100.0 * act / total_ns if total_ns > 0 else 0.0
+            for core, pct in self._core_util_rows(trace):
                 row = QWidget()
                 hlay = QHBoxLayout(row)
                 hlay.setContentsMargins(0, 0, 0, 0)
@@ -7836,17 +8232,7 @@ class _StatsPanel(QWidget):
         # -- Top tasks by CPU time (excl. IDLE, top 10) -------------------
         self._ilay.addWidget(self._sep())
         self._ilay.addWidget(self._lbl("Top Tasks by CPU (excl. IDLE/TICK):", bold=True, ui_fs=_fs))
-        task_times: Dict[str, int] = {}
-        for mk, segs in trace.seg_map_by_merge_key.items():
-            raw = trace.task_repr.get(mk, mk)
-            _, _, tname = _parse_task_name(raw)
-            if _is_idle_task_name(tname) or tname == "TICK":
-                continue
-            task_times[mk] = sum(s.end - s.start for s in segs)
-        for mk, t_ns in sorted(task_times.items(), key=lambda kv: kv[1], reverse=True)[:10]:
-            raw  = trace.task_repr.get(mk, mk)
-            disp = _task_display_name(raw)
-            pct  = 100.0 * t_ns / total_ns if total_ns > 0 else 0.0
+        for mk, disp, pct in self._task_cpu_rows(trace):
 
             row = QWidget()
             hlay = QHBoxLayout(row)
@@ -7893,6 +8279,25 @@ class _StatsPanel(QWidget):
             hlay.addStretch(1)
 
             self._ilay.addWidget(row)
+
+        # -- Execution time per slice -------------------------------------
+        self._ilay.addWidget(self._sep())
+        self._ilay.addWidget(self._lbl("Execution Time Per Slice:", bold=True, ui_fs=_fs))
+        self._ilay.addWidget(self._build_stats_table(
+            self._exec_slice_rows(trace),
+            _fs,
+            "No user-task slices found",
+            include_cpu=True,
+        ))
+
+        # -- Inter-arrival time -------------------------------------------
+        self._ilay.addWidget(self._sep())
+        self._ilay.addWidget(self._lbl("Inter-Arrival Time:", bold=True, ui_fs=_fs))
+        self._ilay.addWidget(self._build_stats_table(
+            self._inter_arrival_rows(trace),
+            _fs,
+            "Need at least 2 activations per task",
+        ))
         self._ilay.addStretch()
 
 # ---------------------------------------------------------------------------
@@ -8020,13 +8425,14 @@ class _RcSettings:
 
     _DEFAULTS: Dict[str, Dict[str, str]] = {
         "window": {
-            "width":     "1280",
-            "height":    "800",
-            "x":         "-1",
-            "y":         "-1",
+            "width":     str(DEFAULT_WINDOW_WIDTH),
+            "height":    str(DEFAULT_WINDOW_HEIGHT),
+            "x":         str(DEFAULT_WINDOW_X),
+            "y":         str(DEFAULT_WINDOW_Y),
             "maximized": "false",
-            "dock_state": "",
-            "dock_layout_version": "0",  # bumped whenever default layout changes
+            "dock_state": DEFAULT_DOCK_STATE_B64,
+            "dock_metrics": "",
+            "dock_layout_version": DEFAULT_DOCK_LAYOUT_VERSION,
         },
         "view": {
             "font_size":         str(FONT_SIZE),
@@ -8146,6 +8552,18 @@ class _RcSettings:
             for k in keys[:-keep]:
                 self._cfg.remove_option(section, k)
             self._flush()
+
+    def align_section_keys(self, section: str, allowed_keys: set[str]) -> None:
+        """Drop keys from *section* that are not in *allowed_keys*."""
+        if not self._cfg.has_section(section):
+            return
+        removed = False
+        for k in list(self._cfg.options(section)):
+            if k not in allowed_keys:
+                self._cfg.remove_option(section, k)
+                removed = True
+        if removed:
+            self._dirty = True
 
 # ---------------------------------------------------------------------------
 # About Dialog
@@ -9857,7 +10275,7 @@ class MainWindow(QMainWindow):
         self._tb_icon_actions: list = []   # (QAction, icon_path_data) for theme-aware icons
 
         self.setWindowTitle("RTOS BTF Viewer")
-        self.resize(1280, 800)
+        self.resize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
 
         # Apply saved theme BEFORE building the UI (affects the Qt stylesheet).
         self._is_dark = (self._settings.get("view", "theme", "dark") == "dark")
@@ -9885,36 +10303,77 @@ class MainWindow(QMainWindow):
         the dock layout engine has completed its first pass — resizeDocks() is
         a no-op when called before the window is shown.
 
-        Target sizes are chosen to fit inside an 800 px window
-        (800 - OS-title ~28 - toolbar ~32 - status ~22 = ~718 px dock area).
-        300 + 148 + 245 = 693 < 718, so Qt uses the exact values instead of
-        proportionally scaling them down.
+                Default structure:
+                    - Top: Legend
+                    - Bottom: tabbed pages (Marks / Statistics)
 
-        Marks/Find group: 397 * 0.85 / 2.0 ≈ 150px (−15% vs old equal split)
-        Statistics:        397 * 1.15 / 2.0 ≈ 228px (+15% vs old equal split).
-        The total 300+150+228 = 678 is kept ≤ 695 so nothing is scaled.
+                We first set side-panel width, then split with a taller
+                bottom tabbed page.
         """
         self.resizeDocks(
-            [self._legend_dock, self._marks_dock, self._stats_dock],
-            [300, 150, 228],
-            Qt.Vertical,
+            [self._legend_dock, self._marks_dock],
+            [520, 520],
+            Qt.Horizontal,
         )
         self.resizeDocks(
             [self._legend_dock, self._marks_dock],
-            [220, 220],
-            Qt.Horizontal,
+            [2, 5],
+            Qt.Vertical,
         )
+        self._stats_dock.raise_()
+
+    def _dock_profile_key(self, width: int, height: int) -> str:
+        """Build a stable per-window-size key for dock/layout persistence."""
+        return f"{max(400, int(width))}x{max(300, int(height))}"
+
+    def _collect_dock_metrics(self) -> str:
+        """Return compact CSV metrics snapshot for dock sizes."""
+        right_w = int(max(self._legend_dock.width(), self._marks_dock.width(), self._stats_dock.width()))
+        legend_h = int(self._legend_dock.height())
+        marks_h = int(self._marks_dock.height())
+        stats_h = int(self._stats_dock.height())
+        label_w = int(self._view._scene._label_width)
+        return f"{right_w},{legend_h},{marks_h},{stats_h},{label_w}"
+
+    def _restore_dock_metrics(self, packed: str) -> None:
+        """Apply dock-size metrics persisted via _collect_dock_metrics()."""
+        try:
+            parts = [int(p.strip()) for p in packed.split(",")]
+            if len(parts) != 5:
+                return
+            right_w, legend_h, marks_h, stats_h, label_w = parts
+        except (ValueError, TypeError):
+            return
+
+        if right_w > 0:
+            self.resizeDocks(
+                [self._legend_dock, self._marks_dock],
+                [right_w, right_w],
+                Qt.Horizontal,
+            )
+        # Marks and Statistics are tabified, so they share one bottom area.
+        # Use the larger of marks/stats as the intended bottom-group height.
+        bottom_h = max(int(marks_h), int(stats_h))
+        if legend_h > 0 and bottom_h > 0:
+            self.resizeDocks(
+                [self._legend_dock, self._marks_dock],
+                [legend_h, bottom_h],
+                Qt.Vertical,
+            )
+        if label_w >= 60:
+            self._label_width_val = label_w
+            self._view._scene.set_label_width(label_w)
 
     def _restore_settings(self) -> None:
         """Apply all values from btf_viewer.rc after the UI has been built."""
         s = self._settings
 
         # Window geometry
-        w = s.get_int("window", "width",  1280)
-        h = s.get_int("window", "height", 800)
+        w = s.get_int("window", "width",  DEFAULT_WINDOW_WIDTH)
+        h = s.get_int("window", "height", DEFAULT_WINDOW_HEIGHT)
         self.resize(max(400, w), max(300, h))
-        x = s.get_int("window", "x", -1)
-        y = s.get_int("window", "y", -1)
+        x = s.get_int("window", "x", DEFAULT_WINDOW_X)
+        y = s.get_int("window", "y", DEFAULT_WINDOW_Y)
         if x >= 0 and y >= 0:
             self.move(x, y)
         if s.get_bool("window", "maximized", False):
@@ -10025,17 +10484,51 @@ class MainWindow(QMainWindow):
         # dock_layout_version gates restoration: if the saved version is older
         # than the current one the saved geometry is discarded so new defaults
         # (resizeDocks in _build_ui) take effect automatically.
-        _DOCK_LAYOUT_VERSION = "6"
-        _saved_dock = s.get("window", "dock_state", "")
+        _DOCK_LAYOUT_VERSION = DEFAULT_DOCK_LAYOUT_VERSION
+        _profile_key = self._dock_profile_key(self.width(), self.height())
+        _profile_dock = s.get("dock_profiles", _profile_key, "")
+        _window_dock = s.get("window", "dock_state", "")
+        _window_metrics = s.get("window", "dock_metrics", "").strip()
+        # Prefer [window] values so manual .rc edits take effect immediately;
+        # fall back to per-size profile values when window keys are empty.
+        # Special case: if user explicitly provides window.dock_metrics but
+        # clears window.dock_state, do NOT resurrect stale per-size profile
+        # dock state — apply metrics-driven sizing instead.
+        _saved_dock = _window_dock or ("" if (_window_metrics and not _window_dock) else _profile_dock)
         _saved_ver  = s.get("window", "dock_layout_version", "0")
         if _saved_dock and _saved_ver == _DOCK_LAYOUT_VERSION:
             self.restoreState(QByteArray.fromBase64(_saved_dock.encode("ascii")))
+            # First run/profile-miss bootstrap: use window.dock_state +
+            # view.label_width as defaults and seed the per-size profile.
+            if not _profile_dock and _window_dock:
+                s.set("dock_profiles", _profile_key, _window_dock, flush=False)
+                s.set("dock_profile_label_width", _profile_key,
+                      str(s.get_int("view", "label_width", LABEL_WIDTH)), flush=False)
+
+            _saved_profile_lw = s.get_int("dock_profile_label_width", _profile_key, -1)
+            if _saved_profile_lw < 60:
+                _saved_profile_lw = s.get_int("view", "label_width", LABEL_WIDTH)
+            if _saved_profile_lw >= 60:
+                self._label_width_val = _saved_profile_lw
+                self._view._scene.set_label_width(_saved_profile_lw)
+            _saved_metrics = s.get("window", "dock_metrics", "") or s.get("dock_profile_metrics", _profile_key, "")
+            if _saved_metrics:
+                QTimer.singleShot(0, lambda m=_saved_metrics: self._restore_dock_metrics(m))
+            s.flush()
         else:
             # Stale / absent saved state – clear it so it gets rewritten on exit.
             s.set_many("window", {"dock_state": "", "dock_layout_version": _DOCK_LAYOUT_VERSION})
-            # Apply default dock sizes after the window is shown (resizeDocks is
-            # a no-op before the layout engine has run its first pass).
-            QTimer.singleShot(0, self._apply_default_dock_sizes)
+            _saved_metrics = s.get("window", "dock_metrics", "")
+            if _saved_metrics:
+                # Honour explicit rc sizing even without a serialized dock_state.
+                def _apply_metrics_only(m=_saved_metrics):
+                    self._apply_default_dock_sizes()
+                    self._restore_dock_metrics(m)
+                QTimer.singleShot(0, _apply_metrics_only)
+            else:
+                # Apply default dock sizes after the window is shown (resizeDocks is
+                # a no-op before the layout engine has run its first pass).
+                QTimer.singleShot(0, self._apply_default_dock_sizes)
 
         # Keep the Light-theme menu label in sync when we restored a light theme.
         if not self._is_dark:
@@ -10091,6 +10584,9 @@ class MainWindow(QMainWindow):
     def _persist_settings(self) -> None:
         """Write all runtime state to the config file (btf_viewer.rc)."""
         s = self._settings
+        _MAX_DOCK_PROFILES = 12
+        # Capture the live scene value so drag-resized label width is persisted.
+        self._label_width_val = int(self._view._scene._label_width)
         # Window geometry – only save non-maximised size/position so we can
         # restore the proper normal-state geometry if the user un-maximises.
         if self.isMaximized():
@@ -10127,12 +10623,25 @@ class MainWindow(QMainWindow):
 
         # Dock layout – serialise the full QMainWindow state (all dock sizes,
         # positions, tabbing) as a base64 string so it survives restarts.
-        _DOCK_LAYOUT_VERSION = "6"
+        _DOCK_LAYOUT_VERSION = DEFAULT_DOCK_LAYOUT_VERSION
         _dock_bytes: QByteArray = self.saveState()
+        _dock_b64 = bytes(_dock_bytes.toBase64()).decode("ascii")
         s.set_many("window", {
-            "dock_state":          bytes(_dock_bytes.toBase64()).decode("ascii"),
+            "dock_state":          _dock_b64,
+            "dock_metrics":        self._collect_dock_metrics(),
             "dock_layout_version": _DOCK_LAYOUT_VERSION,
         }, flush=False)
+
+        # Per-window-size layout/profile persistence (dock/page geometry + left panel).
+        _profile_key = self._dock_profile_key(self.width(), self.height())
+        s.set("dock_profiles", _profile_key, _dock_b64, flush=False)
+        s.set("dock_profile_label_width", _profile_key, str(self._label_width_val), flush=False)
+        s.set("dock_profile_metrics", _profile_key, self._collect_dock_metrics(), flush=False)
+        # Keep only the newest size profiles and keep both sections aligned.
+        s.prune_section("dock_profiles", _MAX_DOCK_PROFILES)
+        _keys = set(s._cfg.options("dock_profiles")) if s._cfg.has_section("dock_profiles") else set()
+        s.align_section_keys("dock_profile_label_width", _keys)
+        s.align_section_keys("dock_profile_metrics", _keys)
 
         # Zoom – save current ns/px so we can re-apply it the next time the
         # same file is opened.  -1 means "use fit-to-width" (no saved zoom).
@@ -10691,14 +11200,14 @@ class MainWindow(QMainWindow):
         find_dock.setMaximumWidth(260)
         find_dock.setMinimumHeight(120)
         self.addDockWidget(Qt.RightDockWidgetArea, find_dock)
-        self.tabifyDockWidget(self._marks_dock, find_dock)
         self._find_dock = find_dock
-        # Statistics gets its own split below Marks/Find so its height can be
-        # set independently (tabbed docks share one fixed height).
-        self.splitDockWidget(self._marks_dock, self._stats_dock, Qt.Vertical)
-
-        # Put Marks+Find group below Legend, Stats below that.
+        # Default: Legend on top, bottom as tabbed pages (Marks / Statistics).
         self.splitDockWidget(self._legend_dock, self._marks_dock, Qt.Vertical)
+        self.tabifyDockWidget(self._marks_dock, self._stats_dock)
+        self._stats_dock.raise_()
+
+        # Keep Find available below the tab group (typically hidden by default).
+        self.splitDockWidget(self._marks_dock, self._find_dock, Qt.Vertical)
         # Default dock sizes are applied in _restore_settings via QTimer.singleShot
         # AFTER the window is shown, where resizeDocks() is actually effective.
 
@@ -12460,13 +12969,18 @@ class MainWindow(QMainWindow):
         """Export all bookmarks and annotations to a CSV file."""
         if self._trace is None:
             return
+
+        def _csv_time_text(ns: int, unit: str) -> str:
+            # Keep CSV locale-safe for tools that misdecode micro-sign glyphs.
+            return _format_time(ns, unit).replace("µs", "us").replace("μs", "us")
+
         unit = self._current_time_unit()
         time_scale = self._trace.time_scale
         rows = []
         for b in self._bookmarks:
-            rows.append(("bookmark",   _format_time(b.ns, unit), b.ns, b.label))
+            rows.append(("bookmark",   _csv_time_text(b.ns, unit), b.ns, b.label))
         for a in self._annotations:
-            rows.append(("annotation", _format_time(a.ns, unit), a.ns, a.note))
+            rows.append(("annotation", _csv_time_text(a.ns, unit), a.ns, a.note))
         rows.sort(key=lambda r: r[2])
         if not rows:
             QMessageBox.information(self, "No Marks", "No bookmarks or annotations to export.")
@@ -12481,7 +12995,8 @@ class MainWindow(QMainWindow):
             return
         try:
             import csv
-            with open(path, "w", newline="", encoding="utf-8") as fh:
+            # utf-8-sig prepends BOM for Excel compatibility on non-UTF8 locales.
+            with open(path, "w", newline="", encoding="utf-8-sig") as fh:
                 writer = csv.writer(fh, quoting=csv.QUOTE_ALL)
                 writer.writerow(["type", "time", time_scale, "label"])
                 writer.writerows(rows)

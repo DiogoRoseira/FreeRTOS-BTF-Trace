@@ -83,62 +83,138 @@
         class="right-panel"
         :style="{ width: rightPanelWidth + 'px' }"
       >
-        <!-- Cursor panel -->
-        <div class="panel-section">
-          <div class="panel-header">
-            Cursors
+        <div class="panel-page-wrap">
+          <div v-if="rightPanelTab === 'marks'" class="panel-page panel-page-marks">
+            <div class="panel-section">
+              <div class="panel-header">
+                Cursors
+              </div>
+              <CursorPanel
+                :cursors="cursors"
+                :time-scale="trace.timeScale"
+                @delete-cursor="onDeleteCursor"
+                @jump-to-cursor="timelinePanelRef?.jumpToNs($event)"
+                @clear-all="clearCursors"
+              />
+            </div>
+
+            <div class="panel-section">
+              <div class="panel-header">
+                Cursor Range
+              </div>
+              <div
+                v-if="cursorRangeStats"
+                class="cursor-range-body"
+              >
+                <div class="cursor-range-row">
+                  <span class="cursor-range-key">Span</span>
+                  <span class="cursor-range-val">{{ cursorRangeStats.span }}</span>
+                </div>
+                <div class="cursor-range-row">
+                  <span class="cursor-range-key">Slices</span>
+                  <span class="cursor-range-val">{{ cursorRangeStats.switches }}</span>
+                </div>
+                <div
+                  v-if="cursorRangeStats.topTask"
+                  class="cursor-range-row"
+                >
+                  <span class="cursor-range-key">Top task</span>
+                  <span class="cursor-range-val">{{ cursorRangeStats.topTask }} ({{ cursorRangeStats.topPct }}%)</span>
+                </div>
+                <div
+                  v-if="cursorRangeStats.dMin"
+                  class="cursor-range-row"
+                >
+                  <span class="cursor-range-key">Seg min</span>
+                  <span class="cursor-range-val">{{ cursorRangeStats.dMin }}</span>
+                </div>
+                <div
+                  v-if="cursorRangeStats.dAvg"
+                  class="cursor-range-row"
+                >
+                  <span class="cursor-range-key">Seg avg</span>
+                  <span class="cursor-range-val">{{ cursorRangeStats.dAvg }}</span>
+                </div>
+                <div
+                  v-if="cursorRangeStats.dMax"
+                  class="cursor-range-row"
+                >
+                  <span class="cursor-range-key">Seg max</span>
+                  <span class="cursor-range-val">{{ cursorRangeStats.dMax }}</span>
+                </div>
+              </div>
+              <div
+                v-else
+                class="cursor-range-hint"
+              >
+                Place 2+ cursors to measure range
+              </div>
+            </div>
+
+            <div class="panel-section">
+              <div class="panel-header">
+                Marks
+              </div>
+              <MarksPanel
+                :marks="marks"
+                :time-scale="trace.timeScale"
+                @add-bookmark="onAddMark"
+                @add-annotation="onAddAnnotationAtCenter"
+                @delete-mark="onDeleteMark"
+                @jump-to="onJumpToMark"
+                @update-label="onUpdateMarkLabel"
+                @import-marks="onImportMarks"
+                @clear-marks="onClearMarks"
+                @select-mark="timelineOptions.selectedMarkId = $event"
+              />
+            </div>
+
+            <div class="panel-section flex-fill">
+              <div class="panel-header">
+                Legend
+                <span class="task-count">({{ trace.tasks.length }})</span>
+              </div>
+              <LegendPanel
+                :trace="trace"
+                :highlight-key="timelineOptions.highlightKey"
+                @highlight-change="(k) => { timelineOptions.highlightKey = k ?? pinnedHighlightKey; scheduleRender() }"
+                @highlight-click="onHighlightClick"
+              />
+            </div>
           </div>
-          <CursorPanel
-            :cursors="cursors"
-            :time-scale="trace.timeScale"
-            @delete-cursor="onDeleteCursor"
-            @jump-to-cursor="timelinePanelRef?.jumpToNs($event)"
-            @clear-all="clearCursors"
-          />
+
+          <div v-else class="panel-page panel-page-stats">
+            <div class="panel-section flex-fill">
+              <div class="panel-header">
+                Statistics
+              </div>
+              <StatisticsPanel
+                :trace="trace"
+                :cursors="cursors"
+              />
+            </div>
+          </div>
         </div>
 
-        <!-- Statistics -->
-        <div class="panel-section">
-          <div class="panel-header">
+        <div class="panel-tabs" role="tablist" aria-label="Right panel tabs">
+          <button
+            class="panel-tab"
+            :class="{ active: rightPanelTab === 'marks' }"
+            role="tab"
+            :aria-selected="rightPanelTab === 'marks'"
+            @click="rightPanelTab = 'marks'"
+          >
+            Cursor / Bookmark
+          </button>
+          <button
+            class="panel-tab"
+            :class="{ active: rightPanelTab === 'stats' }"
+            role="tab"
+            :aria-selected="rightPanelTab === 'stats'"
+            @click="rightPanelTab = 'stats'"
+          >
             Statistics
-          </div>
-          <StatisticsPanel
-            :trace="trace"
-            :cursors="cursors"
-          />
-        </div>
-
-        <!-- Marks / Bookmarks -->
-        <div class="panel-section">
-          <div class="panel-header">
-            Marks
-          </div>
-          <MarksPanel
-            :marks="marks"
-            :time-scale="trace.timeScale"
-            @add-bookmark="onAddMark"
-            @add-annotation="onAddAnnotationAtCenter"
-            @delete-mark="onDeleteMark"
-            @jump-to="onJumpToMark"
-            @update-label="onUpdateMarkLabel"
-            @import-marks="onImportMarks"
-            @clear-marks="onClearMarks"
-            @select-mark="timelineOptions.selectedMarkId = $event"
-          />
-        </div>
-
-        <!-- Legend -->
-        <div class="panel-section flex-fill">
-          <div class="panel-header">
-            Legend
-            <span class="task-count">({{ trace.tasks.length }})</span>
-          </div>
-          <LegendPanel
-            :trace="trace"
-            :highlight-key="timelineOptions.highlightKey"
-            @highlight-change="(k) => { timelineOptions.highlightKey = k ?? pinnedHighlightKey; scheduleRender() }"
-            @highlight-click="onHighlightClick"
-          />
+          </button>
         </div>
       </div>
     </div>
@@ -373,7 +449,7 @@ import StatisticsPanel  from './components/StatisticsPanel.vue'
 import MarksPanel       from './components/MarksPanel.vue'
 import SnapshotEditor   from './components/SnapshotEditor.vue'
 import { formatTime }   from './renderer/TimelineRenderer.js'
-import { taskMergeKey } from './utils/colors.js'
+import { taskDisplayName, taskMergeKey } from './utils/colors.js'
 import exampleBtfB64   from 'virtual:example-btf'
 
 // ---- State ---------------------------------------------------------------
@@ -387,12 +463,13 @@ const loadingFileName = ref('')
 const cursors    = ref([null, null, null, null])
 const helpOpen   = ref(false)
 const aboutOpen  = ref(false)
+const rightPanelTab = ref('stats')
 
 // ---- Snapshot editor -------------------------------------------------------
 const snapshotEditorOpen = ref(false)
 const snapshotImageUrl   = ref(null)
 
-const rightPanelWidth = ref(220)
+const rightPanelWidth = ref(330)
 const RIGHT_PANEL_MIN_W = 180
 const RIGHT_PANEL_MAX_W = 520
 let _rightPanelResize = null
@@ -425,9 +502,9 @@ const timelineOptions = reactive({
 
 // Marks state (bookmarks + annotations)
 const marks              = ref([])
-let   _markNextId         = 1
+let   _markNextId        = 1
 const pinnedHighlightKey = ref(null)  // sticky highlight set by legend click
-const highlightSegment = ref(null)   // single-segment lock (bar click or Tab nav)
+const highlightSegment   = ref(null)  // single-segment lock (bar click or Tab nav)
 
 // ---- Segment navigation cache (built lazily per trace) -------------------
 let _navCache = null   // { trace, segs: TaskSegment[] sorted by time + identity }
@@ -556,6 +633,62 @@ const traceInfo = computed(() => {
   if (!trace.value) return ''
   const t = trace.value
   return `${t.meta?.creator || ''} · ${t.tasks.length}T · ${t.segments.length.toLocaleString()} segs`
+})
+
+const cursorRangeStats = computed(() => {
+  const tr = trace.value
+  if (!tr) return null
+
+  const placed = cursors.value.filter(c => c !== null)
+  if (placed.length < 2) return null
+
+  const sorted = [...placed].sort((a, b) => a - b)
+  const lo = sorted[0]
+  const hi = sorted[sorted.length - 1]
+  const dt = hi - lo
+  if (dt <= 0) return null
+
+  const taskAcc = new Map()
+  const durations = []
+  let switches = 0
+
+  for (const seg of tr.segments) {
+    if (seg.end <= lo || seg.start >= hi) continue
+    const ov = Math.min(seg.end, hi) - Math.max(seg.start, lo)
+    if (ov <= 0) continue
+    switches++
+    durations.push(seg.end - seg.start)
+    const mk = taskMergeKey(seg.task)
+    const repr = tr.taskRepr.get(mk) || seg.task
+    const disp = taskDisplayName(repr)
+    taskAcc.set(disp, (taskAcc.get(disp) || 0) + ov)
+  }
+
+  let topTask = null
+  let topNs = 0
+  for (const [k, v] of taskAcc) {
+    if (v > topNs) {
+      topNs = v
+      topTask = k
+    }
+  }
+
+  const result = {
+    span: formatTime(dt, tr.timeScale),
+    switches,
+    topTask,
+    topPct: topTask ? (100.0 * topNs / dt).toFixed(1) : null,
+  }
+
+  if (durations.length > 0) {
+    const minD = Math.min(...durations)
+    const maxD = Math.max(...durations)
+    const avgD = Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
+    result.dMin = formatTime(minD, tr.timeScale)
+    result.dAvg = formatTime(avgD, tr.timeScale)
+    result.dMax = formatTime(maxD, tr.timeScale)
+  }
+  return result
 })
 
 // ---- File loading (via Web Worker; fallback to main-thread for file:// origins) --
@@ -1387,6 +1520,58 @@ body {
   overflow: hidden;
 }
 
+.panel-tabs {
+  display: flex;
+  border-top: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel-bg) 86%, var(--tb-bg));
+  flex-shrink: 0;
+}
+
+.panel-tab {
+  flex: 1;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-family: monospace;
+  font-weight: 500;
+  padding: 3px 8px;
+  min-height: 24px;
+  cursor: pointer;
+}
+
+.panel-tab:last-child {
+  border-right: 0;
+}
+
+.panel-tab:hover {
+  background: var(--tb-btn-hover);
+  color: var(--fg);
+}
+
+.panel-tab.active {
+  color: var(--fg);
+  background: var(--panel-bg);
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.panel-page-wrap {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .panel-resizer {
   width: 8px;
   flex-shrink: 0;
@@ -1435,6 +1620,42 @@ body.col-resizing * {
   padding: 6px 10px 4px;
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+}
+
+.cursor-range-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-family: monospace;
+}
+
+.cursor-range-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.cursor-range-key {
+  color: var(--fg-dim);
+  flex-shrink: 0;
+}
+
+.cursor-range-val {
+  color: var(--fg);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cursor-range-hint {
+  padding: 8px 10px;
+  color: var(--fg-dim);
+  opacity: 0.65;
+  font-size: 10px;
+  font-style: italic;
 }
 
 .task-count {
