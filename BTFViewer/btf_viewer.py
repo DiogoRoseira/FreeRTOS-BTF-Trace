@@ -755,6 +755,12 @@ def _parse_btf(filepath: str,
         open_seg[task] = (start_time, core)
         last_core[task] = core
 
+    def _core_from_task_entity(entity: str) -> Optional[str]:
+        core_id, _, _ = _parse_task_name(entity)
+        if core_id is None:
+            return None
+        return f"Core_{core_id}"
+
     for timestamp_index, ts in enumerate(sorted(t_events_by_time), start=1):
         if cancel_check and timestamp_index % 512 == 0 and cancel_check():
             raise _ParseCancelledError()
@@ -763,8 +769,13 @@ def _parse_btf(filepath: str,
 
         core_preempts: Dict[str, str] = {}
         for (_, src, ev, tgt, _note) in events:
-            if ev == "preempt" and _is_core_entity(src):
-                core_preempts[tgt] = src
+            if ev == "preempt":
+                if _is_core_entity(src):
+                    core_preempts[tgt] = src
+                else:
+                    src_core = _core_from_task_entity(src)
+                    if src_core is not None:
+                        core_preempts[tgt] = src_core
 
         # Build set of sources that issued a resume (used to detect naked preempts).
         resumed_srcs = {src for (_, src, ev, tgt, _n) in events if ev == "resume"}
@@ -780,7 +791,9 @@ def _parse_btf(filepath: str,
             elif src in last_core:
                 core = last_core[src]
             else:
-                core = "Core_?"
+                core = (_core_from_task_entity(src)
+                        or _core_from_task_entity(tgt)
+                        or "Core_0")
 
             _close_seg(src, ts)
             _open_seg(tgt, ts, core)
@@ -788,10 +801,17 @@ def _parse_btf(filepath: str,
         for (_, src, ev, tgt, _note) in events:
             if ev == "preempt":
                 if tgt not in resumed_srcs:
-                    core = core_preempts.get(tgt, last_core.get(tgt, "Core_?"))
+                    core = (core_preempts.get(tgt)
+                            or last_core.get(tgt)
+                            or _core_from_task_entity(tgt)
+                            or "Core_0")
                     _close_seg(tgt, ts)
                     if _is_core_entity(src):
                         last_core[tgt] = src
+                    else:
+                        src_core = _core_from_task_entity(src)
+                        if src_core is not None:
+                            last_core[tgt] = src_core
 
     for task in list(open_seg.keys()):
         _close_seg(task, time_max)
@@ -827,10 +847,10 @@ def _parse_btf(filepath: str,
             mk = _task_merge_key(seg.task)
             _mk_cache[seg.task] = mk
         segs_by_mk_build[mk].append(seg)
-        # TICK is a global event not associated with any real core; suppress it
-        # from Core_? so it doesn't pollute the unknown-core row in core view.
+        # TICK is rendered on the ruler, not as per-core timeline bars.
+        # Exclude all TICK segments from core rows to avoid LOD artifacts.
         _tname = _parse_task_name(seg.task)[2]
-        if not (_tname == "TICK" and seg.core == "Core_?"):
+        if _tname != "TICK":
             _core_segs_build[seg.core].append(seg)
             _cn_set.add(seg.core)
 
@@ -5339,6 +5359,7 @@ class TimelineView(QGraphicsView):
         self._zoom_history.clear()  # new trace resets zoom history
         self._scene.set_trace(trace, self._fit_viewport_size())
         self.zoom_changed.emit(self._scene.timescale_per_px)
+        self._show_nav()
 
     def add_cursor_at_view_center(self) -> None:
         vp = self.viewport().rect()
@@ -5373,6 +5394,8 @@ class TimelineView(QGraphicsView):
 
     def set_view_mode(self, mode: str) -> None:
         self._scene.set_view_mode(mode)
+        if self._fit_mode and self._scene._trace is not None:
+            self._show_nav()
 
     def set_all_cores_expanded(self, expanded: bool) -> None:
         self._scene.set_all_cores_expanded(expanded)
@@ -5479,6 +5502,7 @@ class TimelineView(QGraphicsView):
         # fitInView() would set a persistent QTransform that is not needed here.
         self.resetTransform()
         self.zoom_changed.emit(self._scene.timescale_per_px)
+        self._show_nav()
 
     def zoom_1to1(self) -> None:
         """Set zoom to exactly _TIMESCALE_PER_PX_DEFAULT ns/px, scrolling to trace start when in fit mode."""
@@ -5753,7 +5777,7 @@ class TimelineView(QGraphicsView):
             task=tr.task_repr.get(target_task, target_task),
             start=target_ns,
             end=target_seg_end,
-            core=(target_core or "Core_?"),
+            core=(target_core or "Core_0"),
         )
         sc.set_highlighted_segment(nav_seg)
 
@@ -6936,7 +6960,15 @@ class TimelineView(QGraphicsView):
         vbar = self.verticalScrollBar()
         h_overflow = hbar.maximum() > hbar.minimum()
         v_overflow = vbar.maximum() > vbar.minimum()
-        if not (h_overflow or v_overflow):
+        at_fit_limit = (
+            self._scene._trace is not None
+            and math.isfinite(self._scene._timescale_per_px_fit)
+            and self._scene._timescale_per_px >= self._scene._timescale_per_px_fit * 0.999
+        )
+        # In fit/full mode there may be no scrollbar overflow; keep the
+        # navigator eligible to show in both task/core views for consistency.
+        keep_visible_full_view = self._fit_mode or at_fit_limit
+        if not (h_overflow or v_overflow or keep_visible_full_view):
             self._nav_hide_timer.stop()
             self._nav_popup.hide()
             return
@@ -6944,6 +6976,8 @@ class TimelineView(QGraphicsView):
         self._nav_popup.set_pixmap(pix)
         self._nav_popup.reposition()
         self._nav_popup.fade_in()
+        # Always auto-fade after interaction; fit/full mode should not pin
+        # the navigator open permanently.
         self._nav_hide_timer.start()
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:
@@ -7032,6 +7066,7 @@ class TimelineView(QGraphicsView):
             self._scene.rebuild()
             self.resetTransform()
             self.zoom_changed.emit(self._scene.timescale_per_px)
+            self._show_nav()
         else:
             # Zoom mode: preserve zoom level exactly.
             self._scene._timescale_per_px_fit = new_fit

@@ -26,6 +26,11 @@ function isCoreName(name) {
   return name.startsWith('Core_')
 }
 
+function coreFromTaskEntity(name) {
+  const { coreId } = parseTaskName(name)
+  return coreId === null ? null : `Core_${coreId}`
+}
+
 /**
  * Sorting comparator for task merge keys using taskSortKey tuple logic.
  */
@@ -194,8 +199,13 @@ export function parseBtf(text, progressCallback) {
     // Build core-preempt map: preempted-task → core (for Core_N src events)
     const corePreempts = new Map()
     for (const ev of events) {
-      if (ev.event === 'preempt' && isCoreName(ev.source)) {
-        corePreempts.set(ev.target, ev.source)
+      if (ev.event === 'preempt') {
+        if (isCoreName(ev.source)) {
+          corePreempts.set(ev.target, ev.source)
+        } else {
+          const srcCore = coreFromTaskEntity(ev.source)
+          if (srcCore !== null) corePreempts.set(ev.target, srcCore)
+        }
       }
     }
 
@@ -216,7 +226,7 @@ export function parseBtf(text, progressCallback) {
       } else if (lastCore.has(ev.source)) {
         core = lastCore.get(ev.source)
       } else {
-        core = 'Core_?'
+        core = coreFromTaskEntity(ev.source) || coreFromTaskEntity(ev.target) || 'Core_0'
       }
       closeSeg(ev.source, ts)
       openSegFn(ev.target, ts, core)
@@ -229,6 +239,9 @@ export function parseBtf(text, progressCallback) {
         closeSeg(ev.target, ts)
         if (isCoreName(ev.source)) {
           lastCore.set(ev.target, ev.source)
+        } else {
+          const srcCore = coreFromTaskEntity(ev.source)
+          if (srcCore !== null) lastCore.set(ev.target, srcCore)
         }
       }
     }
@@ -260,8 +273,7 @@ export function parseBtf(text, progressCallback) {
     if (!segsByMkBuild.has(mk)) segsByMkBuild.set(mk, [])
     segsByMkBuild.get(mk).push(seg)
 
-    // TICK on Core_? – suppress from unknown-core row in core view.
-    // Also exclude ALL TICK segments from coreSegs: TICK is rendered as ruler
+    // Exclude ALL TICK segments from coreSegs: TICK is rendered as ruler
     // band marks (from segByMergeKey), not as per-core timeline bars.  If TICK
     // is kept in coreSegs it can become the first entry in a LOD bin (because
     // TICK resume events appear before task resume events in the BTF file),

@@ -178,8 +178,8 @@ int genbtf(
 
     event = get_event(trace_data, current_index);
 
-    fprintf(fout,"%u,Core_1,0,C,Core_1,0,set_frequency,%d\n",
-            event->time, trace_data->h.core_clock);
+    fprintf(fout, "%u,Core_%d,0,C,Core_%d,0,set_frequency,%d\n",
+           event->time, CORE_ID, CORE_ID, trace_data->h.core_clock);
 
     current_task = 0;
 
@@ -196,13 +196,11 @@ int genbtf(
                         event->value, get_taskname(trace_data, event->value),
                         "resume",
                         "");
-                current_task = (int)event->value;
                 break;
             case TRACE_EVENT_TASK_SWITCHED_OUT:
-                fprintf(fout, "%u,[%d/%04d]%s,0,T,[%d/%04d]%s,0,%s,%s\n",
+                fprintf(fout, "%u,Core_%d,0,T,[%d/%04d]%s,0,%s,%s\n",
                         event->time,
                         CORE_ID,
-                        current_task, get_taskname(trace_data, current_task),
                         CORE_ID,
                         event->value, get_taskname(trace_data, event->value),
                         "preempt",
@@ -219,42 +217,41 @@ int genbtf(
                         "create");
                 break;
             case TRACE_EVENT_TASK_DELETE:
-                // FIXME
-                fprintf(fout, "%u,Core_%d,0,R,[%d/%04d]%s,0,%s,%s\n",
+                fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s %s[%d]\n",
                         event->time,
                         CORE_ID,
-                        CORE_ID,
-                        event->value, get_taskname(trace_data, event->value),
-                        "preempt",
-                        "delete");
+                        "task",
+                        "trigger",
+                        "delete",
+                        get_taskname(trace_data, event->value),
+                        event->value);
                 break;
             case TRACE_EVENT_TASK_SUSPEND:
-                fprintf(fout, "%u,[%d/%04d]%s,0,T,[%d/%04d]%s,0,%s,%s\n",
+                fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s %s[%d]\n",
                         event->time,
                         CORE_ID,
-                        current_task, get_taskname(trace_data, current_task),
-                        CORE_ID,
-                        event->value, get_taskname(trace_data, event->value),
-                        "wait",
-                        "suspend");
+                        "task",
+                        "trigger",
+                        "suspend",
+                        get_taskname(trace_data, event->value),
+                        event->value);
                 break;
             case TRACE_EVENT_TASK_RESUME:
-                fprintf(fout, "%u,[%d/%04d]%s,0,T,[%d/%04d]%s,0,%s,%s\n",
+                fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s %s[%d]\n",
                         event->time,
                         CORE_ID,
-                        current_task, get_taskname(trace_data, current_task),
-                        CORE_ID,
-                        event->value, get_taskname(trace_data, event->value),
-                        "release",
-                        "resume");
+                        "task",
+                        "trigger",
+                        "resume",
+                        get_taskname(trace_data, event->value),
+                        event->value);
                 break;
             case TRACE_EVENT_TASK_RESUME_FROM_ISR:
-                fprintf(fout, "%u,Core_%d,0,T,[%d/%04d]%s,0,%s,%s\n",
+                fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s\n",
                         event->time,
                         CORE_ID,
-                        CORE_ID,
-                        event->value, get_taskname(trace_data, event->value),
-                        "release",
+                        "task",
+                        "trigger",
                         "resume/isr");
                 break;
             case TRACE_EVENT_QUEUE_CREATE:

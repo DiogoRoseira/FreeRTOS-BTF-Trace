@@ -68,10 +68,20 @@
         @export-svg="onExportSvg"
       />
 
+      <div
+        v-if="trace"
+        class="panel-resizer"
+        role="separator"
+        aria-label="Resize side panel"
+        aria-orientation="vertical"
+        @mousedown.prevent="onRightPanelResizeStart"
+      />
+
       <!-- Right panel -->
       <div
         v-if="trace"
         class="right-panel"
+        :style="{ width: rightPanelWidth + 'px' }"
       >
         <!-- Cursor panel -->
         <div class="panel-section">
@@ -381,6 +391,11 @@ const aboutOpen  = ref(false)
 // ---- Snapshot editor -------------------------------------------------------
 const snapshotEditorOpen = ref(false)
 const snapshotImageUrl   = ref(null)
+
+const rightPanelWidth = ref(220)
+const RIGHT_PANEL_MIN_W = 180
+const RIGHT_PANEL_MAX_W = 520
+let _rightPanelResize = null
 
 const toastMsg     = ref('')
 const toastType    = ref('info')
@@ -718,6 +733,28 @@ function scheduleRender() {
   timelinePanelRef.value?.scheduleRender()
 }
 
+function onRightPanelResizeStart(e) {
+  _rightPanelResize = { startX: e.clientX, startW: rightPanelWidth.value }
+  document.body.classList.add('col-resizing')
+  document.addEventListener('mousemove', onRightPanelResizeMove)
+  document.addEventListener('mouseup', onRightPanelResizeEnd)
+}
+
+function onRightPanelResizeMove(e) {
+  if (!_rightPanelResize) return
+  const dx = e.clientX - _rightPanelResize.startX
+  const nextW = _rightPanelResize.startW - dx
+  rightPanelWidth.value = Math.max(RIGHT_PANEL_MIN_W, Math.min(RIGHT_PANEL_MAX_W, nextW))
+  scheduleRender()
+}
+
+function onRightPanelResizeEnd() {
+  _rightPanelResize = null
+  document.body.classList.remove('col-resizing')
+  document.removeEventListener('mousemove', onRightPanelResizeMove)
+  document.removeEventListener('mouseup', onRightPanelResizeEnd)
+}
+
 function isTypingTarget(el) {
   if (!el) return false
   const tag = el.tagName
@@ -864,6 +901,7 @@ onBeforeUnmount(() => {
     _parseWorker.terminate()
     _parseWorker = null
   }
+  onRightPanelResizeEnd()
   window.removeEventListener('keydown', onGlobalKeydown)
   document.removeEventListener('wheel', _onDocWheel, { capture: true })
 })
@@ -1347,6 +1385,35 @@ body {
   border-left: 1px solid var(--border);
   background: var(--panel-bg);
   overflow: hidden;
+}
+
+.panel-resizer {
+  width: 8px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  position: relative;
+  background: transparent;
+}
+
+.panel-resizer::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+
+.panel-resizer:hover::before {
+  background: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+body.col-resizing,
+body.col-resizing * {
+  cursor: col-resize !important;
+  user-select: none;
 }
 
 .panel-section {
