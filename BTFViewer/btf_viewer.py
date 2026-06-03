@@ -7738,6 +7738,366 @@ class _LegendWidget(QWidget):
         for key_lc, row_w in self._sti_rows:
             row_w.setVisible((not q) or (q in key_lc))
 
+# ===========================================================================
+# Metrics Plot Dialog
+# ===========================================================================
+
+class _ScatterWidget(QWidget):
+    """Scatter plot: X = trace timestamp, Y = metric value.  Click a point to jump."""
+
+    point_clicked = pyqtSignal(object)   # payload: TaskSegment (exec) or int ns (inter-arrival)
+
+    def __init__(self, points, time_scale: str, color: "QColor",
+                 is_dark: bool, parent=None) -> None:
+        super().__init__(parent)
+        # points: List[(x_ns, y_value, payload)]
+        # payload is either a TaskSegment (exec) or int (ns, inter-arrival)
+        self._points     = points
+        self._time_scale = time_scale
+        self._color      = color
+        self._is_dark    = is_dark
+        self._highlight  = -1   # index of highlighted point (-1 = none)
+        self.setMinimumHeight(160)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CrossCursor)
+
+    def _screen_coords(self, w: int, h: int, ml: int, mr: int, mt: int, mb: int):
+        """Return (sx_list, sy_list) mapping each point to widget pixels."""
+        if not self._points:
+            return [], []
+        xs = [p[0] for p in self._points]
+        ys = [p[1] for p in self._points]
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = 0, max(ys) if max(ys) > 0 else 1
+        xspan = max(x1 - x0, 1)
+        yspan = max(y1 - y0, 1)
+        pw = w - ml - mr
+        ph = h - mt - mb
+        sx = [ml + int((x - x0) / xspan * pw) for x in xs]
+        sy = [mt + ph - int((y - y0) / yspan * ph) for y in ys]
+        return sx, sy
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        if not self._points:
+            return
+        w, h = self.width(), self.height()
+        ML, MR, MT, MB = 56, 14, 14, 36   # margins
+
+        dark  = self._is_dark
+        bg    = QColor("#1E1E1E") if dark else QColor("#F8F8F8")
+        grid  = QColor("#2E2E2E") if dark else QColor("#E0E0E0")
+        txt   = QColor("#AAAAAA") if dark else QColor("#555555")
+        axln  = QColor("#555555") if dark else QColor("#AAAAAA")
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.fillRect(0, 0, w, h, bg)
+
+        xs = [pt[0] for pt in self._points]
+        ys = [pt[1] for pt in self._points]
+        x0, x1 = min(xs), max(xs)
+        y0, y1 = 0, max(ys) if ys else 1
+        xspan = max(x1 - x0, 1)
+        yspan = max(y1 - y0, 1)
+        pw = w - ML - MR
+        ph = h - MT - MB
+
+        def sx(x): return ML + int((x - x0) / xspan * pw)
+        def sy(y): return MT + ph - int((y - y0) / yspan * ph)
+
+        # Grid + axes
+        sf = QFont(); sf.setPointSize(7)
+        p.setFont(sf)
+        p.setPen(QPen(grid, 1, Qt.DotLine))
+        for fi in range(5):
+            gy = MT + int(fi / 4 * ph)
+            p.drawLine(ML, gy, ML + pw, gy)
+        p.setPen(QPen(axln, 1))
+        p.drawLine(ML, MT, ML, MT + ph)
+        p.drawLine(ML, MT + ph, ML + pw, MT + ph)
+
+        # Y-axis labels
+        p.setPen(txt)
+        vals_sorted = sorted(ys)
+        n = len(vals_sorted)
+        p50_val = vals_sorted[min(n - 1, int(n * 0.50))]
+        avg_val = sum(ys) / len(ys) if ys else 0
+        p95_val = vals_sorted[min(n - 1, int(n * 0.95))]
+        for fi in range(5):
+            val = y0 + (y1 - y0) * fi / 4
+            gy  = MT + ph - int(fi / 4 * ph)
+            lbl = _format_time(int(val), self._time_scale, decimals=1)
+            p.drawText(QRect(0, gy - 8, ML - 4, 16), Qt.AlignRight | Qt.AlignVCenter, lbl)
+
+        # X-axis labels (3 ticks)
+        for fi in range(3):
+            val = x0 + xspan * fi / 2
+            gx  = sx(val)
+            lbl = _format_time(int(val), self._time_scale, decimals=1)
+            p.drawText(QRect(gx - 40, MT + ph + 4, 80, 16),
+                       Qt.AlignHCenter | Qt.AlignTop, lbl)
+
+        # avg / p50 / p95 horizontal reference lines
+        for val, lbl_text, ref_color in [
+            (avg_val, "avg", QColor("#CE93D8")),
+            (p50_val, "p50", QColor("#4CAF50")),
+            (p95_val, "p95", QColor("#FF9800")),
+        ]:
+            gy = sy(val)
+            p.setPen(QPen(ref_color, 1, Qt.DashLine))
+            p.drawLine(ML, gy, ML + pw, gy)
+            p.setPen(ref_color)
+            p.setFont(sf)
+            p.drawText(ML + pw + 2, gy + 4, lbl_text)
+
+        # Points
+        dot_color = QColor(self._color)
+        dot_color.setAlpha(200)
+        hl_color  = QColor("#FFFFFF")
+        p.setPen(Qt.NoPen)
+        for i, pt in enumerate(self._points):
+            cx = sx(pt[0])
+            cy = sy(pt[1])
+            if i == self._highlight:
+                p.setBrush(QBrush(hl_color))
+                p.drawEllipse(cx - 5, cy - 5, 10, 10)
+            else:
+                p.setBrush(QBrush(dot_color))
+                p.drawEllipse(cx - 3, cy - 3, 6, 6)
+
+        p.end()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() != Qt.LeftButton or not self._points:
+            return
+        w, h = self.width(), self.height()
+        ML, MR, MT, MB = 56, 14, 14, 36
+        xs = [p[0] for p in self._points]
+        ys = [p[1] for p in self._points]
+        x0, x1 = min(xs), max(xs)
+        y1 = max(ys) if ys else 1
+        pw = w - ML - MR
+        ph = h - MT - MB
+
+        def sx(x): return ML + int((x - x0) / max(x1 - x0, 1) * pw)
+        def sy(y): return MT + ph - int(y / max(y1, 1) * ph)
+
+        ex, ey = event.x(), event.y()
+        best_d, best_i = float("inf"), -1
+        for i, pt in enumerate(self._points):
+            dx = sx(pt[0]) - ex
+            dy = sy(pt[1]) - ey
+            d  = dx * dx + dy * dy
+            if d < best_d:
+                best_d, best_i = d, i
+
+        if best_d <= 64:   # 8px radius
+            self._highlight = best_i
+            self.update()
+            self.point_clicked.emit(self._points[best_i][2])
+
+
+class _HistogramWidget(QWidget):
+    """Histogram of metric values with p50/p95 markers."""
+
+    def __init__(self, values, time_scale: str, color: "QColor",
+                 is_dark: bool, parent=None) -> None:
+        super().__init__(parent)
+        self._values     = sorted(values)
+        self._time_scale = time_scale
+        self._color      = color
+        self._is_dark    = is_dark
+        self.setMinimumHeight(120)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        if not self._values:
+            return
+        N_BINS = 50
+        w, h  = self.width(), self.height()
+        ML, MR, MT, MB = 56, 14, 14, 36
+
+        dark = self._is_dark
+        bg   = QColor("#1E1E1E") if dark else QColor("#F8F8F8")
+        grid = QColor("#2E2E2E") if dark else QColor("#E0E0E0")
+        txt  = QColor("#AAAAAA") if dark else QColor("#555555")
+        axln = QColor("#555555") if dark else QColor("#AAAAAA")
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, False)
+        p.fillRect(0, 0, w, h, bg)
+
+        vals = self._values
+        n    = len(vals)
+        v0, v1 = vals[0], vals[-1]
+        vspan  = max(v1 - v0, 1)
+        p50 = vals[min(n - 1, int(n * 0.50))]
+        avg = sum(vals) / n if n else 0
+        p95 = vals[min(n - 1, int(n * 0.95))]
+
+        # Build bins
+        bin_w_val = vspan / N_BINS
+        counts    = [0] * N_BINS
+        for v in vals:
+            bi = min(N_BINS - 1, int((v - v0) / bin_w_val))
+            counts[bi] += 1
+        max_count = max(counts) if counts else 1
+
+        pw = w - ML - MR
+        ph = h - MT - MB
+        bw = max(1, pw // N_BINS)
+
+        sf = QFont(); sf.setPointSize(7)
+        p.setFont(sf)
+
+        # Grid
+        p.setPen(QPen(grid, 1, Qt.DotLine))
+        for fi in (1, 2, 3, 4):
+            gy = MT + int((1 - fi / 4) * ph)
+            p.drawLine(ML, gy, ML + pw, gy)
+        p.setPen(QPen(axln, 1))
+        p.drawLine(ML, MT, ML, MT + ph)
+        p.drawLine(ML, MT + ph, ML + pw, MT + ph)
+
+        # Y labels
+        p.setPen(txt)
+        for fi in range(5):
+            cnt = int(max_count * fi / 4)
+            gy  = MT + ph - int(fi / 4 * ph)
+            p.drawText(QRect(0, gy - 8, ML - 4, 16), Qt.AlignRight | Qt.AlignVCenter, str(cnt))
+
+        # X labels (3)
+        for fi in range(3):
+            val = v0 + vspan * fi / 2
+            gx  = ML + int(fi / 2 * pw)
+            lbl = _format_time(int(val), self._time_scale, decimals=1)
+            p.drawText(QRect(gx - 40, MT + ph + 4, 80, 16),
+                       Qt.AlignHCenter | Qt.AlignTop, lbl)
+
+        # Bars
+        bar_color = QColor(self._color); bar_color.setAlpha(180)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(bar_color))
+        for bi, cnt in enumerate(counts):
+            if cnt == 0:
+                continue
+            bx = ML + int(bi * pw / N_BINS)
+            bh = int(cnt / max_count * ph)
+            p.drawRect(bx, MT + ph - bh, max(1, bw - 1), bh)
+
+        # avg / p50 / p95 vertical lines
+        p.setRenderHint(QPainter.Antialiasing, True)
+        for val, lbl_text, lcolor in [
+            (avg, "avg", QColor("#CE93D8")),
+            (p50, "p50", QColor("#4CAF50")),
+            (p95, "p95", QColor("#FF9800")),
+        ]:
+            gx = ML + int((val - v0) / vspan * pw)
+            p.setPen(QPen(lcolor, 2, Qt.DashLine))
+            p.drawLine(gx, MT, gx, MT + ph)
+            p.setPen(lcolor)
+            p.setFont(sf)
+            p.drawText(gx + 3, MT + 12, lbl_text)
+
+        p.end()
+
+
+class _MetricsPlotDialog(QDialog):
+    """Modeless popup: scatter plot + histogram for one task metric.
+
+    ``points``  – List of (x_ns, y_value, payload) where payload is
+                  a TaskSegment (exec) or int (inter-arrival start ns).
+    ``on_point_click`` – called with the trace-ns when a scatter point is clicked.
+    """
+
+    def __init__(self, title: str,
+                 points,
+                 time_scale: str,
+                 color: "QColor",
+                 on_point_click,
+                 is_dark: bool,
+                 parent=None) -> None:
+        super().__init__(parent, Qt.Window)
+        self._title        = title
+        self._is_dark      = is_dark
+        self._on_pt_click  = on_point_click
+        self.setWindowTitle(title)
+        self.resize(820, 620)
+        self.setMinimumSize(500, 400)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(4)
+
+        # Content area (scatter + histogram) — grabbed for PNG/SVG export
+        self._content = QWidget()
+        cl = QVBoxLayout(self._content)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(4)
+
+        values = [pt[1] for pt in points]
+        self._scatter = _ScatterWidget(points, time_scale, color, is_dark)
+        self._histogram = _HistogramWidget(values, time_scale, color, is_dark)
+
+        self._scatter.point_clicked.connect(self._on_scatter_click)
+
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(self._scatter)
+        splitter.addWidget(self._histogram)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        cl.addWidget(splitter)
+
+        root.addWidget(self._content, 1)
+
+        # Button bar
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(0, 4, 0, 0)
+        btn_png = QPushButton("Export PNG")
+        btn_svg = QPushButton("Export SVG")
+        btn_cls = QPushButton("Close")
+        btn_png.clicked.connect(self._export_png)
+        btn_svg.clicked.connect(self._export_svg)
+        btn_cls.clicked.connect(self.close)
+        btn_row.addWidget(btn_png)
+        btn_row.addWidget(btn_svg)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_cls)
+        root.addLayout(btn_row)
+
+    def _on_scatter_click(self, payload) -> None:
+        if self._on_pt_click:
+            self._on_pt_click(payload)
+
+    def _export_png(self) -> None:
+        pixmap = self._content.grab()
+        dlg = SnapshotEditorDialog(pixmap, self)
+        _exec_centred(dlg, self)
+
+    def _export_svg(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export SVG",
+            self._title.replace(" ", "_").replace("—", "-") + ".svg",
+            "SVG files (*.svg);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            sz  = self._content.size()
+            gen = QSvgGenerator()
+            gen.setFileName(path)
+            gen.setSize(sz)
+            gen.setViewBox(QRectF(0, 0, sz.width(), sz.height()))
+            gen.setTitle(self._title)
+            gen.setDescription("Generated by RTOS BTF Viewer")
+            painter = QPainter(gen)
+            self._content.render(painter)
+            painter.end()
+        except (OSError, RuntimeError) as exc:
+            QMessageBox.critical(self, "SVG Export Error", str(exc))
+
+
 # ---------------------------------------------------------------------------
 # Statistics dock panel
 # ---------------------------------------------------------------------------
@@ -7746,10 +8106,14 @@ class _StatsPanel(QWidget):
     """Dock panel showing trace statistics (span, core utilisation, top tasks)."""
 
     task_clicked = pyqtSignal(str)   # merge key of the clicked task row
+    segment_jump   = pyqtSignal(int)    # ns — scroll timeline to this timestamp
+    segment_select = pyqtSignal(object) # TaskSegment — highlight that exact slice
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._ui_font_size: int = UI_FONT_SIZE
+        self._is_dark: bool = True
+        self._plot_dlg = None   # keep reference to prevent GC
         self._trace: Optional["BtfTrace"] = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -7800,6 +8164,42 @@ class _StatsPanel(QWidget):
         """Re-build using the given *ui_font_size* so labels pick it up."""
         self._ui_font_size = ui_font_size
         self.rebuild(trace)
+
+    def set_dark(self, is_dark: bool) -> None:
+        self._is_dark = is_dark
+
+    def _open_plot(self, trace, mk: str, kind: str) -> None:
+        """Open a metrics distribution popup for the given task and metric kind."""
+        segs  = trace.seg_map_by_merge_key.get(mk, [])
+        if not segs:
+            return
+        raw   = trace.task_repr.get(mk, mk)
+        name  = _task_display_name(raw)
+        color = _task_color(raw)
+        if kind == "exec":
+            pts   = [(s.start, s.end - s.start, s)
+                     for s in segs if s.end > s.start]
+            title = f"{name} — Execution Time"
+        else:
+            starts = sorted(s.start for s in segs)
+            # Map start → segment so we can highlight the slice at interval start
+            start_to_seg = {s.start: s for s in segs}
+            pts    = [(starts[i - 1], starts[i] - starts[i - 1],
+                       start_to_seg.get(starts[i - 1]))
+                      for i in range(1, len(starts))
+                      if starts[i] > starts[i - 1]]
+            title  = f"{name} — Inter-Arrival Time"
+        if not pts:
+            return
+        # Both exec and inter-arrival highlight the slice at the interval start
+        _on_click = lambda seg: self.segment_select.emit(seg) if seg is not None else None
+        self._plot_dlg = _MetricsPlotDialog(
+            title, pts, trace.time_scale, color,
+            on_point_click=_on_click,
+            is_dark=self._is_dark,
+            parent=None,
+        )
+        self._plot_dlg.show()
 
     def _sep(self) -> QFrame:
         f = QFrame()
@@ -7891,8 +8291,8 @@ class _StatsPanel(QWidget):
                 continue
             mn, avg, mx, p95 = summary
             cpu_pct = 100.0 * sum(samples) / total_ns
-            rows.append((_task_display_name(raw), len(samples), cpu_pct, mn, avg, mx, p95))
-        rows.sort(key=lambda r: (-r[2], -r[1], r[0].lower()))
+            rows.append((mk, _task_display_name(raw), len(samples), cpu_pct, mn, avg, mx, p95))
+        rows.sort(key=lambda r: (-r[3], -r[2], r[1].lower()))
         return rows
 
     def _inter_arrival_rows(self, trace: "BtfTrace") -> List[Tuple[str, int, str, str, str, str]]:
@@ -7910,8 +8310,8 @@ class _StatsPanel(QWidget):
             if summary is None:
                 continue
             mn, avg, mx, p95 = summary
-            rows.append((_task_display_name(raw), len(starts), mn, avg, mx, p95))
-        rows.sort(key=lambda r: (-r[1], r[0].lower()))
+            rows.append((mk, _task_display_name(raw), len(starts), mn, avg, mx, p95))
+        rows.sort(key=lambda r: (-r[2], r[1].lower()))
         return rows
 
     def _exec_slice_rows_export(self, trace: "BtfTrace") -> List[Tuple[str, int, float, str, str, str, str, str, str]]:
@@ -7932,8 +8332,8 @@ class _StatsPanel(QWidget):
                 continue
             mn, avg, tmean, mx, p50, p95 = summary
             cpu_pct = 100.0 * sum(samples) / total_ns
-            rows.append((_task_display_name(raw), len(samples), cpu_pct, mn, avg, tmean, mx, p50, p95))
-        rows.sort(key=lambda r: (-r[2], -r[1], r[0].lower()))
+            rows.append((mk, _task_display_name(raw), len(samples), cpu_pct, mn, avg, tmean, mx, p50, p95))
+        rows.sort(key=lambda r: (-r[3], -r[2], r[1].lower()))
         return rows
 
     def _inter_arrival_rows_export(self, trace: "BtfTrace") -> List[Tuple[str, int, str, str, str, str, str, str]]:
@@ -7951,12 +8351,13 @@ class _StatsPanel(QWidget):
             if summary is None:
                 continue
             mn, avg, tmean, mx, p50, p95 = summary
-            rows.append((_task_display_name(raw), len(starts), mn, avg, tmean, mx, p50, p95))
-        rows.sort(key=lambda r: (-r[1], r[0].lower()))
+            rows.append((mk, _task_display_name(raw), len(starts), mn, avg, tmean, mx, p50, p95))
+        rows.sort(key=lambda r: (-r[2], r[1].lower()))
         return rows
 
     def _build_stats_table(self, rows: List[tuple], ui_fs: str, empty_hint: str,
-                           include_cpu: bool = False) -> QWidget:
+                           include_cpu: bool = False,
+                           on_row_click=None) -> QWidget:
         host = QWidget()
         lay = QVBoxLayout(host)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -7990,10 +8391,10 @@ class _StatsPanel(QWidget):
 
         for r, row in enumerate(rows):
             if include_cpu:
-                name, runs, cpu, mn, avg, mx, p95 = row
+                mk_r, name, runs, cpu, mn, avg, mx, p95 = row
                 vals = [name, runs, f"{cpu:.1f}%", mn, avg, mx, p95]
             else:
-                name, runs, mn, avg, mx, p95 = row
+                mk_r, name, runs, mn, avg, mx, p95 = row
                 vals = [name, runs, mn, avg, mx, p95]
 
             for c, v in enumerate(vals):
@@ -8005,6 +8406,12 @@ class _StatsPanel(QWidget):
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 table.setItem(r, c, item)
 
+            if on_row_click is not None:
+                for c in range(cols):
+                    item = table.item(r, c)
+                    if item:
+                        item.setToolTip("Click to view distribution chart")
+
         table.resizeColumnsToContents()
         table.horizontalHeader().setStretchLastSection(False)
         p95_col = 6 if include_cpu else 5
@@ -8014,6 +8421,10 @@ class _StatsPanel(QWidget):
         table.setAlternatingRowColors(False)
         table.setShowGrid(False)
         table.setSortingEnabled(False)
+        if on_row_click is not None:
+            table.cellClicked.connect(
+                lambda r, c, _rows=rows: on_row_click(_rows[r][0]))
+            table.setCursor(Qt.PointingHandCursor)
         table.setMinimumHeight(min(180, 20 + (len(rows) * 16)))
         table.setMaximumHeight(220)
         table.setWordWrap(False)
@@ -8054,7 +8465,7 @@ class _StatsPanel(QWidget):
                                 rows: List[Tuple[str, int, str, str, str, str, str, str]]) -> str:
             body = "".join(
                 f"<tr><td>{_esc(name)}</td><td>{runs}</td><td>{_esc(mn)}</td><td>{_esc(avg)}</td><td>{_esc(tmean)}</td><td>{_esc(mx)}</td><td>{_esc(p50)}</td><td>{_esc(p95)}</td></tr>"
-                for name, runs, mn, avg, tmean, mx, p50, p95 in rows
+                for mk_r, name, runs, mn, avg, tmean, mx, p50, p95 in rows
             ) or '<tr><td colspan="8" class="empty">No data</td></tr>'
             return (
                 f"<section class=\"report-card\"><h2>{_esc(title)}</h2>"
@@ -8065,7 +8476,7 @@ class _StatsPanel(QWidget):
         def _render_exec_table(rows: List[Tuple[str, int, float, str, str, str, str, str, str]]) -> str:
             body = "".join(
                 f"<tr><td>{_esc(name)}</td><td>{runs}</td><td>{cpu:.1f}%</td><td>{_esc(mn)}</td><td>{_esc(avg)}</td><td>{_esc(tmean)}</td><td>{_esc(mx)}</td><td>{_esc(p50)}</td><td>{_esc(p95)}</td></tr>"
-                for name, runs, cpu, mn, avg, tmean, mx, p50, p95 in rows
+                for mk_r, name, runs, cpu, mn, avg, tmean, mx, p50, p95 in rows
             ) or '<tr><td colspan="9" class="empty">No data</td></tr>'
             return (
                 "<section class=\"report-card\"><h2>Execution Time Per Slice</h2>"
@@ -8282,7 +8693,7 @@ class _StatsPanel(QWidget):
                 writer.writerow(["Execution Time Per Slice"])
                 writer.writerow(["Task", "Runs", "CPU%", "Min", "Avg", "TrimMean(5%)", "Max", "p50", "p95"])
                 if exec_rows:
-                    for name, runs, cpu, mn, avg, tmean, mx, p50, p95 in exec_rows:
+                    for mk_r, name, runs, cpu, mn, avg, tmean, mx, p50, p95 in exec_rows:
                         writer.writerow([name, runs, f"{cpu:.1f}%", _us(mn), _us(avg), _us(tmean), _us(mx), _us(p50), _us(p95)])
                 else:
                     writer.writerow(["No data", "", "", "", "", "", "", "", ""])
@@ -8291,7 +8702,7 @@ class _StatsPanel(QWidget):
                 writer.writerow(["Inter-Arrival Time"])
                 writer.writerow(["Task", "Runs", "Min", "Avg", "TrimMean(5%)", "Max", "p50", "p95"])
                 if inter_rows:
-                    for name, runs, mn, avg, tmean, mx, p50, p95 in inter_rows:
+                    for mk_r, name, runs, mn, avg, tmean, mx, p50, p95 in inter_rows:
                         writer.writerow([name, runs, _us(mn), _us(avg), _us(tmean), _us(mx), _us(p50), _us(p95)])
                 else:
                     writer.writerow(["No data", "", "", "", "", "", "", ""])
@@ -8413,20 +8824,24 @@ class _StatsPanel(QWidget):
         # -- Execution time per slice -------------------------------------
         self._ilay.addWidget(self._sep())
         self._ilay.addWidget(self._lbl("Execution Time Per Slice:", bold=True, ui_fs=_fs))
+        _exec_rows = self._exec_slice_rows(trace)
         self._ilay.addWidget(self._build_stats_table(
-            self._exec_slice_rows(trace),
+            _exec_rows,
             _fs,
             "No user-task slices found",
             include_cpu=True,
+            on_row_click=lambda mk: self._open_plot(trace, mk, "exec"),
         ))
 
         # -- Inter-arrival time -------------------------------------------
         self._ilay.addWidget(self._sep())
         self._ilay.addWidget(self._lbl("Inter-Arrival Time:", bold=True, ui_fs=_fs))
+        _inter_rows = self._inter_arrival_rows(trace)
         self._ilay.addWidget(self._build_stats_table(
-            self._inter_arrival_rows(trace),
+            _inter_rows,
             _fs,
             "Need at least 2 activations per task",
+            on_row_click=lambda mk: self._open_plot(trace, mk, "inter"),
         ))
         self._ilay.addStretch()
 
@@ -11581,6 +11996,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, '_cpu_load_graph'):
             self._cpu_load_graph.set_dark(is_dark)
         if hasattr(self, '_stats_panel'):
+            self._stats_panel.set_dark(is_dark)
+        if hasattr(self, '_stats_panel'):
             self._stats_panel._ui_font_size = _ui_font_size
             if self._trace is not None:
                 self._stats_panel.rebuild(self._trace)
@@ -11873,6 +12290,8 @@ class MainWindow(QMainWindow):
         """Create the statistics dock."""
         self._stats_panel = _StatsPanel()
         self._stats_panel.task_clicked.connect(self._on_legend_task_clicked)
+        self._stats_panel.segment_jump.connect(self._on_segment_jump)
+        self._stats_panel.segment_select.connect(self._on_segment_select)
         stats_dock = QDockWidget("Statistics", self)
         stats_dock.setObjectName("dock_statistics")
         stats_dock.setWidget(self._stats_panel)
@@ -12428,6 +12847,19 @@ class MainWindow(QMainWindow):
         if self._trace is None:
             return
         self._view.scroll_to_ns(ns)
+
+    def _on_segment_jump(self, ns: int) -> None:
+        """Scroll the timeline to *ns* (inter-arrival click from metrics popup)."""
+        if self._trace is None:
+            return
+        self._view.scroll_to_ns(ns)
+
+    def _on_segment_select(self, seg) -> None:
+        """Scroll to and highlight a specific execution slice (exec click from metrics popup)."""
+        if self._trace is None or seg is None:
+            return
+        self._view.scroll_to_ns(seg.start)
+        self._view._scene.set_highlighted_segment(seg)
 
     def _add_bookmark_at_center(self) -> None:
         if self._trace is None:
