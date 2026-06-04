@@ -86,7 +86,7 @@
                 :x="row.hoverCursor.badgeX"
                 y="2"
                 :width="row.hoverCursor.badgeW"
-                height="14"
+                height="10"
                 rx="2"
                 class="cpu-load-hover-badge-bg"
               />
@@ -117,7 +117,7 @@
                 :x="cursor.badgeX"
                 y="2"
                 :width="cursor.badgeW"
-                height="14"
+                height="10"
                 rx="2"
                 :fill="cursor.color"
               />
@@ -671,9 +671,17 @@ watch(() => props.trace, () => {
 .cpu-load-hover-text,
 .cpu-load-mark-text {
   fill: #000;
-  font-size: 10px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  dominant-baseline: hanging;
+  font: 400 7px monospace;
+  dominant-baseline: text-before-edge;
+}
+
+.cpu-load-cursor-text {
+  font: 700 7px monospace;
+}
+
+.cpu-load-hover-text,
+.cpu-load-mark-text {
+  font: 400 7px monospace;
 }
 
 .cpu-load-hover-text {
