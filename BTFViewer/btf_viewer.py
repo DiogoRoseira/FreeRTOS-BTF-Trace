@@ -7790,11 +7790,15 @@ class _ScatterWidget(QWidget):
         sy = [mt + ph - int((y - y0) / yspan * ph) for y in ys]
         return sx, sy
 
+    @staticmethod
+    def _marker_right_margin(fm) -> int:
+        return max(14, max(fm.horizontalAdvance(lbl) for lbl in ("avg", "p50", "p95")) + 12)
+
     def paintEvent(self, event) -> None:  # noqa: N802
         if not self._points:
             return
         w, h = self.width(), self.height()
-        ML, MR, MT, MB = 56, 14, 14, 36   # margins
+        ML, MT, MB = 56, 14, 36   # margins
 
         dark  = self._is_dark
         bg    = QColor("#1E1E1E") if dark else QColor("#F8F8F8")
@@ -7812,8 +7816,6 @@ class _ScatterWidget(QWidget):
         y0, y1 = 0, max(ys) if ys else 1
         xspan = max(x1 - x0, 1)
         yspan = max(y1 - y0, 1)
-        pw = w - ML - MR
-        ph = h - MT - MB
 
         def sx(x): return ML + int((x - x0) / xspan * pw)
         def sy(y): return MT + ph - int((y - y0) / yspan * ph)
@@ -7821,6 +7823,9 @@ class _ScatterWidget(QWidget):
         # Grid + axes
         sf = QFont(); sf.setPointSize(7)
         p.setFont(sf)
+        MR = self._marker_right_margin(p.fontMetrics())
+        pw = w - ML - MR
+        ph = h - MT - MB
         p.setPen(QPen(grid, 1, Qt.DotLine))
         for fi in range(5):
             gy = MT + int(fi / 4 * ph)
@@ -7919,11 +7924,13 @@ class _ScatterWidget(QWidget):
         if not self._points:
             return float("inf"), -1
         w, h = self.width(), self.height()
-        ML, MR, MT, MB = 56, 14, 14, 36
+        ML, MT, MB = 56, 14, 36
         xs = [p[0] for p in self._points]
         ys = [p[1] for p in self._points]
         x0, x1 = min(xs), max(xs)
         y1 = max(ys) if ys else 1
+        sf = QFont(); sf.setPointSize(7)
+        MR = self._marker_right_margin(QFontMetrics(sf))
         pw = w - ML - MR
         ph = h - MT - MB
         def sx(x): return ML + int((x - x0) / max(x1 - x0, 1) * pw)
@@ -7979,7 +7986,7 @@ class _HistogramWidget(QWidget):
             return
         N_BINS = 50
         w, h  = self.width(), self.height()
-        ML, MR, MT, MB = 56, 14, 14, 36
+        ML, MT, MB = 56, 14, 36
 
         dark = self._is_dark
         bg   = QColor("#1E1E1E") if dark else QColor("#F8F8F8")
@@ -8007,12 +8014,14 @@ class _HistogramWidget(QWidget):
             counts[bi] += 1
         max_count = max(counts) if counts else 1
 
+        sf = QFont(); sf.setPointSize(7)
+        p.setFont(sf)
+        fm = p.fontMetrics()
+        marker_labels = ("avg", "p50", "p95")
+        MR = max(14, max(fm.horizontalAdvance(lbl) for lbl in marker_labels) + 10)
         pw = w - ML - MR
         ph = h - MT - MB
         bw = max(1, pw // N_BINS)
-
-        sf = QFont(); sf.setPointSize(7)
-        p.setFont(sf)
 
         # Grid
         p.setPen(QPen(grid, 1, Qt.DotLine))
@@ -8052,9 +8061,9 @@ class _HistogramWidget(QWidget):
         # avg / p50 / p95 vertical lines
         p.setRenderHint(QPainter.Antialiasing, True)
         for val, lbl_text, lcolor in [
-            (avg, "avg", QColor("#CE93D8")),
-            (p50, "p50", QColor("#4CAF50")),
-            (p95, "p95", QColor("#FF9800")),
+            (avg, marker_labels[0], QColor("#CE93D8")),
+            (p50, marker_labels[1], QColor("#4CAF50")),
+            (p95, marker_labels[2], QColor("#FF9800")),
         ]:
             gx = ML + int((val - v0) / vspan * pw)
             p.setPen(QPen(lcolor, 2, Qt.DashLine))
@@ -10894,6 +10903,7 @@ class _CpuLoadGraph(QWidget):
         self._font_size: int                                = 8
         self.setMinimumSize(40, 40)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setMouseTracking(True)
         self.setToolTip(
             "CPU load over time — synchronised with timeline\n"
             "Core view: click a label to collapse/expand that core row"
@@ -11114,28 +11124,131 @@ class _CpuLoadGraph(QWidget):
             return self._task_core_bins.get(task, {}).get(key)
         return self._core_bins.get(key)
 
+    def _visible_time_ns_range(self, scene) -> Tuple[int, int]:
+        if self._trace is None:
+            return 0, 1
+        vp = self._view.viewport().rect()
+        if scene._horizontal:
+            c_lo = self._view.mapToScene(QPoint(scene._label_width, 0)).x()
+            c_hi = self._view.mapToScene(QPoint(vp.right(), 0)).x()
+        else:
+            c_lo = self._view.mapToScene(QPoint(0, scene._label_width)).y()
+            c_hi = self._view.mapToScene(QPoint(0, vp.bottom())).y()
+        ns_a = scene.scene_to_ns(c_lo)
+        ns_b = scene.scene_to_ns(c_hi)
+        ns_lo = max(self._trace.time_min, min(ns_a, ns_b))
+        ns_hi = min(self._trace.time_max, max(ns_a, ns_b))
+        if ns_hi <= ns_lo:
+            ns_hi = min(self._trace.time_max, ns_lo + 1)
+        return ns_lo, ns_hi
+
+    def _time_ns_at_pos(self, pos) -> Optional[int]:
+        scene = self._view._scene
+        if self._trace is None or scene is None:
+            return None
+        if not (hasattr(scene, '_timescale_per_px') and hasattr(scene, '_label_width')):
+            return None
+        axis_px = pos.x()
+        axis_start = scene._label_width
+        if scene._timescale_per_px <= 0 or axis_px < axis_start:
+            return None
+        ns_lo, ns_hi = self._visible_time_ns_range(scene)
+        span_px = max(1, self.width() - axis_start - 1)
+        frac = (axis_px - axis_start) / span_px
+        ns = int(ns_lo + frac * (ns_hi - ns_lo))
+        return max(self._trace.time_min, min(self._trace.time_max, ns))
+
+    def _time_overlay_x(self, ns: int, scene, ns_lo: int, ns_hi: int) -> int:
+        lw = scene._label_width
+        span = max(1, ns_hi - ns_lo)
+        frac = (ns - ns_lo) / span
+        return int(lw + frac * max(1, self.width() - lw - 1))
+
+    def _draw_time_overlay_line(self, painter: QPainter, scene, x: int,
+                                title_h: int, width_limit: int, color: QColor,
+                                dashed: bool = False, width: float = 1.0) -> None:
+        pen = QPen(color, width, Qt.DashLine if dashed else Qt.SolidLine)
+        if dashed and pen.style() == Qt.DashLine:
+            pen.setDashPattern([3, 3])
+        painter.setPen(pen)
+        if scene._label_width <= x < width_limit:
+            painter.drawLine(x, title_h, x, self.height())
+
     # ------------------------------------------------------------------
     # Mouse — click label strip (core view) to collapse / expand
     # ------------------------------------------------------------------
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() != Qt.LeftButton or not self._trace:
-            return
-        if self._view_mode != "core":
-            return
         scene = self._view._scene
         if not scene or not hasattr(scene, '_label_width'):
+            super().mousePressEvent(event)
             return
-        if event.x() >= scene._label_width:
+        if event.button() == Qt.LeftButton and self._trace and self._view_mode == "core":
+            if event.x() < scene._label_width:
+                _TITLE_H = 22
+                ry = _TITLE_H
+                for kind, key, _, _ in self._get_rows():
+                    rh = self._row_effective_h(kind, key)
+                    if ry <= event.y() < ry + rh:
+                        self.set_core_expanded(key, key in self._collapsed_cores)
+                        event.accept()
+                        return
+                    ry += rh + CPU_LOAD_ROW_GAP
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        scene = self._view._scene
+        if self._trace is None or scene is None:
+            super().mouseMoveEvent(event)
             return
-        _TITLE_H = 22
-        ry = _TITLE_H
-        for kind, key, _, _ in self._get_rows():
-            rh = self._row_effective_h(kind, key)
-            if ry <= event.y() < ry + rh:
-                self.set_core_expanded(key, key in self._collapsed_cores)
-                return
-            ry += rh + CPU_LOAD_ROW_GAP
+        hover_ns = self._time_ns_at_pos(event.pos())
+        if hover_ns is None:
+            scene.clear_hover_line()
+        else:
+            scene._hover_ns = hover_ns
+            scene._draw_hover_line()
+            self.update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        scene = self._view._scene
+        if scene is not None:
+            scene.clear_hover_line()
+        super().leaveEvent(event)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        scene = self._view._scene
+        if self._trace is None or scene is None:
+            super().wheelEvent(event)
+            return
+        if event.modifiers() & Qt.ControlModifier:
+            anchor_ns = self._time_ns_at_pos(event.position().toPoint())
+            if anchor_ns is None:
+                anchor_ns = self._view.view_center_ns()
+            factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
+            vp_center = self._view.viewport().rect().center()
+            anchor_coord = self._view._scene.ns_to_scene_coord(anchor_ns)
+            if scene._horizontal:
+                anchor_pt = self._view.mapFromScene(QPointF(anchor_coord, self._view.mapToScene(vp_center).y()))
+            else:
+                anchor_pt = self._view.mapFromScene(QPointF(self._view.mapToScene(vp_center).x(), anchor_coord))
+            self._view._do_zoom(factor, anchor_pt)
+            event.accept()
+            return
+
+        dy = event.angleDelta().y()
+        dx = event.angleDelta().x()
+        hsb = self._view.horizontalScrollBar()
+        vsb = self._view.verticalScrollBar()
+        if event.modifiers() & Qt.ShiftModifier:
+            if dy != 0:
+                hsb.setValue(hsb.value() - dy)
+        else:
+            if dx != 0:
+                hsb.setValue(hsb.value() - dx)
+            if dy != 0:
+                vsb.setValue(vsb.value() - dy)
+        event.accept()
 
     # ------------------------------------------------------------------
     # Paint
@@ -11150,7 +11263,6 @@ class _CpuLoadGraph(QWidget):
 
         tpp    = scene._timescale_per_px
         lw     = scene._label_width
-        scroll = self._view.horizontalScrollBar().value()
         t_min  = self._trace.time_min
         t_max  = self._trace.time_max
         n      = self._NUM_BINS
@@ -11173,10 +11285,14 @@ class _CpuLoadGraph(QWidget):
         p.setRenderHint(QPainter.Antialiasing, False)
         p.fillRect(0, 0, w, h, bg)
 
+        vis_ns_lo, vis_ns_hi = self._visible_time_ns_range(scene)
+        vis_span = max(1, vis_ns_hi - vis_ns_lo)
+
         # Pre-compute pixel→bin mapping once (reused for every row)
         sx_to_bi: Dict[int, int] = {}
         for sx in range(lw, w):
-            t = t_min + (scroll + sx - lw) * tpp
+            frac = (sx - lw) / max(1, w - lw - 1)
+            t = vis_ns_lo + frac * vis_span
             if t_min <= t <= t_max:
                 sx_to_bi[sx] = min(n - 1, max(0, int((t - t_min) / bin_w)))
 
@@ -11271,34 +11387,33 @@ class _CpuLoadGraph(QWidget):
         # ── Overlay: bookmarks & annotations ─────────────────────────
         if hasattr(scene, '_mark_data') and tpp > 0:
             for m_ns, _m_lbl, m_color_hex, m_kind, _m_id in scene._mark_data:
-                sx = int(lw + (m_ns - t_min) / tpp - scroll)
-                if lw <= sx < w:
-                    col = QColor(m_color_hex)
-                    if m_kind == "bookmark":
-                        p.setPen(QPen(col, 1.2, Qt.SolidLine))
-                    else:
-                        p.setPen(QPen(col, 1.0, Qt.DashLine))
-                    p.drawLine(sx, _TITLE_H, sx, h)
+                sx = self._time_overlay_x(m_ns, scene, vis_ns_lo, vis_ns_hi)
+                col = QColor(m_color_hex)
+                self._draw_time_overlay_line(
+                    p, scene, sx, _TITLE_H, w, col,
+                    dashed=(m_kind != "bookmark"),
+                    width=1.2 if m_kind == "bookmark" else 1.0,
+                )
 
         # ── Overlay: placed cursors ────────────────────────────────────
         if hasattr(scene, '_cursor_times') and tpp > 0:
             for c_idx, c_ns in enumerate(scene._cursor_times):
-                sx = int(lw + (c_ns - t_min) / tpp - scroll)
-                if lw <= sx < w:
-                    cur_col = QColor(_CURSOR_COLORS[c_idx % len(_CURSOR_COLORS)])
-                    p.setPen(QPen(cur_col, 1.2, Qt.DashLine))
-                    p.drawLine(sx, _TITLE_H, sx, h)
+                sx = self._time_overlay_x(c_ns, scene, vis_ns_lo, vis_ns_hi)
+                cur_col = QColor(_CURSOR_COLORS[c_idx % len(_CURSOR_COLORS)])
+                self._draw_time_overlay_line(
+                    p, scene, sx, _TITLE_H, w, cur_col,
+                    dashed=True, width=1.2,
+                )
 
         # ── Overlay: hover cursor ──────────────────────────────────────
         hover_ns = getattr(scene, '_hover_ns', None)
         if hover_ns is not None and tpp > 0:
-            sx = int(lw + (hover_ns - t_min) / tpp - scroll)
-            if lw <= sx < w:
-                hov_col = QColor(255, 255, 255, 80) if dark else QColor(0, 0, 0, 80)
-                hov_pen = QPen(hov_col, 1, Qt.DashLine)
-                hov_pen.setDashPattern([3, 3])
-                p.setPen(hov_pen)
-                p.drawLine(sx, _TITLE_H, sx, h)
+            sx = self._time_overlay_x(hover_ns, scene, vis_ns_lo, vis_ns_hi)
+            hov_col = QColor(255, 255, 255, 80) if dark else QColor(0, 0, 0, 80)
+            self._draw_time_overlay_line(
+                p, scene, sx, _TITLE_H, w, hov_col,
+                dashed=True, width=1.0,
+            )
 
         # Label column separator (full height)
         p.setPen(QPen(sepc, 1))
@@ -12187,6 +12302,7 @@ class MainWindow(QMainWindow):
         # Synchronise CPU graph with timeline zoom / pan / task highlight
         self._view.zoom_changed.connect(self._cpu_load_graph.update)
         self._view.horizontalScrollBar().valueChanged.connect(self._cpu_load_graph.update)
+        self._view.verticalScrollBar().valueChanged.connect(self._cpu_load_graph.update)
         self._view._scene.highlight_changed.connect(self._cpu_load_graph.set_task)
         # Synchronise cursor, marks, and hover overlays on the CPU load graph
         self._view._scene.hover_changed.connect(self._cpu_load_graph.update)
