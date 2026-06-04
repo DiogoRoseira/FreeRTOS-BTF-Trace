@@ -1,0 +1,44 @@
+# Ignore all third-party dependencies (Token Drainers)
+node_modules
+bower_components
+vendor
+packages
+
+# Ignore compilation, build, and bundling outputs (Contains huge duplicated code, heavy token waste)
+dist
+build
+.next
+.nuxt
+out
+target
+bin
+obj
+
+# Ignore logs and cache files (Huge text volume with no contextual value)
+.log
+logs
+.npm
+.eslintcache
+.parcel-cache
+
+# Ignore large data files or media assets
+.json
+.csv
+.tsv
+.xml
+assets
+publicimg
+media
+
+# Ignore multimedia and compressed archives
+.mp4
+.mp3
+.zip
+.tar.gz
+.7z
+
+# Ignore documentation and test coverage reports
+coverage
+.nyc_output
+docs
+.md
