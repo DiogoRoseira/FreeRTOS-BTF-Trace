@@ -11129,8 +11129,9 @@ class _CpuLoadGraph(QWidget):
                 break
             effective_h = min(rh, h - ry)
             collapsed   = (kind == "core" and key in self._collapsed_cores)
-            avg_pct     = self._avg_load.get(key, 0.0)
-            pct_text    = f"{avg_pct * 100:.0f}%"
+            bins_for_pct = self._bins_for_row(kind, key)
+            avg_pct = (sum(bins_for_pct) / len(bins_for_pct)) if bins_for_pct else 0.0
+            pct_text = f"{avg_pct * 100:.0f}%"
             indicator   = "▶" if collapsed else "▼"
 
             # ── Label: white triangle → coloured circle → white name → green % ─
