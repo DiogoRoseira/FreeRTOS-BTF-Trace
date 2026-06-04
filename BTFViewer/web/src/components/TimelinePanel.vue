@@ -167,7 +167,7 @@ const props = defineProps({
   options: { type: Object, required: true },  // { viewMode, highlightKey, showGrid, darkMode, orientation, marks }
   cursors: { type: Array, default: () => [] },
 })
-const emit = defineEmits(['viewportChange', 'cursorsChange', 'highlightChange', 'highlightClick', 'segmentClick', 'addBookmark', 'addAnnotation', 'markMove', 'copyScreenshot'])
+const emit = defineEmits(['viewportChange', 'cursorsChange', 'hoverTimeChange', 'highlightChange', 'highlightClick', 'segmentClick', 'clearSelection', 'addBookmark', 'addAnnotation', 'markMove', 'copyScreenshot'])
 
 // ---- Template refs -------------------------------------------------------
 const panelEl     = ref(null)
@@ -466,6 +466,7 @@ function setupHandler() {
     },
     onHoverTimeChange(t) {
       hoverTime.value = t
+      emit('hoverTimeChange', t)
       paintHoverOverlay()  // cheap: only redraws the hover line on the overlay canvas
     },
     onRowHover(_row) {
@@ -487,6 +488,9 @@ function setupHandler() {
     },
     onSegmentClick(seg) {
       emit('segmentClick', seg)
+    },
+    onClearSelection() {
+      emit('clearSelection')
     },
     onFitToWindow() {
       fitToTrace()
@@ -654,6 +658,10 @@ function onGlobalClick() {
   }
 }
 
+function emitViewportChange() {
+  emit('viewportChange', { ...viewport })
+}
+
 // ---- Fit to trace ----------------------------------------------------------
 
 function fitToTrace() {
@@ -664,6 +672,7 @@ function fitToTrace() {
   viewport.timeEnd   = hi
   viewport.scrollY   = 0
   viewport.scrollX   = 0
+  emitViewportChange()
   scheduleRender()
 }
 
@@ -673,6 +682,7 @@ function zoomCenter(factor) {
   const center = (viewport.timeStart + viewport.timeEnd) / 2
   viewport.timeStart = center - span / 2
   viewport.timeEnd   = center + span / 2
+  emitViewportChange()
   scheduleRender()
 }
 
@@ -682,6 +692,7 @@ function jumpToNs(ns) {
   const span = viewport.timeEnd - viewport.timeStart
   viewport.timeStart = ns - span / 2
   viewport.timeEnd   = ns + span / 2
+  emitViewportChange()
   scheduleRender()
 }
 
@@ -837,8 +848,9 @@ function scrollToSegmentIfNeeded(seg) {
 
 function getHoverTime() { return hoverTime.value }
 function getLastActiveCursorTime() { return _handler?.getLastActiveCursorTime() ?? null }
+function getViewport() { return { ...viewport } }
 
-defineExpose({ fitToTrace, scheduleRender, zoomCenter, expandAll, collapseAll, jumpToNs, getViewportCenter, getCoreAtViewportCenter, scrollToTask, scrollToSegmentIfNeeded, captureScreenshotBlob, captureAsSvg, getHoverTime, getLastActiveCursorTime })
+defineExpose({ fitToTrace, scheduleRender, zoomCenter, expandAll, collapseAll, jumpToNs, getViewport, getViewportCenter, getCoreAtViewportCenter, scrollToTask, scrollToSegmentIfNeeded, captureScreenshotBlob, captureAsSvg, getHoverTime, getLastActiveCursorTime })
 
 // ---- Expand / collapse core rows -----------------------------------------
 function onExpandToggle(coreName) {

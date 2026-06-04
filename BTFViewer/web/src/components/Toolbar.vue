@@ -130,6 +130,25 @@
 
     <div class="tb-sep" />
 
+    <label
+      class="tb-btn"
+      :class="{ active: modelValue.showCpuLoad !== false }"
+      title="Show or hide CPU load graph"
+      @click="emit('update:modelValue', { ...modelValue, showCpuLoad: modelValue.showCpuLoad === false })"
+    >
+      <svg
+        viewBox="0 0 16 16"
+        width="16"
+        height="16"
+        fill="currentColor"
+      >
+        <path d="M1 11a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v3H1v-3zm5-4a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v7H6V7zm5-3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v10h-4V4z" />
+      </svg>
+      Load
+    </label>
+
+    <div class="tb-sep" />
+
     <!-- Zoom controls -->
     <button
       class="tb-btn"

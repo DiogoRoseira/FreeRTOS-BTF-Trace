@@ -38,6 +38,7 @@ export class InteractionHandler {
    * @param {Function} options.onRowHover
    * @param {Function} options.onFitToWindow
    * @param {Function} options.onContextMenu   ({ ns, x, y }) – optional right-click callback
+   * @param {Function} options.onClearSelection
    */
   constructor(canvas, options = {}) {
     this._canvas  = canvas
@@ -341,7 +342,11 @@ export class InteractionHandler {
             if (seg) { this._opts.onSegmentClick?.(seg); return }
           }
           // Click in timeline body → place cursor
-          if (t !== null) { this._placeCursor(t); return }
+          if (t !== null) {
+            this._opts.onClearSelection?.()
+            this._placeCursor(t)
+            return
+          }
         }
         // Click in column header area → core expand/collapse or task highlight
         if (cy < HEADER_H && cx >= RULER_W) {
@@ -370,6 +375,7 @@ export class InteractionHandler {
               return
             }
           }
+          this._opts.onClearSelection?.()
         }
         // Click on ruler or header (non-core) → start pan
         this._dragging       = true
@@ -387,6 +393,7 @@ export class InteractionHandler {
             if (seg) { this._opts.onSegmentClick?.(seg); return }
           }
           const tClick = this._canvasToTime(cx, cy)
+          this._opts.onClearSelection?.()
           this._placeCursor(tClick)
           return
         }

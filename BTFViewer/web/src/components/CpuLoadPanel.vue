@@ -179,7 +179,7 @@ import { formatTime } from '../renderer/TimelineRenderer.js'
 import { coreColor, isIdleTaskName, parseTaskName, taskColor, taskDisplayName, taskMergeKey } from '../utils/colors.js'
 
 const NUM_BINS = 1024
-const ROW_H = 92
+const ROW_H = 60
 const COLLAPSED_H = 22
 const ROW_GAP = 2
 const PLOT_W = 1000
@@ -648,7 +648,7 @@ watch(() => props.trace, () => {
 
 .cpu-load-grid-label {
   fill: var(--fg-dim);
-  font-size: 10px;
+  font-size: 7px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 

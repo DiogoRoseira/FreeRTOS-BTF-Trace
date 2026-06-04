@@ -1,12 +1,18 @@
 # BTF Trace Viewer
 
-Current version: **1.2.0** (Desktop Python app + Web app)
+Current version: **1.2.1** (Desktop Python app + Web app)
 
 A PyQt5-based interactive visualiser for FreeRTOS context-switch traces in **Best Trace Format** (`.btf`).
 
 ## Screenshot
 
+Task view and CPU load:
+
 <img src="../images/btfviewer.png" alt="BTF Viewer screenshot" width=640>
+
+Histogram of Exectuion Time:
+
+<img src="../images/btfviewer-2.png" alt="Histogram of Execution Time" width=640>
 
 [DEMO](https://apps.kuoping.com/btf-viewer.html)
 
@@ -29,6 +35,8 @@ A PyQt5-based interactive visualiser for FreeRTOS context-switch traces in **Bes
 - **Dockable Statistics panel** — per-core CPU utilisation and per-task CPU time breakdown
 - **Tag View** — inspect tag channels/events (`tag_event`, `tag0_event` … `tag7_event`) alongside task/core activity
 - **Metrics Table under Statistics Panel** — tabular Execution Time Per Slice and Inter-Arrival metrics (runs, min/avg/max/p95, CPU%)
+- **Metrics distribution charts** — click any row in the Execution Time or Inter-Arrival table to open a scatter-plot + histogram popup for that task
+- **CPU Load Graph** — real-time bar chart below the timeline showing per-core CPU utilisation over the visible time range; toggle with the **Load** toolbar button
 - **STI event markers** — software trace items rendered as coloured diamond markers
 - **Find & Jump** — search for any task name; `F3` / `Shift+F3` steps through all matching segments
 - **Bookmarks & Annotations** — mark important timestamps and attach free-text notes; persisted per trace file in `btf_viewer.rc`
@@ -160,6 +168,25 @@ Hover any task label (left column) or **Legend** swatch to transiently highlight
 ### Grid lines & dark/light theme
 
 Toggle with the **grid** and **moon** buttons in the toolbar. The default theme is dark.
+
+### CPU Load Graph
+
+A bar chart below the timeline shows per-core (or total) CPU utilisation over the currently visible time window.
+
+- **Toggle** — click the **Load** toolbar button to show or hide the graph.
+- **View modes** — in **Task View** a single *CPU Load* row shows aggregate utilisation; in **Core View** each core gets its own row.
+- **Expand / Collapse** — in Core View click a core row header to collapse it to a compact bar.
+- **Hover** — moving the pointer over the timeline projects a live cursor onto the load graph as well.
+- **Cursors, bookmarks & annotations** are also mirrored in the load graph at their exact time positions.
+
+### Metrics Distribution Charts
+
+In the **Statistics** panel, the **Execution Time** and **Inter-Arrival** tables each have a small chart icon (📈) on every row. Click it to open a floating chart popup for that task:
+
+- **Scatter plot** — every individual slice duration (or inter-arrival gap) plotted in arrival order, so you can spot trends or outliers.
+- **Histogram** — a bar chart showing the distribution of durations, revealing multimodal behaviour or long tails.
+
+The popup can be dragged, resized, and closed independently of the main window.
 
 ### STI events
 
@@ -764,3 +791,13 @@ timestamp, Core_N, 0, C, Core_N, 0, set_frequency, freq_hz
 1050000, Core_0, 0, STI, Mutex_Lock,   0, trigger, Mutex_Lock
 1120000, Core_1, 0, STI, Queue_Send,   0, trigger, Queue_Send
 ```
+
+---
+
+## Contributors
+
+Thanks to everyone who has contributed to this project!
+
+| Contributor | Contribution |
+|---|---|
+| **[DiogoRoseira](https://github.com/DiogoRoseira)** | CPU Load Graph and Metrics distribution charts (scatter-plot + histogram popup) |

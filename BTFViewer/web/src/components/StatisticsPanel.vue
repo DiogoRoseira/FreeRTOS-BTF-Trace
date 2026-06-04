@@ -99,7 +99,14 @@
         :key="t.mk"
         class="task-stat-row"
       >
-        <span class="task-stat-name">{{ t.name }}</span>
+        <button
+          class="task-stat-name task-link"
+          type="button"
+          :title="`Highlight ${t.name} in the timeline`"
+          @click="emit('highlightTask', t.mk)"
+        >
+          {{ t.name }}
+        </button>
         <div class="prog-bar">
           <div
             class="prog-fill"
@@ -161,6 +168,12 @@
             <tr
               v-for="row in execSliceStats"
               :key="row.mk"
+              class="stats-table-row clickable"
+              :title="`Open execution-time plot for ${row.name}`"
+              tabindex="0"
+              @click="openPlot(row.mk, 'exec')"
+              @keydown.enter.prevent="openPlot(row.mk, 'exec')"
+              @keydown.space.prevent="openPlot(row.mk, 'exec')"
             >
               <td class="task-col">{{ row.name }}</td>
               <td>{{ row.runs }}</td>
@@ -225,6 +238,12 @@
             <tr
               v-for="row in interArrivalStats"
               :key="row.mk"
+              class="stats-table-row clickable"
+              :title="`Open inter-arrival plot for ${row.name}`"
+              tabindex="0"
+              @click="openPlot(row.mk, 'inter')"
+              @keydown.enter.prevent="openPlot(row.mk, 'inter')"
+              @keydown.space.prevent="openPlot(row.mk, 'inter')"
             >
               <td class="task-col">{{ row.name }}</td>
               <td>{{ row.runs }}</td>
@@ -254,22 +273,263 @@
       </button>
     </div>
   </div>
+
+  <div
+    v-if="plotDialog"
+    class="plot-dialog-overlay"
+    @click.self="closePlot"
+  >
+    <div
+      class="plot-dialog"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="plotDialog.title"
+    >
+      <div class="plot-dialog-header">
+        <div class="plot-dialog-title">{{ plotDialog.title }}</div>
+        <button
+          type="button"
+          class="plot-close-btn"
+          @click="closePlot"
+        >
+          Close
+        </button>
+      </div>
+
+      <div
+        ref="plotContentRef"
+        class="plot-dialog-body"
+      >
+        <div class="plot-card plot-card-scatter">
+          <svg
+            v-if="scatterModel"
+            class="plot-svg"
+            :viewBox="`0 0 ${scatterModel.width} ${scatterModel.height}`"
+          >
+            <rect
+              x="0"
+              y="0"
+              :width="scatterModel.width"
+              :height="scatterModel.height"
+              fill="var(--bg)"
+            />
+
+            <line
+              v-for="grid in scatterModel.yTicks"
+              :key="`scatter-grid-${grid.index}`"
+              :x1="scatterModel.margin.left"
+              :x2="scatterModel.width - scatterModel.margin.right"
+              :y1="grid.y"
+              :y2="grid.y"
+              stroke="var(--border)"
+              stroke-dasharray="3 4"
+            />
+
+            <line
+              :x1="scatterModel.margin.left"
+              :x2="scatterModel.margin.left"
+              :y1="scatterModel.margin.top"
+              :y2="scatterModel.height - scatterModel.margin.bottom"
+              stroke="var(--fg-dim)"
+            />
+            <line
+              :x1="scatterModel.margin.left"
+              :x2="scatterModel.width - scatterModel.margin.right"
+              :y1="scatterModel.height - scatterModel.margin.bottom"
+              :y2="scatterModel.height - scatterModel.margin.bottom"
+              stroke="var(--fg-dim)"
+            />
+
+            <g
+              v-for="tick in scatterModel.yTicks"
+              :key="`scatter-y-${tick.index}`"
+            >
+              <text
+                :x="scatterModel.margin.left - 8"
+                :y="tick.y + 4"
+                text-anchor="end"
+                fill="var(--fg-dim)"
+                class="plot-axis-text"
+              >
+                {{ tick.label }}
+              </text>
+            </g>
+
+            <g
+              v-for="tick in scatterModel.xTicks"
+              :key="`scatter-x-${tick.index}`"
+            >
+              <text
+                :x="tick.x"
+                :y="scatterModel.height - 10"
+                text-anchor="middle"
+                fill="var(--fg-dim)"
+                class="plot-axis-text"
+              >
+                {{ tick.label }}
+              </text>
+            </g>
+
+            <g
+              v-for="refLine in scatterModel.referenceLines"
+              :key="`scatter-ref-${refLine.label}`"
+            >
+              <line
+                :x1="scatterModel.margin.left"
+                :x2="scatterModel.width - scatterModel.margin.right"
+                :y1="refLine.y"
+                :y2="refLine.y"
+                :stroke="refLine.color"
+                stroke-dasharray="5 5"
+              />
+              <text
+                :x="scatterModel.width - scatterModel.margin.right + 6"
+                :y="refLine.y + 4"
+                fill="var(--fg)"
+                class="plot-ref-text"
+              >
+                {{ refLine.label }}
+              </text>
+            </g>
+
+            <g>
+              <circle
+                v-for="point in scatterModel.points"
+                :key="`scatter-point-${point.index}`"
+                :cx="point.x"
+                :cy="point.y"
+                :r="point.index === selectedPlotPoint ? 5 : 3"
+                :fill="point.index === selectedPlotPoint ? '#FFFFFF' : scatterModel.color"
+                class="plot-point"
+                :style="{ cursor: point.payload ? 'pointer' : 'default' }"
+                @click="onPlotPointClick(point)"
+              >
+                <title>{{ point.label }}</title>
+              </circle>
+            </g>
+          </svg>
+        </div>
+
+        <div class="plot-card plot-card-histogram">
+          <svg
+            v-if="histogramModel"
+            class="plot-svg"
+            :viewBox="`0 0 ${histogramModel.width} ${histogramModel.height}`"
+          >
+            <rect
+              x="0"
+              y="0"
+              :width="histogramModel.width"
+              :height="histogramModel.height"
+              fill="var(--bg)"
+            />
+
+            <line
+              :x1="histogramModel.margin.left"
+              :x2="histogramModel.margin.left"
+              :y1="histogramModel.margin.top"
+              :y2="histogramModel.height - histogramModel.margin.bottom"
+              stroke="var(--fg-dim)"
+            />
+            <line
+              :x1="histogramModel.margin.left"
+              :x2="histogramModel.width - histogramModel.margin.right"
+              :y1="histogramModel.height - histogramModel.margin.bottom"
+              :y2="histogramModel.height - histogramModel.margin.bottom"
+              stroke="var(--fg-dim)"
+            />
+
+            <rect
+              v-for="bar in histogramModel.bars"
+              :key="`hist-bar-${bar.index}`"
+              :x="bar.x"
+              :y="bar.y"
+              :width="bar.width"
+              :height="bar.height"
+              :fill="histogramModel.color"
+              fill-opacity="0.82"
+            />
+
+            <g
+              v-for="refLine in histogramModel.referenceLines"
+              :key="`hist-ref-${refLine.label}`"
+            >
+              <line
+                :x1="refLine.x"
+                :x2="refLine.x"
+                :y1="histogramModel.margin.top"
+                :y2="histogramModel.height - histogramModel.margin.bottom"
+                :stroke="refLine.color"
+                stroke-dasharray="5 5"
+              />
+              <text
+                :x="Math.min(refLine.x + 6, histogramModel.width - histogramModel.margin.right - 2)"
+                :y="histogramModel.margin.top + 12"
+                fill="var(--fg)"
+                class="plot-ref-text"
+              >
+                {{ refLine.label }}
+              </text>
+            </g>
+
+            <g
+              v-for="tick in histogramModel.xTicks"
+              :key="`hist-x-${tick.index}`"
+            >
+              <text
+                :x="tick.x"
+                :y="histogramModel.height - 10"
+                text-anchor="middle"
+                fill="var(--fg-dim)"
+                class="plot-axis-text"
+              >
+                {{ tick.label }}
+              </text>
+            </g>
+          </svg>
+        </div>
+      </div>
+
+      <div class="plot-dialog-footer">
+        <button
+          type="button"
+          class="action-btn"
+          @click="exportPlotPng"
+        >
+          Export PNG
+        </button>
+        <button
+          type="button"
+          class="action-btn"
+          @click="exportPlotSvg"
+        >
+          Export SVG
+        </button>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup>
 import { ref, computed, watch } from 'vue'
+import { toBlob as domToBlob, toSvg as domToSvg } from 'html-to-image'
 import { formatTime } from '../renderer/TimelineRenderer.js'
-import { taskDisplayName, parseTaskName, taskMergeKey, isIdleTaskName } from '../utils/colors.js'
+import { taskDisplayName, parseTaskName, taskMergeKey, isIdleTaskName, taskColor } from '../utils/colors.js'
 
 const props = defineProps({
   trace:   { type: Object, required: true },
   cursors: { type: Array, default: () => [] },
 })
 
+const emit = defineEmits(['highlightTask', 'selectSegment'])
+
 const coresCollapsed = ref(false)
 const tasksCollapsed = ref(false)
 const execSliceCollapsed = ref(false)
 const interArrivalCollapsed = ref(false)
+const plotDialog = ref(null)
+const plotContentRef = ref(null)
+const selectedPlotPoint = ref(-1)
 
 function clampPct(v) { return Math.max(0, Math.min(100, v)).toFixed(1) }
 
@@ -407,6 +667,219 @@ const interArrivalStats = computed(() => {
 
   return rows.sort((a, b) => b.runs - a.runs || a.name.localeCompare(b.name))
 })
+
+function _summarizeNumericSamples(samples) {
+  if (!samples || samples.length === 0) return null
+  const values = [...samples].sort((a, b) => a - b)
+  const n = values.length
+  return {
+    avg: values.reduce((sum, value) => sum + value, 0) / n,
+    p50: values[Math.min(n - 1, Math.floor(n * 0.5))],
+    p95: values[Math.min(n - 1, Math.floor(n * 0.95))],
+  }
+}
+
+function _downloadBlob(filename, blob) {
+  if (!blob) return
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+
+function _downloadDataUrl(filename, dataUrl) {
+  if (!dataUrl) return
+  const anchor = document.createElement('a')
+  anchor.href = dataUrl
+  anchor.download = filename
+  anchor.click()
+}
+
+function _safeFileName(title) {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'metrics-plot'
+}
+
+function _buildExecPlot(trace, mk) {
+  const segs = trace?.segByMergeKey?.get(mk) || []
+  if (segs.length === 0) return null
+  const repr = trace.taskRepr.get(mk) || mk
+  const points = segs
+    .filter(seg => seg.end > seg.start)
+    .map((seg, index) => ({
+      index,
+      xNs: seg.start,
+      yValue: seg.end - seg.start,
+      payload: seg,
+      label: `${taskDisplayName(repr)}: ${formatTime(seg.end - seg.start, trace.timeScale)} at ${formatTime(seg.start, trace.timeScale)}`,
+    }))
+  if (points.length === 0) return null
+  return {
+    kind: 'exec',
+    mk,
+    title: `${taskDisplayName(repr)} - Execution Time`,
+    color: taskColor(mk, repr),
+    points,
+  }
+}
+
+function _buildInterPlot(trace, mk) {
+  const segs = trace?.segByMergeKey?.get(mk) || []
+  if (segs.length < 2) return null
+  const repr = trace.taskRepr.get(mk) || mk
+  const sorted = [...segs].sort((a, b) => a.start - b.start)
+  const points = []
+  for (let i = 1; i < sorted.length; i++) {
+    const delta = sorted[i].start - sorted[i - 1].start
+    if (delta <= 0) continue
+    points.push({
+      index: points.length,
+      xNs: sorted[i].start,
+      yValue: delta,
+      payload: sorted[i],
+      label: `${taskDisplayName(repr)}: ${formatTime(delta, trace.timeScale)} from ${formatTime(sorted[i - 1].start, trace.timeScale)}`,
+    })
+  }
+  if (points.length === 0) return null
+  return {
+    kind: 'inter',
+    mk,
+    title: `${taskDisplayName(repr)} - Inter-Arrival Time`,
+    color: taskColor(mk, repr),
+    points,
+  }
+}
+
+function openPlot(mk, kind) {
+  const plot = kind === 'exec'
+    ? _buildExecPlot(props.trace, mk)
+    : _buildInterPlot(props.trace, mk)
+  if (!plot) return
+  plotDialog.value = plot
+  selectedPlotPoint.value = -1
+}
+
+function closePlot() {
+  plotDialog.value = null
+  selectedPlotPoint.value = -1
+}
+
+function onPlotPointClick(point) {
+  selectedPlotPoint.value = point.index
+  if (point.payload) emit('selectSegment', point.payload)
+}
+
+const scatterModel = computed(() => {
+  const plot = plotDialog.value
+  if (!plot || plot.points.length === 0) return null
+  const width = 820
+  const height = 320
+  const margin = { left: 72, right: 42, top: 16, bottom: 34 }
+  const xs = plot.points.map(point => point.xNs)
+  const ys = plot.points.map(point => point.yValue)
+  const x0 = Math.min(...xs)
+  const x1 = Math.max(...xs)
+  const yMax = Math.max(1, ...ys)
+  const xSpan = Math.max(1, x1 - x0)
+  const plotW = width - margin.left - margin.right
+  const plotH = height - margin.top - margin.bottom
+  const summary = _summarizeNumericSamples(ys)
+
+  const scaleX = value => margin.left + ((value - x0) / xSpan) * plotW
+  const scaleY = value => margin.top + plotH - (value / yMax) * plotH
+
+  return {
+    width,
+    height,
+    margin,
+    color: plot.color,
+    xTicks: [0, 0.5, 1].map((ratio, index) => {
+      const value = Math.round(x0 + xSpan * ratio)
+      return { index, x: scaleX(value), label: formatTime(value, props.trace.timeScale) }
+    }),
+    yTicks: Array.from({ length: 5 }, (_, index) => {
+      const value = yMax * (1 - index / 4)
+      return { index, y: scaleY(value), label: formatTime(Math.round(value), props.trace.timeScale) }
+    }),
+    referenceLines: summary ? [
+      { label: 'avg', y: scaleY(summary.avg), color: '#CE93D8' },
+      { label: 'p50', y: scaleY(summary.p50), color: '#4CAF50' },
+      { label: 'p95', y: scaleY(summary.p95), color: '#FF9800' },
+    ] : [],
+    points: plot.points.map(point => ({
+      ...point,
+      x: scaleX(point.xNs),
+      y: scaleY(point.yValue),
+    })),
+  }
+})
+
+const histogramModel = computed(() => {
+  const plot = plotDialog.value
+  if (!plot || plot.points.length === 0) return null
+  const width = 820
+  const height = 220
+  const margin = { left: 72, right: 24, top: 16, bottom: 34 }
+  const values = plot.points.map(point => point.yValue).sort((a, b) => a - b)
+  const v0 = values[0]
+  const v1 = values[values.length - 1]
+  const vSpan = Math.max(1, v1 - v0)
+  const plotW = width - margin.left - margin.right
+  const plotH = height - margin.top - margin.bottom
+  const binCount = 50
+  const counts = Array.from({ length: binCount }, () => 0)
+  const step = vSpan / binCount
+  for (const value of values) {
+    const rawIndex = step > 0 ? Math.floor((value - v0) / step) : 0
+    counts[Math.min(binCount - 1, Math.max(0, rawIndex))] += 1
+  }
+  const maxCount = Math.max(1, ...counts)
+  const summary = _summarizeNumericSamples(values)
+  const scaleX = value => margin.left + ((value - v0) / vSpan) * plotW
+
+  return {
+    width,
+    height,
+    margin,
+    color: plot.color,
+    bars: counts.map((count, index) => {
+      const barWidth = Math.max(1, plotW / binCount - 1)
+      const barHeight = count > 0 ? (count / maxCount) * plotH : 0
+      return {
+        index,
+        x: margin.left + (index * plotW) / binCount,
+        y: margin.top + plotH - barHeight,
+        width: barWidth,
+        height: barHeight,
+      }
+    }),
+    xTicks: [0, 0.5, 1].map((ratio, index) => {
+      const value = Math.round(v0 + vSpan * ratio)
+      return { index, x: scaleX(value), label: formatTime(value, props.trace.timeScale) }
+    }),
+    referenceLines: summary ? [
+      { label: 'avg', x: scaleX(summary.avg), color: '#CE93D8' },
+      { label: 'p50', x: scaleX(summary.p50), color: '#4CAF50' },
+      { label: 'p95', x: scaleX(summary.p95), color: '#FF9800' },
+    ] : [],
+  }
+})
+
+async function exportPlotPng() {
+  if (!plotContentRef.value || !plotDialog.value) return
+  const blob = await domToBlob(plotContentRef.value, {
+    cacheBust: true,
+    pixelRatio: window.devicePixelRatio || 1,
+  })
+  _downloadBlob(`${_safeFileName(plotDialog.value.title)}.png`, blob)
+}
+
+async function exportPlotSvg() {
+  if (!plotContentRef.value || !plotDialog.value) return
+  const dataUrl = await domToSvg(plotContentRef.value, { cacheBust: true })
+  _downloadDataUrl(`${_safeFileName(plotDialog.value.title)}.svg`, dataUrl)
+}
 
 function _htmlCell(v) {
   return String(v ?? '')
@@ -892,6 +1365,10 @@ watch(() => props.cursors, (cursors) => {
     rangeStats.value = _computeRangeStats(cursors)
   }, 200)
 }, { deep: true })
+
+watch(() => props.trace, () => {
+  closePlot()
+})
 </script>
 
 <style scoped>
@@ -999,6 +1476,22 @@ watch(() => props.cursors, (cursors) => {
   white-space: nowrap;
 }
 
+.task-link {
+  appearance: none;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+}
+
+.task-link:hover,
+.task-link:focus-visible {
+  color: var(--accent);
+  outline: none;
+}
+
 .prog-bar {
   flex: 1;
   height: 8px;
@@ -1069,6 +1562,19 @@ watch(() => props.cursors, (cursors) => {
   border-bottom: none;
 }
 
+.stats-table-row.clickable {
+  cursor: pointer;
+}
+
+.stats-table-row.clickable:hover td,
+.stats-table-row.clickable:focus-visible td {
+  background: var(--tb-btn-hover);
+}
+
+.stats-table-row.clickable:focus-visible {
+  outline: none;
+}
+
 .stats-export-row {
   display: flex;
   gap: 4px;
@@ -1090,5 +1596,109 @@ watch(() => props.cursors, (cursors) => {
 .action-btn:hover {
   background: var(--tb-btn-hover);
   color: var(--fg);
+}
+
+.plot-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.52);
+  backdrop-filter: blur(2px);
+}
+
+.plot-dialog {
+  width: min(900px, calc(100vw - 32px));
+  max-height: min(86vh, 760px);
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.plot-dialog-header,
+.plot-dialog-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.plot-dialog-header {
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+}
+
+.plot-dialog-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--fg);
+}
+
+.plot-close-btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.plot-close-btn:hover {
+  background: var(--tb-btn-hover);
+}
+
+.plot-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  overflow: auto;
+}
+
+.plot-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-bg) 70%, var(--bg));
+  overflow: hidden;
+}
+
+.plot-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.plot-point:hover {
+  filter: brightness(1.18);
+}
+
+.plot-axis-text,
+.plot-ref-text {
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.plot-dialog-footer {
+  justify-content: flex-end;
+  border-top: 1px solid var(--border);
+}
+
+@media (max-width: 720px) {
+  .plot-dialog {
+    width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+  }
+
+  .plot-dialog-header,
+  .plot-dialog-footer,
+  .plot-dialog-body {
+    padding: 10px;
+  }
 }
 </style>

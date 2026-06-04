@@ -377,7 +377,7 @@ _IC_SETTINGS = ("M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1
                 "M8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z")
 
 # App icon — multi-colour 72×72 SVG rendered in the About dialog header.
-_APP_VERSION = "1.1.0"
+_APP_VERSION = "1.2.1"
 _APP_ICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">'
     '<rect x="3" y="3" width="66" height="66" rx="14" fill="#1C3A6E"/>'
@@ -1389,12 +1389,14 @@ def _make_rotated_label(scene, text: str, font: "QFont", color: "QColor",
         dev_w = fm_dev.horizontalAdvance(text) + pad_x * 2
         dev_h = fm_dev.height() + pad_y * 2
         p = QPainter(pm)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setRenderHint(QPainter.TextAntialiasing)
-        p.setFont(pm_font)
-        p.setPen(color)
-        p.drawText(QRectF(0, 0, dev_w, dev_h), Qt.AlignCenter, text)
-        p.end()
+        try:
+            p.setRenderHint(QPainter.Antialiasing)
+            p.setRenderHint(QPainter.TextAntialiasing)
+            p.setFont(pm_font)
+            p.setPen(color)
+            p.drawText(QRectF(0, 0, dev_w, dev_h), Qt.AlignCenter, text)
+        finally:
+            p.end()
         # Rotate -90° and use SmoothTransformation so the resampling step
         # does not introduce additional jaggedness.
         rotated = pm.transformed(QTransform().rotate(-90), Qt.SmoothTransformation)
@@ -1630,19 +1632,19 @@ class TimelineScene(QGraphicsScene):
         # Stored as ns timestamps; drawn as colored dash-lines above everything.
         self._cursor_times: List[int] = []
         self._cursor_items: list = []    # live QGraphicsItems for cursors
-        # Counter of cursor-label entries appended to _frozen_top_items by
+        # Set of cursor-label QGraphicsItems appended to _frozen_top_items by
         # the most recent _draw_cursors() call.  Used to purge stale entries
         # on a direct (non-rebuild) _draw_cursors() call (e.g. cursor drag).
-        self._cursor_frozen_top_count: int = 0
-        # Counter of cursor-label entries appended to _frozen_items by
+        self._cursor_frozen_top_set: set = set()
+        # Set of cursor-label QGraphicsItems appended to _frozen_items by
         # vertical-mode _draw_cursors() calls (left-edge frozen labels).
-        self._cursor_frozen_left_count: int = 0
+        self._cursor_frozen_left_set: set = set()
         # -- Mark overlay (bookmarks + annotations) ----------------------
         # Each entry: (ns, label, color_hex)
         self._mark_data: List[tuple] = []
         self._mark_items: list = []    # live QGraphicsItems for marks
-        self._mark_frozen_top_count: int = 0
-        self._mark_frozen_left_count: int = 0
+        self._mark_frozen_top_set: set = set()   # items added by _draw_marks (top-frozen)
+        self._mark_frozen_left_set: set = set()  # items added by _draw_marks (left-frozen)
         # -- Find-hit overlay (all match positions from the Find panel) ---
         self._find_hit_ns_list: List[int] = []
         self._find_hit_items: list = []
@@ -1795,14 +1797,14 @@ class TimelineScene(QGraphicsScene):
             self.removeItem(item)
         self._mark_items.clear()
         # Purge frozen entries added by the previous call.
-        if self._mark_frozen_top_count > 0:
-            if len(self._frozen_top_items) >= self._mark_frozen_top_count:
-                del self._frozen_top_items[-self._mark_frozen_top_count:]
-            self._mark_frozen_top_count = 0
-        if self._mark_frozen_left_count > 0:
-            if len(self._frozen_items) >= self._mark_frozen_left_count:
-                del self._frozen_items[-self._mark_frozen_left_count:]
-            self._mark_frozen_left_count = 0
+        if self._mark_frozen_top_set:
+            self._frozen_top_items = [e for e in self._frozen_top_items
+                                      if e[0] not in self._mark_frozen_top_set]
+            self._mark_frozen_top_set = set()
+        if self._mark_frozen_left_set:
+            self._frozen_items = [e for e in self._frozen_items
+                                  if e[0] not in self._mark_frozen_left_set]
+            self._mark_frozen_left_set = set()
 
         if self._trace is None or not self._mark_data:
             return
@@ -1854,7 +1856,7 @@ class TimelineScene(QGraphicsScene):
                 self.addItem(_flag)
                 self._mark_items.append(_flag)
                 self._frozen_top_items.append((_flag, 0))
-                self._mark_frozen_top_count += 1
+                self._mark_frozen_top_set.add(_flag)
 
                 short = (label[:24] + "…") if len(label) > 24 else label
                 lbl = self.addSimpleText(short, font)
@@ -1876,7 +1878,7 @@ class TimelineScene(QGraphicsScene):
                 self._mark_items.extend([bg, lbl])
                 self._frozen_top_items.append((bg,  _orig_y + RULER_HEIGHT // 2 - 1))
                 self._frozen_top_items.append((lbl, _orig_y + RULER_HEIGHT // 2))
-                self._mark_frozen_top_count += 2
+                self._mark_frozen_top_set.update({bg, lbl})
 
             else:  # vertical mode
                 label_row_h = self._label_width
@@ -1911,7 +1913,7 @@ class TimelineScene(QGraphicsScene):
                 self.addItem(_flag)
                 self._mark_items.append(_flag)
                 self._frozen_items.append((_flag, 0))
-                self._mark_frozen_left_count += 1
+                self._mark_frozen_left_set.add(_flag)
 
                 short = (label[:24] + "…") if len(label) > 24 else label
                 lbl = self.addSimpleText(short, font)
@@ -1933,7 +1935,7 @@ class TimelineScene(QGraphicsScene):
                 self._mark_items.extend([bg, lbl])
                 self._frozen_items.append((bg,  _left_pad - 2))
                 self._frozen_items.append((lbl, _left_pad))
-                self._mark_frozen_left_count += 2
+                self._mark_frozen_left_set.update({bg, lbl})
 
     def set_hover_highlight(self, enabled: bool) -> None:
         """Enable or disable hover-over-label task highlighting."""
@@ -2426,14 +2428,14 @@ class TimelineScene(QGraphicsScene):
         # Purge any cursor-label entries that were appended to _frozen_top_items
         # by the previous _draw_cursors() call.  This is only needed on direct
         # calls (e.g. cursor drag); rebuild() already resets _frozen_top_items.
-        if self._cursor_frozen_top_count > 0:
-            if len(self._frozen_top_items) >= self._cursor_frozen_top_count:
-                del self._frozen_top_items[-self._cursor_frozen_top_count:]
-            self._cursor_frozen_top_count = 0
-        if self._cursor_frozen_left_count > 0:
-            if len(self._frozen_items) >= self._cursor_frozen_left_count:
-                del self._frozen_items[-self._cursor_frozen_left_count:]
-            self._cursor_frozen_left_count = 0
+        if self._cursor_frozen_top_set:
+            self._frozen_top_items = [e for e in self._frozen_top_items
+                                      if e[0] not in self._cursor_frozen_top_set]
+            self._cursor_frozen_top_set = set()
+        if self._cursor_frozen_left_set:
+            self._frozen_items = [e for e in self._frozen_items
+                                  if e[0] not in self._cursor_frozen_left_set]
+            self._cursor_frozen_left_set = set()
 
         if self._trace is None or not self._cursor_times:
             return
@@ -2486,7 +2488,7 @@ class TimelineScene(QGraphicsScene):
                 # keeps them in the ruler area regardless of vertical scroll.
                 self._frozen_top_items.append((bg, _orig_y - 1))
                 self._frozen_top_items.append((lbl, _orig_y))
-                self._cursor_frozen_top_count += 2
+                self._cursor_frozen_top_set.update({bg, lbl})
 
                 if order > 0:
                     prev_ns = sorted_cursors[order - 1][1]
@@ -2539,7 +2541,7 @@ class TimelineScene(QGraphicsScene):
                 # Keep vertical-mode cursor labels frozen at viewport-left.
                 self._frozen_items.append((bg, _left_pad - 2))
                 self._frozen_items.append((lbl, _left_pad))
-                self._cursor_frozen_left_count += 2
+                self._cursor_frozen_left_set.update({bg, lbl})
 
                 if order > 0:
                     prev_ns = sorted_cursors[order - 1][1]
@@ -2661,10 +2663,10 @@ class TimelineScene(QGraphicsScene):
         self._mark_items = []
         self._frozen_items = []
         self._frozen_top_items = []
-        self._cursor_frozen_top_count = 0
-        self._cursor_frozen_left_count = 0
-        self._mark_frozen_top_count = 0
-        self._mark_frozen_left_count = 0
+        self._cursor_frozen_top_set = set()
+        self._cursor_frozen_left_set = set()
+        self._mark_frozen_top_set = set()
+        self._mark_frozen_left_set = set()
         self._task_row_rects = {}
         self._hover_overlay_items = []   # clear() removed them from the scene
         self._hover_items = []             # clear() removed them from the scene
@@ -6776,10 +6778,12 @@ class TimelineView(QGraphicsView):
 
         if not row_data and not sti_row_data:
             # Border only
-            p.setPen(QPen(QColor(70, 70, 70), 1))
-            p.setBrush(Qt.NoBrush)
-            p.drawRect(0, 0, W - 1, H - 1)
-            p.end()
+            try:
+                p.setPen(QPen(QColor(70, 70, 70), 1))
+                p.setBrush(Qt.NoBrush)
+                p.drawRect(0, 0, W - 1, H - 1)
+            finally:
+                p.end()
             return pix
 
         # Compute actual STI height in main-view pixels (matching scene layout) so
@@ -6891,10 +6895,12 @@ class TimelineView(QGraphicsView):
                         p.drawEllipse(QPointF(x1, y + rh / 2), 2.0, 2.0)
 
         # Static border
-        p.setPen(QPen(QColor(70, 70, 70), 1))
-        p.setBrush(Qt.NoBrush)
-        p.drawRect(0, 0, W - 1, H - 1)
-        p.end()
+        try:
+            p.setPen(QPen(QColor(70, 70, 70), 1))
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(0, 0, W - 1, H - 1)
+        finally:
+            p.end()
         return pix
 
     def _paint_nav_pixmap(self) -> QPixmap:
@@ -6969,10 +6975,12 @@ class TimelineView(QGraphicsView):
         vy1  = max(0.0, min(float(H), vy1))
         vy_h = min(float(H) - vy1, vy_h)
 
-        p.setPen(QPen(QColor(255, 140, 0), 1.5))
-        p.setBrush(QBrush(QColor(255, 140, 0, 35)))
-        p.drawRect(QRectF(vx1, vy1, max(1.5, vx2 - vx1), max(1.5, vy_h)))
-        p.end()
+        try:
+            p.setPen(QPen(QColor(255, 140, 0), 1.5))
+            p.setBrush(QBrush(QColor(255, 140, 0, 35)))
+            p.drawRect(QRectF(vx1, vy1, max(1.5, vx2 - vx1), max(1.5, vy_h)))
+        finally:
+            p.end()
         return pix
 
     def _show_nav(self) -> None:
@@ -7760,6 +7768,7 @@ class _ScatterWidget(QWidget):
         self._color      = color
         self._is_dark    = is_dark
         self._highlight  = -1   # index of highlighted point (-1 = none)
+        self._hover_idx  = -1   # index of hovered point for tooltip
         self.setMinimumHeight(160)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setMouseTracking(True)
@@ -7869,11 +7878,46 @@ class _ScatterWidget(QWidget):
                 p.setBrush(QBrush(dot_color))
                 p.drawEllipse(cx - 3, cy - 3, 6, 6)
 
+        # Hover tooltip
+        if self._hover_idx >= 0 and self._hover_idx < len(self._points):
+            hpt = self._points[self._hover_idx]
+            line1 = _format_time(int(hpt[1]), self._time_scale)
+            line2 = "@ " + _format_time(int(hpt[0]), self._time_scale)
+            tf = QFont(); tf.setPointSize(8)
+            p.setFont(tf)
+            fm = p.fontMetrics()
+            tw = max(fm.horizontalAdvance(line1), fm.horizontalAdvance(line2))
+            th = fm.height() * 2 + 6
+            pad = 6
+            bw_ = tw + pad * 2
+            bh_ = th + pad * 2
+            hx = sx(hpt[0])
+            hy = sy(hpt[1])
+            bx = hx + 10
+            by = hy - bh_ // 2
+            if bx + bw_ > w - 2:
+                bx = hx - bw_ - 10
+            if by < 2:
+                by = 2
+            if by + bh_ > h - 2:
+                by = h - bh_ - 2
+            bg2 = QColor("#2A2A2A") if dark else QColor("#F0F0F0")
+            bg2.setAlpha(230)
+            border_c = QColor("#555555") if dark else QColor("#BBBBBB")
+            p.setBrush(QBrush(bg2))
+            p.setPen(QPen(border_c, 1))
+            p.drawRoundedRect(bx, by, bw_, bh_, 4, 4)
+            p.setPen(QColor("#EEEEEE") if dark else QColor("#222222"))
+            p.drawText(bx + pad, by + pad + fm.ascent(), line1)
+            p.setPen(QColor("#AAAAAA") if dark else QColor("#666666"))
+            p.drawText(bx + pad, by + pad + fm.height() + fm.ascent(), line2)
+
         p.end()
 
-    def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() != Qt.LeftButton or not self._points:
-            return
+    def _nearest_point(self, ex: int, ey: int, threshold: int = 12):
+        """Return (distance_sq, index) of the nearest scatter point within threshold px."""
+        if not self._points:
+            return float("inf"), -1
         w, h = self.width(), self.height()
         ML, MR, MT, MB = 56, 14, 14, 36
         xs = [p[0] for p in self._points]
@@ -7882,11 +7926,8 @@ class _ScatterWidget(QWidget):
         y1 = max(ys) if ys else 1
         pw = w - ML - MR
         ph = h - MT - MB
-
         def sx(x): return ML + int((x - x0) / max(x1 - x0, 1) * pw)
         def sy(y): return MT + ph - int(y / max(y1, 1) * ph)
-
-        ex, ey = event.x(), event.y()
         best_d, best_i = float("inf"), -1
         for i, pt in enumerate(self._points):
             dx = sx(pt[0]) - ex
@@ -7894,8 +7935,27 @@ class _ScatterWidget(QWidget):
             d  = dx * dx + dy * dy
             if d < best_d:
                 best_d, best_i = d, i
+        if best_d <= threshold * threshold:
+            return best_d, best_i
+        return float("inf"), -1
 
-        if best_d <= 64:   # 8px radius
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        _, idx = self._nearest_point(event.x(), event.y(), threshold=12)
+        if idx != self._hover_idx:
+            self._hover_idx = idx
+            self.update()
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        if self._hover_idx != -1:
+            self._hover_idx = -1
+            self.update()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() != Qt.LeftButton or not self._points:
+            return
+        _, best_i = self._nearest_point(event.x(), event.y(), threshold=8)
+
+        if best_i >= 0:
             self._highlight = best_i
             self.update()
             self.point_clicked.emit(self._points[best_i][2])
@@ -8095,8 +8155,10 @@ class _MetricsPlotDialog(QDialog):
             gen.setTitle(self._title)
             gen.setDescription("Generated by RTOS BTF Viewer")
             painter = QPainter(gen)
-            self._content.render(painter)
-            painter.end()
+            try:
+                self._content.render(painter)
+            finally:
+                painter.end()
         except (OSError, RuntimeError) as exc:
             QMessageBox.critical(self, "SVG Export Error", str(exc))
 
@@ -8185,16 +8247,16 @@ class _StatsPanel(QWidget):
             title = f"{name} — Execution Time"
         else:
             starts = sorted(s.start for s in segs)
-            # Map start → segment so we can highlight the slice at interval start
+            # Map start → segment so we can highlight the arriving slice
             start_to_seg = {s.start: s for s in segs}
-            pts    = [(starts[i - 1], starts[i] - starts[i - 1],
-                       start_to_seg.get(starts[i - 1]))
+            pts    = [(starts[i], starts[i] - starts[i - 1],
+                       start_to_seg.get(starts[i]))
                       for i in range(1, len(starts))
                       if starts[i] > starts[i - 1]]
             title  = f"{name} — Inter-Arrival Time"
         if not pts:
             return
-        # Both exec and inter-arrival highlight the slice at the interval start
+        # Both exec and inter-arrival highlight the slice at the plotted time
         _on_click = lambda seg: self.segment_select.emit(seg) if seg is not None else None
         if self._plot_dlg is not None:
             self._plot_dlg.close()
@@ -10186,8 +10248,10 @@ class SnapshotEditorDialog(QDialog):
             pm.fill(Qt.transparent)
             from PyQt5.QtGui import QPainter
             p = QPainter(pm)
-            renderer.render(p)
-            p.end()
+            try:
+                renderer.render(p)
+            finally:
+                p.end()
             return pm
 
         icon = QIcon()
@@ -10649,10 +10713,12 @@ class SnapshotEditorDialog(QDialog):
         """Composite the original image and all annotations at full resolution."""
         result = QPixmap(self._orig_pixmap)
         painter = QPainter(result)
-        painter.setRenderHint(QPainter.Antialiasing)
-        self._paint_shapes(painter, self._shapes, QColor('#ffffff'), 2)
-        self._paint_shapes(painter, self._shapes)
-        painter.end()
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
+            self._paint_shapes(painter, self._shapes, QColor('#ffffff'), 2)
+            self._paint_shapes(painter, self._shapes)
+        finally:
+            painter.end()
         return result
 
     def _on_copy(self) -> None:
@@ -10732,8 +10798,11 @@ class SnapshotEditorDialog(QDialog):
                 stderr=subprocess.PIPE,
                 text=True,
             )
-            return proc.returncode == 0
-        except Exception:
+            if proc.returncode != 0:
+                print(f"[BTF Viewer] clipboard error: {proc.stderr.strip()}", file=sys.stderr)
+                return False
+            return True
+        except (OSError, subprocess.SubprocessError, ValueError):
             return False
         finally:
             if tmp_path:
@@ -11086,7 +11155,7 @@ class _CpuLoadGraph(QWidget):
         t_max  = self._trace.time_max
         n      = self._NUM_BINS
         bin_w  = self._bin_w_ns
-        if bin_w <= 0 or tpp <= 0:
+        if tpp <= 0:
             return
 
         rows = self._get_rows()
@@ -12912,6 +12981,23 @@ class MainWindow(QMainWindow):
         if self._trace is None or seg is None:
             return
         self._view.scroll_to_ns(seg.start)
+        # Re-center on both axes: scroll_to_ns only preserves the orthogonal
+        # scroll position, so if the task row is off-screen we must explicitly
+        # scroll to it.  Use task_orth_scene_span (which accepts core_name) so
+        # that in core view the exact core-task row is targeted rather than the
+        # first matching task row across all cores.
+        sc = self._view._scene
+        mk = _task_merge_key(seg.task)
+        core_name = seg.core if sc._view_mode == "core" else None
+        span = sc.task_orth_scene_span(mk, core_name=core_name)
+        if span is not None:
+            orth = (span[0] + span[1]) / 2
+            time_coord = sc.ns_to_scene_coord(seg.start)
+            if sc._horizontal:
+                self._view.centerOn(time_coord, orth)
+            else:
+                self._view.centerOn(orth, time_coord)
+            self._view.viewport().update()
         self._view._scene.set_highlighted_segment(seg)
 
     def _add_bookmark_at_center(self) -> None:
@@ -13460,9 +13546,11 @@ class MainWindow(QMainWindow):
                                tl_pix.height() + cpu_pix.height())
             combined.fill(Qt.transparent)
             _p = QPainter(combined)
-            _p.drawPixmap(0, 0, tl_pix)
-            _p.drawPixmap(0, tl_pix.height(), cpu_pix)
-            _p.end()
+            try:
+                _p.drawPixmap(0, 0, tl_pix)
+                _p.drawPixmap(0, tl_pix.height(), cpu_pix)
+            finally:
+                _p.end()
             pixmap = combined
         else:
             pixmap = tl_pix
@@ -13500,12 +13588,14 @@ class MainWindow(QMainWindow):
             gen.setTitle("BTF Timeline")
             gen.setDescription("Generated by RTOS BTF Viewer")
             painter = QPainter(gen)
-            scene.render(painter, QRectF(0, 0, w, h), scene_rect)
-            if include_cpu:
-                painter.translate(0, h)
-                self._cpu_load_graph.render(painter)
-                painter.translate(0, -h)
-            painter.end()
+            try:
+                scene.render(painter, QRectF(0, 0, w, h), scene_rect)
+                if include_cpu:
+                    painter.translate(0, h)
+                    self._cpu_load_graph.render(painter)
+                    painter.translate(0, -h)
+            finally:
+                painter.end()
             self.statusBar().showMessage(f"Saved: {path}", 4000)
         except (OSError, RuntimeError) as exc:
             QMessageBox.critical(self, "Save Error", f"Could not save SVG:\n{exc}")
@@ -13521,9 +13611,11 @@ class MainWindow(QMainWindow):
                                tl_pix.height() + cpu_pix.height())
             combined.fill(Qt.transparent)
             _p = QPainter(combined)
-            _p.drawPixmap(0, 0, tl_pix)
-            _p.drawPixmap(0, tl_pix.height(), cpu_pix)
-            _p.end()
+            try:
+                _p.drawPixmap(0, 0, tl_pix)
+                _p.drawPixmap(0, tl_pix.height(), cpu_pix)
+            finally:
+                _p.end()
             pixmap = combined
         else:
             pixmap = tl_pix

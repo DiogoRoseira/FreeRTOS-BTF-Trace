@@ -51,22 +51,40 @@
           </div>
         </div>
       </div>
-      <!-- Timeline (flex: 1) -->
-      <TimelinePanel
-        ref="timelinePanelRef"
-        :trace="trace"
-        :options="timelineOptions"
-        :cursors="cursors"
-        @cursors-change="cursors = $event"
-        @highlight-change="(k) => timelineOptions.highlightKey = k ?? pinnedHighlightKey"
-        @highlight-click="onHighlightClick"
+      <div ref="leftPaneRef" class="left-pane">
+        <TimelinePanel
+          ref="timelinePanelRef"
+          :trace="trace"
+          :options="timelineOptions"
+          :cursors="cursors"
+          @cursors-change="cursors = $event"
+          @hover-time-change="cpuLoadHoverTime = $event"
+          @viewport-change="onTimelineViewportChange"
+          @highlight-change="(k) => timelineOptions.highlightKey = k ?? pinnedHighlightKey"
+          @highlight-click="onHighlightClick"
           @segment-click="onSegmentClick"
-        @add-bookmark="onAddBookmark"
-        @add-annotation="onAddAnnotation"
-        @mark-move="onMoveMark"
-        @copy-screenshot="onCopyScreenshot"
-        @export-svg="onExportSvg"
-      />
+          @clear-selection="clearCpuLoadSelection"
+          @add-bookmark="onAddBookmark"
+          @add-annotation="onAddAnnotation"
+          @mark-move="onMoveMark"
+          @copy-screenshot="onCopyScreenshot"
+          @export-svg="onExportSvg"
+        />
+
+        <CpuLoadPanel
+          v-if="trace && timelineOptions.showCpuLoad"
+          :trace="trace"
+          :viewport="timelineViewport"
+          :view-mode="timelineOptions.viewMode"
+          :dark-mode="timelineOptions.darkMode"
+          :selected-task="cpuLoadSelectedTask"
+          :all-expanded="cpuLoadExpanded"
+          :cursors="cursors"
+          :hover-time="cpuLoadHoverTime"
+          :marks="marks"
+          @clear-selection="clearCpuLoadSelection"
+        />
+      </div>
 
       <div
         v-if="trace"
@@ -191,6 +209,8 @@
               <StatisticsPanel
                 :trace="trace"
                 :cursors="cursors"
+                @highlight-task="onHighlightClick"
+                @select-segment="onStatsSelectSegment"
               />
             </div>
           </div>
@@ -327,6 +347,12 @@
                 Click timeline
               </div><div>Place/remove cursor</div>
               <div class="k">
+                Move mouse
+              </div><div>Show live hover cursor in timeline and CPU load view</div>
+              <div class="k">
+                Drag cursor/mark
+              </div><div>Move the same cursor, bookmark, or annotation in both views</div>
+              <div class="k">
                 Right-click timeline
               </div><div>Open context menu</div>
               <div class="k">
@@ -335,6 +361,52 @@
               <div class="k">
                 Double-click ruler
               </div><div>Fit timeline</div>
+            </div>
+          </div>
+
+          <div class="help-section">
+            <div class="help-section-title">
+              Selection & CPU Load
+            </div>
+            <div class="help-grid">
+              <div class="k">
+                Task bar
+              </div><div>Select that task and show its CPU load</div>
+              <div class="k">
+                Task name
+              </div><div>Toggle task selection on/off in both task and core views</div>
+              <div class="k">
+                Core view label
+              </div><div>Click a sub-task name in the left pane to select its merged task</div>
+              <div class="k">
+                CPU LOAD
+              </div><div>Shows global load by default, or task-specific load when a task is selected</div>
+              <div class="k">
+                Load toggle
+              </div><div>Use the toolbar or bottom status bar to show/hide the CPU load panel</div>
+              <div class="k">
+                CPU overlay
+              </div><div>Cursors, hover cursor, bookmarks, and annotations are mirrored in CPU load view</div>
+            </div>
+          </div>
+
+          <div class="help-section">
+            <div class="help-section-title">
+              Capture & Export
+            </div>
+            <div class="help-grid">
+              <div class="k">
+                S
+              </div><div>Open snapshot editor from the current timeline view</div>
+              <div class="k">
+                Save PNG
+              </div><div>Exports the annotated snapshot; includes CPU load when Load is on</div>
+              <div class="k">
+                Export SVG
+              </div><div>Exports the current view; includes CPU load when Load is on</div>
+              <div class="k">
+                File names
+              </div><div>Exports use timeline-with-load.* when CPU load is included</div>
             </div>
           </div>
         </div>
@@ -407,6 +479,7 @@
     <SnapshotEditor
       v-if="snapshotEditorOpen"
       :image-url="snapshotImageUrl"
+      :download-filename="snapshotDownloadFilename"
       @close="onSnapshotEditorClose"
     />
 
@@ -424,11 +497,24 @@
 
     <!-- Status bar -->
     <div class="status-bar">
-      <span v-if="trace">
-        {{ trace.tasks.length }} tasks · {{ trace.segments.length.toLocaleString() }} segments ·
-        {{ trace.stiEvents.length.toLocaleString() }} STI events ·
-        {{ formatTime(trace.timeMax - trace.timeMin, trace.timeScale) }} total
-      </span>
+      <template v-if="trace">
+        <span class="status-summary">
+          {{ trace.tasks.length }} tasks · {{ trace.segments.length.toLocaleString() }} segments ·
+          {{ trace.stiEvents.length.toLocaleString() }} STI events ·
+          {{ formatTime(trace.timeMax - trace.timeMin, trace.timeScale) }} total
+        </span>
+
+        <div class="status-actions">
+          <button
+            class="status-toggle"
+            :class="{ active: timelineOptions.showCpuLoad }"
+            type="button"
+            @click="timelineOptions.showCpuLoad = !timelineOptions.showCpuLoad"
+          >
+            Load
+          </button>
+        </div>
+      </template>
       <span
         v-else
         class="status-hint"
@@ -441,8 +527,10 @@
 
 <script setup>
 import { ref, shallowRef, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { toBlob as domToBlob, toSvg as domToSvg } from 'html-to-image'
 import Toolbar          from './components/Toolbar.vue'
 import TimelinePanel    from './components/TimelinePanel.vue'
+import CpuLoadPanel     from './components/CpuLoadPanel.vue'
 import CursorPanel      from './components/CursorPanel.vue'
 import LegendPanel      from './components/LegendPanel.vue'
 import StatisticsPanel  from './components/StatisticsPanel.vue'
@@ -468,6 +556,7 @@ const rightPanelTab = ref('stats')
 // ---- Snapshot editor -------------------------------------------------------
 const snapshotEditorOpen = ref(false)
 const snapshotImageUrl   = ref(null)
+const snapshotDownloadFilename = ref('annotated-snapshot.png')
 
 const rightPanelWidth = ref(330)
 const RIGHT_PANEL_MIN_W = 180
@@ -492,12 +581,27 @@ const timelineOptions = reactive({
   darkMode:        true,
   showGrid:        false,
   showSti:         true,
+  showCpuLoad:     true,
   stiLogScale:     false,
   orientation:     'h',
   highlightKey:    null,
   marks:           [],
   highlightSegment: null,
   selectedMarkId:  null,
+})
+const cpuLoadExpanded = ref(true)
+const cpuLoadHoverTime = ref(null)
+const timelineViewport = reactive({
+  timeStart: 0,
+  timeEnd: 1,
+  scrollY: 0,
+  scrollX: 0,
+  canvasW: 1,
+  canvasH: 1,
+})
+const cpuLoadSelectedTask = computed(() => {
+  if (highlightSegment.value?.task) return taskMergeKey(highlightSegment.value.task)
+  return pinnedHighlightKey.value
 })
 
 // Marks state (bookmarks + annotations)
@@ -626,6 +730,7 @@ watch(marks, (m) => {
 }, { deep: true })
 
 // ---- Refs ----------------------------------------------------------------
+const leftPaneRef = ref(null)
 const timelinePanelRef = ref(null)
 
 // ---- Trace info for toolbar -----------------------------------------------
@@ -741,10 +846,13 @@ async function onTraceLoaded({ text, name }) {
       trace.value = result
       cursors.value = [null, null, null, null]
       timelineOptions.highlightKey = null
+      timelineOptions.showCpuLoad = true
       pinnedHighlightKey.value = null
       highlightSegment.value = null
       timelineOptions.highlightSegment = null
+      cpuLoadExpanded.value = true
       _navCache = null
+      syncTimelineViewport()
     } catch (err) {
       console.error('BTF parse error:', err)
       showToast('Failed to parse BTF file: ' + err.message, 'error')
@@ -765,13 +873,16 @@ async function onTraceLoaded({ text, name }) {
       trace.value = data.trace
       cursors.value = [null, null, null, null]
       timelineOptions.highlightKey = null
+      timelineOptions.showCpuLoad = true
       pinnedHighlightKey.value = null
       loading.value = false
       _parseWorker = null
       worker.terminate()
       highlightSegment.value = null
       timelineOptions.highlightSegment = null
+      cpuLoadExpanded.value = true
       _navCache = null
+      syncTimelineViewport()
     } else if (data.type === 'error') {
       console.error('BTF parse error:', data.message)
       showToast('Failed to parse BTF file: ' + data.message, 'error')
@@ -795,20 +906,27 @@ async function onTraceLoaded({ text, name }) {
 // ---- Zoom ----------------------------------------------------------------
 function onZoom(factor) {
   timelinePanelRef.value?.zoomCenter(factor)
+  syncTimelineViewport()
 }
 
 function onFit() {
   timelinePanelRef.value?.fitToTrace()
+  syncTimelineViewport()
 }
 
 async function onCopyScreenshot() {
-  const blob = await timelinePanelRef.value?.captureScreenshotBlob?.()
+  const blob = timelineOptions.showCpuLoad
+    ? await captureLeftPaneBlob()
+    : await timelinePanelRef.value?.captureScreenshotBlob?.()
   if (!blob) {
     showToast('Unable to capture screenshot.', 'error')
     return
   }
   // Open snapshot editor so user can annotate before copying/saving
   if (snapshotImageUrl.value) URL.revokeObjectURL(snapshotImageUrl.value)
+  snapshotDownloadFilename.value = timelineOptions.showCpuLoad
+    ? 'timeline-with-load.png'
+    : 'timeline-snapshot.png'
   snapshotImageUrl.value   = URL.createObjectURL(blob)
   snapshotEditorOpen.value = true
 }
@@ -821,8 +939,10 @@ function onSnapshotEditorClose() {
   }
 }
 
-function onExportSvg() {
-  const blob = timelinePanelRef.value?.captureAsSvg?.()
+async function onExportSvg() {
+  const blob = timelineOptions.showCpuLoad
+    ? await captureLeftPaneSvgBlob()
+    : timelinePanelRef.value?.captureAsSvg?.()
   if (!blob) {
     showToast('Unable to generate SVG export.', 'error')
     return
@@ -830,17 +950,68 @@ function onExportSvg() {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = 'timeline-export.svg'
+  a.download = timelineOptions.showCpuLoad ? 'timeline-with-load.svg' : 'timeline-export.svg'
   a.click()
   URL.revokeObjectURL(url)
 }
 
+function captureFilter(node) {
+  if (!(node instanceof HTMLElement)) return true
+  return !node.classList.contains('context-menu') && !node.classList.contains('sti-tooltip')
+}
+
+async function captureLeftPaneBlob() {
+  const root = leftPaneRef.value
+  if (!root) return null
+
+  try {
+    return await domToBlob(root, {
+      cacheBust: true,
+      pixelRatio: window.devicePixelRatio || 1,
+      width: root.clientWidth,
+      height: root.clientHeight,
+      filter: captureFilter,
+    })
+  } catch {
+    return await timelinePanelRef.value?.captureScreenshotBlob?.()
+  }
+}
+
+async function captureLeftPaneSvgBlob() {
+  const root = leftPaneRef.value
+  if (!root) return null
+
+  try {
+    const dataUrl = await domToSvg(root, {
+      cacheBust: true,
+      width: root.clientWidth,
+      height: root.clientHeight,
+      filter: captureFilter,
+    })
+    const response = await fetch(dataUrl)
+    return await response.blob()
+  } catch {
+    return timelinePanelRef.value?.captureAsSvg?.() || null
+  }
+}
+
 function onExpandAll() {
   timelinePanelRef.value?.expandAll()
+  cpuLoadExpanded.value = true
 }
 
 function onCollapseAll() {
   timelinePanelRef.value?.collapseAll()
+  cpuLoadExpanded.value = false
+}
+
+function onTimelineViewportChange(vp) {
+  Object.assign(timelineViewport, vp)
+}
+
+function syncTimelineViewport() {
+  const vp = timelinePanelRef.value?.getViewport?.()
+  if (vp) Object.assign(timelineViewport, vp)
 }
 
 function clearCursors() {
@@ -853,13 +1024,36 @@ function onDeleteCursor(idx) {
   cursors.value = c
 }
 
-function onHighlightClick(key) {
-  // Pin the clicked task; click same task again to unpin
-  pinnedHighlightKey.value = pinnedHighlightKey.value === key ? null : key
-  timelineOptions.highlightKey = pinnedHighlightKey.value
-  // Scroll & center the task row in the timeline
-  if (pinnedHighlightKey.value) timelinePanelRef.value?.scrollToTask(pinnedHighlightKey.value)
+function clearCpuLoadSelection() {
+  pinnedHighlightKey.value = null
+  highlightSegment.value = null
+  timelineOptions.highlightKey = null
+  timelineOptions.highlightSegment = null
   scheduleRender()
+}
+
+function onHighlightClick(key) {
+  // Task-name clicks act at task scope, so clear any segment lock first.
+  const segmentKey = highlightSegment.value?.task ? taskMergeKey(highlightSegment.value.task) : null
+  const effectiveKey = pinnedHighlightKey.value ?? segmentKey
+  const nextKey = effectiveKey === key ? null : key
+
+  highlightSegment.value = null
+  timelineOptions.highlightSegment = null
+  pinnedHighlightKey.value = nextKey
+  timelineOptions.highlightKey = nextKey
+  // Scroll & center the task row in the timeline
+  if (nextKey) timelinePanelRef.value?.scrollToTask(nextKey)
+  scheduleRender()
+}
+
+function onStatsSelectSegment(seg) {
+  if (!seg) return
+  highlightSegment.value = seg
+  timelineOptions.highlightSegment = seg
+  timelineOptions.highlightKey = taskMergeKey(seg.task)
+  timelinePanelRef.value?.scrollToSegmentIfNeeded(seg)
+  syncTimelineViewport()
 }
 
 function scheduleRender() {
@@ -1194,6 +1388,14 @@ body {
   overflow: hidden;
   min-height: 0;
   position: relative;
+}
+
+.left-pane {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
 }
 
 .loading-overlay {
@@ -1664,6 +1866,10 @@ body.col-resizing * {
 }
 
 .status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   padding: 3px 12px;
   font-size: 11px;
   font-family: monospace;
@@ -1671,6 +1877,46 @@ body.col-resizing * {
   background: var(--panel-bg);
   border-top: 1px solid var(--border);
   flex-shrink: 0;
+}
+
+.status-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.status-toggle {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg-dim);
+  border-radius: 999px;
+  min-width: 46px;
+  height: 22px;
+  padding: 0 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.status-toggle:hover,
+.status-toggle:focus-visible {
+  background: var(--tb-btn-hover);
+  color: var(--fg);
+  outline: none;
+}
+
+.status-toggle.active {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: var(--tb-btn-active);
 }
 
 .status-hint {

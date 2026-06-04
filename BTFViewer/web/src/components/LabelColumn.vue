@@ -39,10 +39,10 @@
           v-else-if="row.type === 'core-task'"
           class="label-row label-core-task"
           :style="{ height: ROW_H + 'px', marginBottom: ROW_GAP + 'px' }"
-          :class="{ highlighted: highlightKey === row.taskKey }"
-          @mouseenter="emit('highlightChange', row.taskKey)"
+          :class="{ highlighted: highlightKey === taskRowKey(row) }"
+          @mouseenter="emit('highlightChange', taskRowKey(row))"
           @mouseleave="emit('highlightChange', null)"
-          @click="emit('highlightClick', row.taskKey)"
+          @click="emit('highlightClick', taskRowKey(row))"
         >
           <span
             class="task-swatch"
@@ -97,6 +97,7 @@
 <script setup>
 import { computed } from 'vue'
 import { buildRowLayout, LABEL_W, RULER_H, ROW_H, ROW_GAP, STI_ROW_H, STI_WAVEFORM_H } from '../renderer/TimelineRenderer.js'
+import { taskMergeKey } from '../utils/colors.js'
 
 const props = defineProps({
   trace:        { type: Object, default: null },
@@ -117,6 +118,10 @@ const rows = computed(() => {
 
 function toggleExpand(coreName) {
   emit('expandToggle', coreName)
+}
+
+function taskRowKey(row) {
+  return row.type === 'core-task' ? taskMergeKey(row.taskKey) : row.key
 }
 </script>
 

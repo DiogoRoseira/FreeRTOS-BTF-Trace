@@ -191,6 +191,7 @@ import { ref, reactive, computed, onMounted, onBeforeUnmount, nextTick } from 'v
 
 const props = defineProps({
   imageUrl: { type: String, required: true },
+  downloadFilename: { type: String, default: 'annotated-snapshot.png' },
 })
 
 const emit = defineEmits(['close'])
@@ -1050,7 +1051,7 @@ function saveAsPng() {
     const canvas = canvasEl.value
     if (!canvas) return
     canvas.toBlob((blob) => {
-      if (blob) { triggerDownload(blob); showStatus('Saved as annotated-snapshot.png') }
+      if (blob) { triggerDownload(blob); showStatus(`Saved as ${props.downloadFilename}`) }
     }, 'image/png')
   })
 }
@@ -1059,7 +1060,7 @@ function triggerDownload(blob) {
   const url  = URL.createObjectURL(blob)
   const a    = document.createElement('a')
   a.href     = url
-  a.download = 'annotated-snapshot.png'
+  a.download = props.downloadFilename
   a.click()
   URL.revokeObjectURL(url)
 }
