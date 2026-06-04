@@ -30,8 +30,11 @@
 #define VCD_SIG_RANGE (int)('~' - '!' + 1)
 #define MAX_SIG_RANGE ((VCD_SIG_RANGE)*(VCD_SIG_RANGE+1))
 
-// TODO, for single core, core ID always 0
-#define CORE_ID 0
+// Packed event-word bit-field layout (32 bits): [31:24] core ID, [23:0] btf_event_t value.
+#define EVENT_MASK      0x00ffffffu
+#define EVENT_SHIFT     0
+#define COREID_MASK     0x7f000000u
+#define COREID_SHIFT    24
 
 static char *get_vcdsig(
     int sig
@@ -96,7 +99,7 @@ int genbtf(
     TRACE *trace_data = NULL;
     FILE *fin = NULL, *fout = NULL;
     uint32_t i;
-    int current_task;
+    int *current_task;
     int current_index;
     size_t result;
     long size;
@@ -156,6 +159,11 @@ int genbtf(
         goto cleanup;
     }
 
+    if ((current_task = malloc(sizeof(int)*trace_data->h.num_cores)) == NULL) {
+        printf("malloc fail\n");
+        goto cleanup;
+    }
+
     fprintf(fout,"#version 2.2.0\n");
     fprintf(fout,"#creator FreeRTOS trace logger\n");
 
@@ -178,21 +186,24 @@ int genbtf(
 
     event = get_event(trace_data, current_index);
 
-    fprintf(fout, "%u,Core_%d,0,C,Core_%d,0,set_frequency,%d\n",
-           event->time, CORE_ID, CORE_ID, trace_data->h.core_clock);
+    for(i = 0; i < trace_data->h.num_cores; i++) {
+        fprintf(fout, "%u,Core_%d,0,C,Core_%d,0,set_frequency,%d\n",
+               event->time, i, i, trace_data->h.core_clock);
 
-    current_task = 0;
+        current_task[i] = 0;
+    }
 
     for(i = 0; i < trace_data->h.event_count; i++) {
         event = get_event(trace_data, current_index);
+        uint32_t coreid = ((uint32_t)(event->types & COREID_MASK)) >> COREID_SHIFT;
 
-        switch(event->types) {
+        switch(event->types & EVENT_MASK) {
             case TRACE_EVENT_TASK_SWITCHED_IN:
                 fprintf(fout, "%u,[%d/%04d]%s,0,T,[%d/%04d]%s,0,%s,%s\n",
                         event->time,
-                        CORE_ID,
-                        current_task, get_taskname(trace_data, current_task),
-                        CORE_ID,
+                        coreid,
+                        current_task[coreid], get_taskname(trace_data, current_task[coreid]),
+                        coreid,
                         event->value, get_taskname(trace_data, event->value),
                         "resume",
                         "");
@@ -200,18 +211,18 @@ int genbtf(
             case TRACE_EVENT_TASK_SWITCHED_OUT:
                 fprintf(fout, "%u,Core_%d,0,T,[%d/%04d]%s,0,%s,%s\n",
                         event->time,
-                        CORE_ID,
-                        CORE_ID,
+                        coreid,
+                        coreid,
                         event->value, get_taskname(trace_data, event->value),
                         "preempt",
                         "");
-                current_task = (int)event->value;
+                current_task[coreid] = (int)event->value;
                 break;
             case TRACE_EVENT_TASK_CREATE:
                 fprintf(fout, "%u,Core_%d,0,T,[%d/%04d]%s,0,%s,%s\n",
                         event->time,
-                        CORE_ID,
-                        CORE_ID,
+                        coreid,
+                        coreid,
                         event->value, get_taskname(trace_data, event->value),
                         "preempt",
                         "create");
@@ -219,7 +230,7 @@ int genbtf(
             case TRACE_EVENT_TASK_DELETE:
                 fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s %s[%d]\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "task",
                         "trigger",
                         "delete",
@@ -229,7 +240,7 @@ int genbtf(
             case TRACE_EVENT_TASK_SUSPEND:
                 fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s %s[%d]\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "task",
                         "trigger",
                         "suspend",
@@ -239,7 +250,7 @@ int genbtf(
             case TRACE_EVENT_TASK_RESUME:
                 fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s %s[%d]\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "task",
                         "trigger",
                         "resume",
@@ -249,7 +260,7 @@ int genbtf(
             case TRACE_EVENT_TASK_RESUME_FROM_ISR:
                 fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "task",
                         "trigger",
                         "resume/isr");
@@ -260,7 +271,7 @@ int genbtf(
                 case QUEUE_TYPE_RECURSIVE_MUTEX:
                     fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "mutex",
                             "trigger",
                             "create");
@@ -269,7 +280,7 @@ int genbtf(
                 case QUEUE_TYPE_BINARY_SEM:
                     fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "sem",
                             "trigger",
                             "create");
@@ -277,7 +288,7 @@ int genbtf(
                 default:
                     fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "queue",
                             "trigger",
                             "create");
@@ -289,7 +300,7 @@ int genbtf(
                 case QUEUE_TYPE_RECURSIVE_MUTEX:
                     fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "mutex",
                             "trigger",
                             "give");
@@ -298,7 +309,7 @@ int genbtf(
                 case QUEUE_TYPE_BINARY_SEM:
                     fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "sem",
                             "trigger",
                             "give");
@@ -306,7 +317,7 @@ int genbtf(
                 default:
                     fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "queue",
                             "trigger",
                             "send");
@@ -318,7 +329,7 @@ int genbtf(
                 case QUEUE_TYPE_RECURSIVE_MUTEX:
                     fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "mutex",
                             "trigger",
                             "take");
@@ -327,7 +338,7 @@ int genbtf(
                 case QUEUE_TYPE_BINARY_SEM:
                     fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "sem",
                             "trigger",
                             "take");
@@ -335,7 +346,7 @@ int genbtf(
                 default:
                     fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "queue",
                             "trigger",
                             "recv");
@@ -347,7 +358,7 @@ int genbtf(
                 case QUEUE_TYPE_RECURSIVE_MUTEX:
                     fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "mutex",
                             "trigger",
                             "delete");
@@ -356,7 +367,7 @@ int genbtf(
                 case QUEUE_TYPE_BINARY_SEM:
                     fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "sem",
                             "trigger",
                             "delete");
@@ -364,7 +375,7 @@ int genbtf(
                 default:
                     fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "queue",
                             "trigger",
                             "delete");
@@ -373,7 +384,7 @@ int genbtf(
             case TRACE_EVENT_TASK_INCREMENT_TICK:
                 fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%d\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "TICK",
                         "trigger",
                         event->value);
@@ -381,7 +392,7 @@ int genbtf(
             case TRACE_EVENT_TAG:
                 fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%d\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag0_event",
                         "trigger",
                         event->value);
@@ -389,7 +400,7 @@ int genbtf(
             case TRACE_EVENT_TAG1:
                 fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%d\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag1_event",
                         "trigger",
                         event->value);
@@ -397,7 +408,7 @@ int genbtf(
             case TRACE_EVENT_TAG2:
                 fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%d\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag2_event",
                         "trigger",
                         event->value);
@@ -405,7 +416,7 @@ int genbtf(
             case TRACE_EVENT_TAG3:
                 fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%d\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag3_event",
                         "trigger",
                         event->value);
@@ -413,7 +424,7 @@ int genbtf(
             case TRACE_EVENT_TAG4:
                 fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%d\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag4_event",
                         "trigger",
                         event->value);
@@ -421,7 +432,7 @@ int genbtf(
             case TRACE_EVENT_TAG5:
                 fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%d\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag5_event",
                         "trigger",
                         event->value);
@@ -429,7 +440,7 @@ int genbtf(
             case TRACE_EVENT_TAG6:
                 fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%d\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag6_event",
                         "trigger",
                         event->value);
@@ -437,7 +448,7 @@ int genbtf(
             case TRACE_EVENT_TAG7:
                 fprintf(fout, "%u,Core_%d,0,STI,%s,0,%s,%d\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag7_event",
                         "trigger",
                         event->value);

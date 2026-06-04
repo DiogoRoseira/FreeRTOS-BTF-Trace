@@ -25,8 +25,11 @@
 #include "btf_trace.h"
 #include "task.h"
 
-// TODO, for single core, core ID always 0
-#define CORE_ID 0
+// Packed event-word bit-field layout (32 bits): [31:24] core ID, [23:0] btf_event_t value.
+#define EVENT_MASK      0x00ffffffu
+#define EVENT_SHIFT     0
+#define COREID_MASK     0x7f000000u
+#define COREID_SHIFT    24
 
 // Example of __DATE__ string: "Jul 27 2012"
 //                              01234567890
@@ -73,6 +76,7 @@ void btf_traceSTART(void) {
     trace_data.h.tag = 1;
     trace_data.h.version = TRACE_VERSION;
     trace_data.h.core_clock = configCPU_CLOCK_HZ;
+    trace_data.h.num_cores = configNUMBER_OF_CORES;
     trace_data.h.max_tasks = configMAX_TRACE_TASKS;
     trace_data.h.max_taskname_len = ALIGN4(configMAX_TRACE_TASK_NAME_LEN+1);
     trace_data.h.max_events = configMAX_TRACE_EVENTS;
@@ -120,7 +124,13 @@ void btf_trace_add_task (
 
     trace_data.d.event_lists[trace_data.h.current_index].time = xGetTime();
     trace_data.d.event_lists[trace_data.h.current_index].value = task_id;
+
+#if configNUMBER_OF_CORES == 1
     trace_data.d.event_lists[trace_data.h.current_index].types = event;
+#else
+    trace_data.d.event_lists[trace_data.h.current_index].types =  (((uint32_t)(event) << EVENT_SHIFT) & EVENT_MASK) |
+                                     ((portGET_CORE_ID() << COREID_SHIFT) & COREID_MASK);
+#endif
 
     trace_data.h.current_index++;
     if (trace_data.h.current_index == configMAX_TRACE_EVENTS) {
@@ -141,7 +151,13 @@ void btf_trace_add_event (
 
     trace_data.d.event_lists[trace_data.h.current_index].time = xGetTime();
     trace_data.d.event_lists[trace_data.h.current_index].value = value;
+
+#if configNUMBER_OF_CORES == 1
     trace_data.d.event_lists[trace_data.h.current_index].types = event;
+#else
+    trace_data.d.event_lists[trace_data.h.current_index].types =  (((uint32_t)(event) << EVENT_SHIFT) & EVENT_MASK) |
+                                     ((portGET_CORE_ID() << COREID_SHIFT) & COREID_MASK);
+#endif
 
     trace_data.h.current_index++;
     if (trace_data.h.current_index == configMAX_TRACE_EVENTS) {
@@ -159,7 +175,7 @@ void btf_trace_add_event (
 void btf_dump(
     void) {
     int i;
-    int current_task;
+    int current_task[configNUMBER_OF_CORES];
     int current_index;
     EVENT *event;
 
@@ -192,21 +208,32 @@ void btf_dump(
 
     event = get_event(trace_data, current_index);
 
-    printf("%lu,Core_%d,0,C,Core_%d,0,set_frequency,%ld\n",
-            event->time, CORE_ID, CORE_ID, trace_data.h.core_clock);
+    // Emit an initial clock-frequency event for each core.
+    for(i=0; i < configNUMBER_OF_CORES; i++) {
+        printf("%lu,Core_%d,0,C,Core_%d,0,set_frequency,%ld\n",
+                event->time, i, i, trace_data.h.core_clock);
+    }
 
-    current_task = 0;
+    // Initialize per-core "current task" tracking; -1 means no task seen yet.
+    for(i=0; i < configNUMBER_OF_CORES; i++) {
+        current_task[i] = -1;
+    }
 
     for(i = 0; i < trace_data.h.event_count; i++) {
         event = get_event(trace_data, current_index);
+#if configNUMBER_OF_CORES == 1
+        uint32_t coreid = 0;
+#else
+        uint32_t coreid = ((uint32_t)(btf_trace_data[idx].event & COREID_MASK)) >> COREID_SHIFT;
+#endif
 
-        switch(event->types) {
+        switch(event->types & EVENT_MASK) {
             case TRACE_EVENT_TASK_SWITCHED_IN:
                 printf( "%lu,[%d/%04d]%s,0,T,[%d/%04ld]%s,0,%s,%s\n",
                         event->time,
-                        CORE_ID,
-                        current_task, get_taskname(trace_data, current_task),
-                        CORE_ID,
+                        coreid,
+                        current_task[coreid], get_taskname(trace_data, current_task[coreid]),
+                        coreid,
                         event->value, get_taskname(trace_data, event->value),
                         "resume",
                         "");
@@ -214,18 +241,18 @@ void btf_dump(
             case TRACE_EVENT_TASK_SWITCHED_OUT:
                 printf( "%lu,Core_%d,0,T,[%d/%04ld]%s,0,%s,%s\n",
                         event->time,
-                        CORE_ID,
-                        CORE_ID,
+                        coreid,
+                        coreid,
                         event->value, get_taskname(trace_data, event->value),
                         "preempt",
                         "");
-		current_task = (int)event->value;
+                current_task[coreid] = (int)event->value;
                 break;
             case TRACE_EVENT_TASK_CREATE:
                 printf( "%lu,Core_%d,0,T,[%d/%04ld]%s,0,%s,%s\n",
                         event->time,
-                        CORE_ID,
-                        CORE_ID,
+                        coreid,
+                        coreid,
                         event->value, get_taskname(trace_data, event->value),
                         "preempt",
                         "create");
@@ -233,7 +260,7 @@ void btf_dump(
             case TRACE_EVENT_TASK_DELETE:
                 printf( "%lu,Core_%d,0,STI,%s,0,%s,%s %s[%d]\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "task",
                         "trigger",
                         "delete",
@@ -243,7 +270,7 @@ void btf_dump(
             case TRACE_EVENT_TASK_SUSPEND:
                 printf( "%lu,Core_%d,0,STI,%s,0,%s,%s %s[%d]\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "task",
                         "trigger",
                         "suspend",
@@ -253,7 +280,7 @@ void btf_dump(
             case TRACE_EVENT_TASK_RESUME:
                 printf( "%lu,Core_%d,0,STI,%s,0,%s,%s %s[%d]\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "task",
                         "trigger",
                         "resume",
@@ -263,7 +290,7 @@ void btf_dump(
             case TRACE_EVENT_TASK_RESUME_FROM_ISR:
                 printf( "%lu,Core_%d,0,STI,%s,0,%s,%s\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "task",
                         "trigger",
                         "resume/isr");
@@ -274,7 +301,7 @@ void btf_dump(
                 case QUEUE_TYPE_RECURSIVE_MUTEX:
                     printf( "%lu,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "mutex",
                             "trigger",
                             "create");
@@ -283,7 +310,7 @@ void btf_dump(
                 case QUEUE_TYPE_BINARY_SEM:
                     printf( "%lu,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "sem",
                             "trigger",
                             "create");
@@ -291,7 +318,7 @@ void btf_dump(
                 default:
                     printf( "%lu,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "queue",
                             "trigger",
                             "create");
@@ -303,7 +330,7 @@ void btf_dump(
                 case QUEUE_TYPE_RECURSIVE_MUTEX:
                     printf( "%lu,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "mutex",
                             "trigger",
                             "give");
@@ -312,7 +339,7 @@ void btf_dump(
                 case QUEUE_TYPE_BINARY_SEM:
                     printf( "%lu,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "sem",
                             "trigger",
                             "give");
@@ -320,7 +347,7 @@ void btf_dump(
                 default:
                     printf( "%lu,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "queue",
                             "trigger",
                             "send");
@@ -331,7 +358,7 @@ void btf_dump(
                 case QUEUE_TYPE_RECURSIVE_MUTEX:
                     printf( "%lu,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "mutex",
                             "trigger",
                             "take");
@@ -340,7 +367,7 @@ void btf_dump(
                 case QUEUE_TYPE_BINARY_SEM:
                     printf( "%lu,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "sem",
                             "trigger",
                             "take");
@@ -348,7 +375,7 @@ void btf_dump(
                 default:
                     printf( "%lu,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "queue",
                             "trigger",
                             "recv");
@@ -359,7 +386,7 @@ void btf_dump(
                 case QUEUE_TYPE_RECURSIVE_MUTEX:
                     printf( "%lu,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "mutex",
                             "trigger",
                             "delete");
@@ -368,7 +395,7 @@ void btf_dump(
                 case QUEUE_TYPE_BINARY_SEM:
                     printf( "%lu,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "sem",
                             "trigger",
                             "delete");
@@ -376,7 +403,7 @@ void btf_dump(
                 default:
                     printf( "%lu,Core_%d,0,STI,%s,0,%s,%s\n",
                             event->time,
-                            CORE_ID,
+                            coreid,
                             "queue",
                             "trigger",
                             "delete");
@@ -385,7 +412,7 @@ void btf_dump(
             case TRACE_EVENT_TASK_INCREMENT_TICK:
                 printf( "%lu,Core_%d,0,STI,%s,0,%s,%ld\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "TICK",
                         "trigger",
                         event->value);
@@ -393,7 +420,7 @@ void btf_dump(
             case TRACE_EVENT_TAG:
                 printf( "%lu,Core_%d,0,STI,%s,0,%s,%ld\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag0_event",
                         "trigger",
                         event->value);
@@ -401,7 +428,7 @@ void btf_dump(
             case TRACE_EVENT_TAG1:
                 printf( "%lu,Core_%d,0,STI,%s,0,%s,%ld\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag1_event",
                         "trigger",
                         event->value);
@@ -409,7 +436,7 @@ void btf_dump(
             case TRACE_EVENT_TAG2:
                 printf( "%lu,Core_%d,0,STI,%s,0,%s,%ld\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag2_event",
                         "trigger",
                         event->value);
@@ -417,7 +444,7 @@ void btf_dump(
             case TRACE_EVENT_TAG3:
                 printf( "%lu,Core_%d,0,STI,%s,0,%s,%ld\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag3_event",
                         "trigger",
                         event->value);
@@ -425,7 +452,7 @@ void btf_dump(
             case TRACE_EVENT_TAG4:
                 printf( "%lu,Core_%d,0,STI,%s,0,%s,%ld\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag4_event",
                         "trigger",
                         event->value);
@@ -433,7 +460,7 @@ void btf_dump(
             case TRACE_EVENT_TAG5:
                 printf( "%lu,Core_%d,0,STI,%s,0,%s,%ld\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag5_event",
                         "trigger",
                         event->value);
@@ -441,7 +468,7 @@ void btf_dump(
             case TRACE_EVENT_TAG6:
                 printf( "%lu,Core_%d,0,STI,%s,0,%s,%ld\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag6_event",
                         "trigger",
                         event->value);
@@ -449,7 +476,7 @@ void btf_dump(
             case TRACE_EVENT_TAG7:
                 printf( "%lu,Core_%d,0,STI,%s,0,%s,%ld\n",
                         event->time,
-                        CORE_ID,
+                        coreid,
                         "tag7_event",
                         "trigger",
                         event->value);

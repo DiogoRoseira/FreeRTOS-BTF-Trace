@@ -23,6 +23,10 @@
 
 #include "btf_trace.h"
 
+#ifndef configNUMBER_OF_CORES
+#define configNUMBER_OF_CORES 1
+#endif
+
 #define addEVENT( tag, event ) do {             \
     taskENTER_CRITICAL();                       \
     btf_trace_add_event ( tag, event );         \

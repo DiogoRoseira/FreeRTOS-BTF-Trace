@@ -82,6 +82,7 @@ typedef struct {
     uint32_t    tag;
     uint32_t    version;
     uint32_t    core_clock;
+    uint32_t    num_cores;
     uint32_t    max_tasks;
     uint32_t    max_taskname_len;
     uint32_t    max_events;
