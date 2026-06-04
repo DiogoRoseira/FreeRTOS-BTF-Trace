@@ -192,7 +192,7 @@ RULER_WIDTH              = 120  # Width of the time ruler column (px) — vertic
 ROW_HEIGHT               =  22  # Height of each task / core row (px).
 ROW_GAP                  =   4  # Vertical gap between rows (px).
 STI_ROW_H                =  18  # Height of a collapsed STI row (px)
-CPU_LOAD_ROW_H           = 115  # CPU load graph row height (px) — independent of timeline rows.
+CPU_LOAD_ROW_H           =  60  # CPU load graph row height (px) — independent of timeline rows.
 CPU_LOAD_ROW_GAP         =   2  # Gap between CPU load rows (px).
 CPU_LOAD_COLLAPSED_H     =  20  # Height of a collapsed CPU load row (px — enough to show label).
 STI_WAVEFORM_H           =  80  # Height of an expanded STI waveform row (px).
@@ -1562,6 +1562,7 @@ class TimelineScene(QGraphicsScene):
 
     scene_rebuilt    = pyqtSignal()          # emitted after every rebuild()
     highlight_changed = pyqtSignal(object, bool) # (task_name_or_None, locked)
+    hover_changed    = pyqtSignal()          # emitted when hover cursor position changes
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2350,6 +2351,7 @@ class TimelineScene(QGraphicsScene):
         for item in self._hover_items:
             self.removeItem(item)
         self._hover_items.clear()
+        self.hover_changed.emit()
         if self._trace is None or self._hover_ns is None:
             return
         scene_r = self.sceneRect()
@@ -2410,6 +2412,7 @@ class TimelineScene(QGraphicsScene):
             self.removeItem(item)
         self._hover_items.clear()
         self._hover_ns = None
+        self.hover_changed.emit()
 
     # ------------------------------------------------------------------
     # Draw cursor overlay
@@ -8193,11 +8196,13 @@ class _StatsPanel(QWidget):
             return
         # Both exec and inter-arrival highlight the slice at the interval start
         _on_click = lambda seg: self.segment_select.emit(seg) if seg is not None else None
+        if self._plot_dlg is not None:
+            self._plot_dlg.close()
         self._plot_dlg = _MetricsPlotDialog(
             title, pts, trace.time_scale, color,
             on_point_click=_on_click,
             is_dark=self._is_dark,
-            parent=None,
+            parent=self.window(),
         )
         self._plot_dlg.show()
 
@@ -11194,6 +11199,38 @@ class _CpuLoadGraph(QWidget):
 
             ry += rh + CPU_LOAD_ROW_GAP
 
+        # ── Overlay: bookmarks & annotations ─────────────────────────
+        if hasattr(scene, '_mark_data') and tpp > 0:
+            for m_ns, _m_lbl, m_color_hex, m_kind, _m_id in scene._mark_data:
+                sx = int(lw + (m_ns - t_min) / tpp - scroll)
+                if lw <= sx < w:
+                    col = QColor(m_color_hex)
+                    if m_kind == "bookmark":
+                        p.setPen(QPen(col, 1.2, Qt.SolidLine))
+                    else:
+                        p.setPen(QPen(col, 1.0, Qt.DashLine))
+                    p.drawLine(sx, _TITLE_H, sx, h)
+
+        # ── Overlay: placed cursors ────────────────────────────────────
+        if hasattr(scene, '_cursor_times') and tpp > 0:
+            for c_idx, c_ns in enumerate(scene._cursor_times):
+                sx = int(lw + (c_ns - t_min) / tpp - scroll)
+                if lw <= sx < w:
+                    cur_col = QColor(_CURSOR_COLORS[c_idx % len(_CURSOR_COLORS)])
+                    p.setPen(QPen(cur_col, 1.2, Qt.DashLine))
+                    p.drawLine(sx, _TITLE_H, sx, h)
+
+        # ── Overlay: hover cursor ──────────────────────────────────────
+        hover_ns = getattr(scene, '_hover_ns', None)
+        if hover_ns is not None and tpp > 0:
+            sx = int(lw + (hover_ns - t_min) / tpp - scroll)
+            if lw <= sx < w:
+                hov_col = QColor(255, 255, 255, 80) if dark else QColor(0, 0, 0, 80)
+                hov_pen = QPen(hov_col, 1, Qt.DashLine)
+                hov_pen.setDashPattern([3, 3])
+                p.setPen(hov_pen)
+                p.drawLine(sx, _TITLE_H, sx, h)
+
         # Label column separator (full height)
         p.setPen(QPen(sepc, 1))
         p.drawLine(lw, 0, lw, h)
@@ -12082,6 +12119,11 @@ class MainWindow(QMainWindow):
         self._view.zoom_changed.connect(self._cpu_load_graph.update)
         self._view.horizontalScrollBar().valueChanged.connect(self._cpu_load_graph.update)
         self._view._scene.highlight_changed.connect(self._cpu_load_graph.set_task)
+        # Synchronise cursor, marks, and hover overlays on the CPU load graph
+        self._view._scene.hover_changed.connect(self._cpu_load_graph.update)
+        self._view.cursors_changed.connect(lambda _: self._cpu_load_graph.update())
+        self._view.mark_moved.connect(lambda *_: self._cpu_load_graph.update())
+        self._view.mark_dragging.connect(lambda *_: self._cpu_load_graph.update())
 
         # --- Legend dock (right panel) ---
         self._build_legend_dock()
@@ -12697,6 +12739,19 @@ class MainWindow(QMainWindow):
         self._view.set_view_mode(mode)
         self._refresh_find_marker()
         self._cpu_load_graph.set_view_mode(mode)
+        self._autofit_cpu_load_height()
+
+    def _autofit_cpu_load_height(self) -> None:
+        """Resize the CPU load splitter pane to fit the graph's preferred height."""
+        if not self._show_cpu_load or not self._cpu_load_scroll.isVisible():
+            return
+        preferred = self._cpu_load_graph.sizeHint().height()
+        # Add a small margin for the scroll-area frame / horizontal scrollbar track
+        preferred = preferred + 6
+        sizes = self._cpu_splitter.sizes()
+        total = sum(sizes)
+        new_bottom = max(40, min(preferred, total - 100))
+        self._cpu_splitter.setSizes([total - new_bottom, new_bottom])
 
     def _toggle_expand_all_cores(self) -> None:
         """Expand or collapse all cores based on the button's checked state."""
@@ -12709,10 +12764,7 @@ class MainWindow(QMainWindow):
         visible = self._tb_cpu_load_btn.isChecked()
         self._cpu_load_scroll.setVisible(visible)
         if visible:
-            sizes = self._cpu_splitter.sizes()
-            if sizes[1] < 40:
-                total = sum(sizes)
-                self._cpu_splitter.setSizes([max(100, total - 300), 300])
+            self._autofit_cpu_load_height()
 
     # -- File actions ---------------------------------------------------
 
@@ -13364,6 +13416,10 @@ class MainWindow(QMainWindow):
         self._stats_panel.rebuild(trace)
         self._cpu_load_graph.set_trace(trace)
         self._cpu_load_graph.set_font_size(self._font_size_val)
+        # Re-fit the CPU load panel height now that trace data (and all cores)
+        # is available — especially important when core view was restored from
+        # settings before any file was loaded (sizeHint was 40px at that point).
+        self._autofit_cpu_load_height()
 
         self._undo_stack.clear()
         self._redo_stack.clear()
@@ -13434,14 +13490,21 @@ class MainWindow(QMainWindow):
             )
             w = vp_rect.width()
             h = vp_rect.height()
+            include_cpu = (self._show_cpu_load and self._cpu_load_scroll.isVisible())
+            cpu_h = self._cpu_load_graph.height() if include_cpu else 0
+            total_h = h + cpu_h
             gen = QSvgGenerator()
             gen.setFileName(path)
-            gen.setSize(QSize(int(w), int(h)))
-            gen.setViewBox(QRectF(0, 0, w, h))
+            gen.setSize(QSize(int(w), int(total_h)))
+            gen.setViewBox(QRectF(0, 0, w, total_h))
             gen.setTitle("BTF Timeline")
             gen.setDescription("Generated by RTOS BTF Viewer")
             painter = QPainter(gen)
             scene.render(painter, QRectF(0, 0, w, h), scene_rect)
+            if include_cpu:
+                painter.translate(0, h)
+                self._cpu_load_graph.render(painter)
+                painter.translate(0, -h)
             painter.end()
             self.statusBar().showMessage(f"Saved: {path}", 4000)
         except (OSError, RuntimeError) as exc:
@@ -13451,7 +13514,19 @@ class MainWindow(QMainWindow):
     def _on_copy_image(self) -> None:
         if self._trace is None:
             return
-        pixmap = self._view._capture_pixmap()
+        tl_pix = self._view._capture_pixmap()
+        if self._show_cpu_load and self._cpu_load_scroll.isVisible():
+            cpu_pix = self._cpu_load_graph.grab()
+            combined = QPixmap(max(tl_pix.width(), cpu_pix.width()),
+                               tl_pix.height() + cpu_pix.height())
+            combined.fill(Qt.transparent)
+            _p = QPainter(combined)
+            _p.drawPixmap(0, 0, tl_pix)
+            _p.drawPixmap(0, tl_pix.height(), cpu_pix)
+            _p.end()
+            pixmap = combined
+        else:
+            pixmap = tl_pix
         dlg = SnapshotEditorDialog(pixmap, self)
         _exec_centred(dlg, self)
 
