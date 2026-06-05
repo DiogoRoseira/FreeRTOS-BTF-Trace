@@ -639,6 +639,19 @@ def _task_merge_key(raw: str) -> str:
 def _is_core_entity(name: str) -> bool:
     return name.startswith("Core_")
 
+def _seg_overlap_ns(seg: TaskSegment, lo: int, hi: int) -> int:
+    """Nanoseconds of *seg* that fall inside the half-open interval [lo, hi)."""
+    if seg.end <= lo or seg.start >= hi:
+        return 0
+    return min(seg.end, hi) - max(seg.start, lo)
+
+def _seg_fully_in_range(seg: TaskSegment, lo: int, hi: int) -> bool:
+    """True when the segment starts and ends inside [lo, hi] (inclusive)."""
+    return seg.start >= lo and seg.end <= hi
+
+def _seg_overlaps_range(seg: TaskSegment, lo: int, hi: int) -> bool:
+    return seg.end > lo and seg.start < hi
+
 class _ParseCancelledError(Exception):
     """Internal control-flow exception used to abort _parse_btf cleanly."""
 
@@ -7774,6 +7787,15 @@ class _ScatterWidget(QWidget):
         self.setMouseTracking(True)
         self.setCursor(Qt.CrossCursor)
 
+    def set_points(self, points: list) -> None:
+        """Replace plotted points and repaint (live cursor-range updates)."""
+        self._points = list(points)
+        if self._highlight >= len(self._points):
+            self._highlight = -1
+        if self._hover_idx >= len(self._points):
+            self._hover_idx = -1
+        self.update()
+
     def _screen_coords(self, w: int, h: int, ml: int, mr: int, mt: int, mb: int):
         """Return (sx_list, sy_list) mapping each point to widget pixels."""
         if not self._points:
@@ -7795,8 +7817,6 @@ class _ScatterWidget(QWidget):
         return max(14, max(fm.horizontalAdvance(lbl) for lbl in ("avg", "p50", "p95")) + 12)
 
     def paintEvent(self, event) -> None:  # noqa: N802
-        if not self._points:
-            return
         w, h = self.width(), self.height()
         ML, MT, MB = 56, 14, 36   # margins
 
@@ -7809,6 +7829,12 @@ class _ScatterWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         p.fillRect(0, 0, w, h, bg)
+
+        if not self._points:
+            p.setPen(txt)
+            p.drawText(QRect(0, 0, w, h), Qt.AlignCenter, "No data in selected range")
+            p.end()
+            return
 
         xs = [pt[0] for pt in self._points]
         ys = [pt[1] for pt in self._points]
@@ -7981,9 +8007,12 @@ class _HistogramWidget(QWidget):
         self.setMinimumHeight(120)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
+    def set_values(self, values: list) -> None:
+        """Replace histogram samples and repaint."""
+        self._values = sorted(values)
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802
-        if not self._values:
-            return
         N_BINS = 50
         w, h  = self.width(), self.height()
         ML, MT, MB = 56, 14, 36
@@ -7997,6 +8026,12 @@ class _HistogramWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, False)
         p.fillRect(0, 0, w, h, bg)
+
+        if not self._values:
+            p.setPen(txt)
+            p.drawText(QRect(0, 0, w, h), Qt.AlignCenter, "No data in selected range")
+            p.end()
+            return
 
         vals = self._values
         n    = len(vals)
@@ -8083,6 +8118,8 @@ class _MetricsPlotDialog(QDialog):
     ``on_point_click`` – called with the trace-ns when a scatter point is clicked.
     """
 
+    closed = pyqtSignal()
+
     def __init__(self, title: str,
                  points,
                  time_scale: str,
@@ -8138,6 +8175,17 @@ class _MetricsPlotDialog(QDialog):
         btn_row.addWidget(btn_cls)
         root.addLayout(btn_row)
 
+    def update_data(self, title: str, points: list) -> None:
+        """Refresh scatter + histogram when cursor range or scope changes."""
+        self._title = title
+        self.setWindowTitle(title)
+        self._scatter.set_points(points)
+        self._histogram.set_values([p[1] for p in points])
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self.closed.emit()
+        super().closeEvent(event)
+
     def _on_scatter_click(self, payload) -> None:
         if self._on_pt_click:
             self._on_pt_click(payload)
@@ -8188,9 +8236,28 @@ class _StatsPanel(QWidget):
         self._ui_font_size: int = UI_FONT_SIZE
         self._is_dark: bool = True
         self._plot_dlg = None   # keep reference to prevent GC
+        self._plot_mk: Optional[str] = None
+        self._plot_kind: Optional[str] = None   # "exec" or "inter"
         self._trace: Optional["BtfTrace"] = None
+        self._cursor_times: List[int] = []
+        self._scope_to_cursors: bool = True
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        scope_row = QHBoxLayout()
+        scope_row.setContentsMargins(8, 6, 8, 0)
+        scope_row.setSpacing(6)
+        self._scope_cb = QCheckBox("Limit to cursor range (C1–Cn)")
+        self._scope_cb.setChecked(True)
+        self._scope_cb.setEnabled(False)
+        self._scope_cb.setToolTip(
+            "When two or more cursors are placed, restrict all statistics\n"
+            "to the time window from C1 through the last cursor.")
+        self._scope_cb.toggled.connect(self._on_scope_toggled)
+        scope_row.addWidget(self._scope_cb)
+        self._scope_label = QLabel("")
+        self._scope_label.setStyleSheet("color:#888888;")
+        scope_row.addWidget(self._scope_label, 1)
+        outer.addLayout(scope_row)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -8242,32 +8309,122 @@ class _StatsPanel(QWidget):
     def set_dark(self, is_dark: bool) -> None:
         self._is_dark = is_dark
 
-    def _open_plot(self, trace, mk: str, kind: str) -> None:
-        """Open a metrics distribution popup for the given task and metric kind."""
-        segs  = trace.seg_map_by_merge_key.get(mk, [])
-        if not segs:
+    def set_cursor_times(self, times: list, *, refresh_stats: bool = True) -> None:
+        """Update placed cursor timestamps; optionally rebuild statistics."""
+        self._cursor_times = list(times)
+        can_scope = len(times) >= 2
+        self._scope_cb.blockSignals(True)
+        self._scope_cb.setEnabled(can_scope)
+        if not can_scope:
+            self._scope_cb.setChecked(False)
+        else:
+            self._scope_cb.setChecked(self._scope_to_cursors)
+        self._scope_cb.blockSignals(False)
+        self._update_scope_header()
+        if refresh_stats and self._trace is not None:
+            self.rebuild(self._trace)
+        self._refresh_open_plot()
+
+    def _on_scope_toggled(self, checked: bool) -> None:
+        self._scope_to_cursors = bool(checked)
+        self._update_scope_header()
+        if self._trace is not None:
+            self.rebuild(self._trace)
+        self._refresh_open_plot()
+
+    def _stats_range(self) -> Optional[Tuple[int, int, int]]:
+        """Return (lo, hi, n_cursors) when cursor-scoped stats are active."""
+        if not self._scope_to_cursors or len(self._cursor_times) < 2 or self._trace is None:
+            return None
+        t_sorted = sorted(self._cursor_times)
+        lo, hi = t_sorted[0], t_sorted[-1]
+        if hi <= lo:
+            return None
+        return lo, hi, len(t_sorted)
+
+    def _update_scope_header(self) -> None:
+        rng = self._stats_range()
+        if rng is None:
+            self._scope_label.setText(
+                "Place 2+ cursors to measure a time window" if len(self._cursor_times) < 2 else "")
             return
-        raw   = trace.task_repr.get(mk, mk)
-        name  = _task_display_name(raw)
+        lo, hi, n_cur = rng
+        unit = self._trace.time_scale
+        self._scope_label.setText(
+            f"C1–C{n_cur}: {_format_time(lo, unit)} … {_format_time(hi, unit)}  "
+            f"({_format_time(hi - lo, unit)})")
+
+    def _scope_suffix(self) -> str:
+        return " (cursor range)" if self._stats_range() is not None else ""
+
+    def _build_plot_points(self, trace: "BtfTrace", mk: str, kind: str
+                           ) -> Optional[Tuple[str, list, "QColor"]]:
+        """Return (title, points, color) for a task metric chart, or None if no task."""
+        segs = trace.seg_map_by_merge_key.get(mk, [])
+        if not segs:
+            return None
+        rng = self._stats_range()
+        lo = hi = None
+        if rng is not None:
+            lo, hi, _ = rng
+        raw = trace.task_repr.get(mk, mk)
+        name = _task_display_name(raw)
         color = _task_color(raw)
+        scope = self._scope_suffix()
         if kind == "exec":
-            pts   = [(s.start, s.end - s.start, s)
-                     for s in segs if s.end > s.start]
-            title = f"{name} — Execution Time"
+            if lo is not None and hi is not None:
+                segs = [s for s in segs if _seg_fully_in_range(s, lo, hi)]
+            pts = [(s.start, s.end - s.start, s)
+                   for s in segs if s.end > s.start]
+            title = f"{name} — Execution Time{scope}"
         else:
             starts = sorted(s.start for s in segs)
-            # Map start → segment so we can highlight the arriving slice
             start_to_seg = {s.start: s for s in segs}
-            pts    = [(starts[i], starts[i] - starts[i - 1],
-                       start_to_seg.get(starts[i]))
-                      for i in range(1, len(starts))
-                      if starts[i] > starts[i - 1]]
-            title  = f"{name} — Inter-Arrival Time"
+            pts = []
+            for i in range(1, len(starts)):
+                if starts[i] <= starts[i - 1]:
+                    continue
+                if lo is not None and hi is not None and (starts[i] < lo or starts[i] > hi):
+                    continue
+                pts.append((starts[i], starts[i] - starts[i - 1],
+                            start_to_seg.get(starts[i])))
+            title = f"{name} — Inter-Arrival Time{scope}"
+        return title, pts, color
+
+    def _on_plot_dialog_closed(self) -> None:
+        self._plot_dlg = None
+        self._plot_mk = None
+        self._plot_kind = None
+
+    def _refresh_open_plot(self) -> None:
+        """Live-update the metrics popup when cursors or scope change."""
+        dlg = self._plot_dlg
+        if (dlg is None or not dlg.isVisible()
+                or self._trace is None or self._plot_mk is None
+                or self._plot_kind is None):
+            return
+        built = self._build_plot_points(self._trace, self._plot_mk, self._plot_kind)
+        if built is None:
+            return
+        title, pts, _color = built
+        dlg.update_data(title, pts)
+
+    def _open_plot(self, trace, mk: str, kind: str) -> None:
+        """Open a metrics distribution popup for the given task and metric kind."""
+        built = self._build_plot_points(trace, mk, kind)
+        if built is None:
+            return
+        title, pts, color = built
         if not pts:
             return
-        # Both exec and inter-arrival highlight the slice at the plotted time
+        self._plot_mk = mk
+        self._plot_kind = kind
         _on_click = lambda seg: self.segment_select.emit(seg) if seg is not None else None
         if self._plot_dlg is not None:
+            try:
+                self._plot_dlg.closed.disconnect(self._on_plot_dialog_closed)
+            except TypeError:
+                pass
             self._plot_dlg.close()
         self._plot_dlg = _MetricsPlotDialog(
             title, pts, trace.time_scale, color,
@@ -8275,6 +8432,7 @@ class _StatsPanel(QWidget):
             is_dark=self._is_dark,
             parent=self.window(),
         )
+        self._plot_dlg.closed.connect(self._on_plot_dialog_closed)
         self._plot_dlg.show()
 
     def _sep(self) -> QFrame:
@@ -8282,23 +8440,38 @@ class _StatsPanel(QWidget):
         f.setFrameShape(QFrame.HLine)
         return f
 
-    def _core_util_rows(self, trace: "BtfTrace") -> List[Tuple[str, float]]:
-        total_ns = trace.time_max - trace.time_min
+    def _core_util_rows(self, trace: "BtfTrace",
+                        lo: Optional[int] = None, hi: Optional[int] = None) -> List[Tuple[str, float]]:
+        if lo is not None and hi is not None:
+            total_ns = hi - lo
+        else:
+            total_ns = trace.time_max - trace.time_min
         if total_ns <= 0:
             return []
         rows: List[Tuple[str, float]] = []
         for core in trace.core_names:
             segs = trace.core_segs.get(core, [])
-            active_ns = sum(
-                s.end - s.start for s in segs
-                if (_tn := _parse_task_name(s.task)[2]) != "TICK"
-                and not _is_idle_task_name(_tn)
-            )
+            if lo is not None and hi is not None:
+                active_ns = sum(
+                    _seg_overlap_ns(s, lo, hi) for s in segs
+                    if (_tn := _parse_task_name(s.task)[2]) != "TICK"
+                    and not _is_idle_task_name(_tn)
+                )
+            else:
+                active_ns = sum(
+                    s.end - s.start for s in segs
+                    if (_tn := _parse_task_name(s.task)[2]) != "TICK"
+                    and not _is_idle_task_name(_tn)
+                )
             rows.append((core, 100.0 * active_ns / total_ns))
         return rows
 
-    def _task_cpu_rows(self, trace: "BtfTrace", limit: int = 10) -> List[Tuple[str, str, float]]:
-        total_ns = trace.time_max - trace.time_min
+    def _task_cpu_rows(self, trace: "BtfTrace", limit: int = 10,
+                       lo: Optional[int] = None, hi: Optional[int] = None) -> List[Tuple[str, str, float]]:
+        if lo is not None and hi is not None:
+            total_ns = hi - lo
+        else:
+            total_ns = trace.time_max - trace.time_min
         if total_ns <= 0:
             return []
         task_times: Dict[str, int] = {}
@@ -8307,10 +8480,15 @@ class _StatsPanel(QWidget):
             _, _, tname = _parse_task_name(raw)
             if _is_idle_task_name(tname) or tname == "TICK":
                 continue
-            task_times[mk] = sum(s.end - s.start for s in segs)
+            if lo is not None and hi is not None:
+                task_times[mk] = sum(_seg_overlap_ns(s, lo, hi) for s in segs)
+            else:
+                task_times[mk] = sum(s.end - s.start for s in segs)
 
         rows: List[Tuple[str, str, float]] = []
         for mk, t_ns in sorted(task_times.items(), key=lambda kv: kv[1], reverse=True)[:limit]:
+            if t_ns <= 0:
+                continue
             raw = trace.task_repr.get(mk, mk)
             rows.append((mk, _task_display_name(raw), 100.0 * t_ns / total_ns))
         return rows
@@ -8349,9 +8527,33 @@ class _StatsPanel(QWidget):
             _format_time(vals[p95_idx], scale),
         )
 
-    def _exec_slice_rows(self, trace: "BtfTrace") -> List[Tuple[str, int, float, str, str, str, str]]:
+    def _exec_slice_samples(self, segs: list,
+                            lo: Optional[int] = None, hi: Optional[int] = None) -> List[int]:
+        if lo is not None and hi is not None:
+            return [s.end - s.start for s in segs
+                    if (s.end - s.start) > 0 and _seg_fully_in_range(s, lo, hi)]
+        return [s.end - s.start for s in segs if (s.end - s.start) > 0]
+
+    def _inter_arrival_samples(self, segs: list,
+                               lo: Optional[int] = None, hi: Optional[int] = None) -> List[int]:
+        starts = sorted(s.start for s in segs)
+        samples: List[int] = []
+        for i in range(1, len(starts)):
+            gap = starts[i] - starts[i - 1]
+            if gap <= 0:
+                continue
+            if lo is not None and hi is not None and (starts[i] < lo or starts[i] > hi):
+                continue
+            samples.append(gap)
+        return samples
+
+    def _exec_slice_rows(self, trace: "BtfTrace",
+                         lo: Optional[int] = None, hi: Optional[int] = None) -> List[Tuple[str, int, float, str, str, str, str]]:
         rows: List[Tuple[str, int, float, str, str, str, str]] = []
-        total_ns = trace.time_max - trace.time_min
+        if lo is not None and hi is not None:
+            total_ns = hi - lo
+        else:
+            total_ns = trace.time_max - trace.time_min
         if total_ns <= 0:
             return rows
         for mk, segs in trace.seg_map_by_merge_key.items():
@@ -8361,7 +8563,7 @@ class _StatsPanel(QWidget):
             _, _, tname = _parse_task_name(raw)
             if _is_idle_task_name(tname) or tname == "TICK":
                 continue
-            samples = [s.end - s.start for s in segs if (s.end - s.start) > 0]
+            samples = self._exec_slice_samples(segs, lo, hi)
             summary = self._summarize_samples(samples, trace.time_scale)
             if summary is None:
                 continue
@@ -8371,7 +8573,8 @@ class _StatsPanel(QWidget):
         rows.sort(key=lambda r: (-r[3], -r[2], r[1].lower()))
         return rows
 
-    def _inter_arrival_rows(self, trace: "BtfTrace") -> List[Tuple[str, int, str, str, str, str]]:
+    def _inter_arrival_rows(self, trace: "BtfTrace",
+                            lo: Optional[int] = None, hi: Optional[int] = None) -> List[Tuple[str, int, str, str, str, str]]:
         rows: List[Tuple[str, int, str, str, str, str]] = []
         for mk, segs in trace.seg_map_by_merge_key.items():
             if len(segs) < 2:
@@ -8380,19 +8583,26 @@ class _StatsPanel(QWidget):
             _, _, tname = _parse_task_name(raw)
             if _is_idle_task_name(tname) or tname == "TICK":
                 continue
-            starts = sorted(s.start for s in segs)
-            samples = [starts[i] - starts[i - 1] for i in range(1, len(starts)) if (starts[i] - starts[i - 1]) > 0]
+            samples = self._inter_arrival_samples(segs, lo, hi)
             summary = self._summarize_samples(samples, trace.time_scale)
             if summary is None:
                 continue
             mn, avg, mx, p95 = summary
-            rows.append((mk, _task_display_name(raw), len(starts), mn, avg, mx, p95))
+            if lo is not None and hi is not None:
+                n_runs = sum(1 for s in segs if lo <= s.start <= hi)
+            else:
+                n_runs = len(segs)
+            rows.append((mk, _task_display_name(raw), n_runs, mn, avg, mx, p95))
         rows.sort(key=lambda r: (-r[2], r[1].lower()))
         return rows
 
-    def _exec_slice_rows_export(self, trace: "BtfTrace") -> List[Tuple[str, int, float, str, str, str, str, str, str]]:
+    def _exec_slice_rows_export(self, trace: "BtfTrace",
+                                lo: Optional[int] = None, hi: Optional[int] = None) -> List[Tuple[str, int, float, str, str, str, str, str, str]]:
         rows: List[Tuple[str, int, float, str, str, str, str, str, str]] = []
-        total_ns = trace.time_max - trace.time_min
+        if lo is not None and hi is not None:
+            total_ns = hi - lo
+        else:
+            total_ns = trace.time_max - trace.time_min
         if total_ns <= 0:
             return rows
         for mk, segs in trace.seg_map_by_merge_key.items():
@@ -8402,7 +8612,7 @@ class _StatsPanel(QWidget):
             _, _, tname = _parse_task_name(raw)
             if _is_idle_task_name(tname) or tname == "TICK":
                 continue
-            samples = [s.end - s.start for s in segs if (s.end - s.start) > 0]
+            samples = self._exec_slice_samples(segs, lo, hi)
             summary = self._summarize_samples_export(samples, trace.time_scale)
             if summary is None:
                 continue
@@ -8412,7 +8622,8 @@ class _StatsPanel(QWidget):
         rows.sort(key=lambda r: (-r[3], -r[2], r[1].lower()))
         return rows
 
-    def _inter_arrival_rows_export(self, trace: "BtfTrace") -> List[Tuple[str, int, str, str, str, str, str, str]]:
+    def _inter_arrival_rows_export(self, trace: "BtfTrace",
+                                   lo: Optional[int] = None, hi: Optional[int] = None) -> List[Tuple[str, int, str, str, str, str, str, str]]:
         rows: List[Tuple[str, int, str, str, str, str, str, str]] = []
         for mk, segs in trace.seg_map_by_merge_key.items():
             if len(segs) < 2:
@@ -8421,13 +8632,16 @@ class _StatsPanel(QWidget):
             _, _, tname = _parse_task_name(raw)
             if _is_idle_task_name(tname) or tname == "TICK":
                 continue
-            starts = sorted(s.start for s in segs)
-            samples = [starts[i] - starts[i - 1] for i in range(1, len(starts)) if (starts[i] - starts[i - 1]) > 0]
+            samples = self._inter_arrival_samples(segs, lo, hi)
             summary = self._summarize_samples_export(samples, trace.time_scale)
             if summary is None:
                 continue
             mn, avg, tmean, mx, p50, p95 = summary
-            rows.append((mk, _task_display_name(raw), len(starts), mn, avg, tmean, mx, p50, p95))
+            if lo is not None and hi is not None:
+                n_runs = sum(1 for s in segs if lo <= s.start <= hi)
+            else:
+                n_runs = len(segs)
+            rows.append((mk, _task_display_name(raw), n_runs, mn, avg, tmean, mx, p50, p95))
         rows.sort(key=lambda r: (-r[2], r[1].lower()))
         return rows
 
@@ -8526,13 +8740,28 @@ class _StatsPanel(QWidget):
         if not path:
             return
 
-        total_ns = trace.time_max - trace.time_min
-        span_str = _format_time(total_ns, trace.time_scale)
-        sti_count = sum(1 for ev in trace.sti_events if not _is_tag_sti_channel(ev.target))
-        core_rows = self._core_util_rows(trace)
-        task_rows = self._task_cpu_rows(trace)
-        exec_rows = self._exec_slice_rows_export(trace)
-        inter_rows = self._inter_arrival_rows_export(trace)
+        rng = self._stats_range()
+        lo = hi = None
+        if rng is not None:
+            lo, hi, _n_cur = rng
+            total_ns = hi - lo
+            span_str = _format_time(total_ns, trace.time_scale)
+            scope_title = f" (cursor range C1–C{_n_cur})"
+        else:
+            total_ns = trace.time_max - trace.time_min
+            span_str = _format_time(total_ns, trace.time_scale)
+            scope_title = ""
+
+        if lo is not None and hi is not None:
+            sti_count = sum(
+                1 for ev in trace.sti_events
+                if not _is_tag_sti_channel(ev.target) and lo <= ev.time <= hi)
+        else:
+            sti_count = sum(1 for ev in trace.sti_events if not _is_tag_sti_channel(ev.target))
+        core_rows = self._core_util_rows(trace, lo, hi)
+        task_rows = self._task_cpu_rows(trace, lo=lo, hi=hi)
+        exec_rows = self._exec_slice_rows_export(trace, lo, hi)
+        inter_rows = self._inter_arrival_rows_export(trace, lo, hi)
 
         def _esc(v: object) -> str:
             return html.escape(str(v), quote=True)
@@ -8555,7 +8784,7 @@ class _StatsPanel(QWidget):
                 for mk_r, name, runs, cpu, mn, avg, tmean, mx, p50, p95 in rows
             ) or '<tr><td colspan="9" class="empty">No data</td></tr>'
             return (
-                "<section class=\"report-card\"><h2>Execution Time Per Slice</h2>"
+                f"<section class=\"report-card\"><h2>Execution Time Per Slice{_esc(scope_title)}</h2>"
                 "<table><thead><tr><th>Task</th><th>Runs</th><th>CPU%</th><th>Min</th><th>Avg</th><th>TrimMean(5%)</th><th>Max</th><th>p50</th><th>p95</th></tr></thead>"
                 f"<tbody>{body}</tbody></table></section>"
             )
@@ -8569,6 +8798,23 @@ class _StatsPanel(QWidget):
             f"<tr><td>{_esc(name)}</td><td>{pct:.1f}%</td></tr>"
             for _, name, pct in task_rows
         ) or '<tr><td colspan="2" class="empty">No data</td></tr>'
+
+        if lo is not None and hi is not None:
+            task_count = sum(
+                1 for _segs in trace.seg_map_by_merge_key.values()
+                if any(_seg_overlaps_range(s, lo, hi) for s in _segs)
+            )
+            seg_count = sum(1 for s in trace.segments if _seg_overlaps_range(s, lo, hi))
+            range_note = (
+                f"<li><strong>Cursor range:</strong> C1–C{_n_cur}, "
+                f"{_esc(_format_time(lo, trace.time_scale))} … "
+                f"{_esc(_format_time(hi, trace.time_scale))}. "
+                f"CPU% uses overlapping active time; slice metrics use segments fully inside the range.</li>"
+            )
+        else:
+            task_count = len(trace.tasks)
+            seg_count = len(trace.segments)
+            range_note = ""
 
         report = f"""<!doctype html>
 <html>
@@ -8656,15 +8902,16 @@ class _StatsPanel(QWidget):
         </header>
 
         <section class=\"kpi-grid\">
-            <article class=\"kpi\"><div class=\"k\">Span</div><div class=\"v\">{_esc(span_str)}</div></article>
-            <article class=\"kpi\"><div class=\"k\">Tasks</div><div class=\"v\">{len(trace.tasks):,}</div></article>
-            <article class=\"kpi\"><div class=\"k\">Segments</div><div class=\"v\">{len(trace.segments):,}</div></article>
+            <article class=\"kpi\"><div class=\"k\">Span{_esc(scope_title)}</div><div class=\"v\">{_esc(span_str)}</div></article>
+            <article class=\"kpi\"><div class=\"k\">Tasks</div><div class=\"v\">{task_count:,}</div></article>
+            <article class=\"kpi\"><div class=\"k\">Segments</div><div class=\"v\">{seg_count:,}</div></article>
             <article class=\"kpi\"><div class=\"k\">STI Events</div><div class=\"v\">{sti_count:,}</div></article>
         </section>
 
         <section class=\"report-card notes\">
         <h2>Statistics Notes</h2>
         <ul>
+            {range_note}
             <li><strong>Execution Time Per Slice:</strong> Duration of each continuous task run between two context switches. Lower and tighter values indicate more predictable execution.</li>
             <li><strong>Inter-Arrival Time:</strong> Time between consecutive activations of the same task (slice start to next slice start). It reflects activation cadence and jitter.</li>
             <li><strong>Min (Minimum):</strong> The fastest execution time recorded. It represents the best-case scenario under zero system load.</li>
@@ -8677,7 +8924,7 @@ class _StatsPanel(QWidget):
     </section>
 
     <section class=\"report-card\">
-    <h2>Core Utilisation (excl. IDLE/TICK)</h2>
+    <h2>Core Utilisation (excl. IDLE/TICK){_esc(scope_title)}</h2>
     <table>
       <thead><tr><th>Core</th><th>CPU %</th></tr></thead>
       <tbody>{core_body}</tbody>
@@ -8685,14 +8932,14 @@ class _StatsPanel(QWidget):
   </section>
 
     <section class=\"report-card\">
-    <h2>Top Tasks by CPU (excl. IDLE/TICK)</h2>
+    <h2>Top Tasks by CPU (excl. IDLE/TICK){_esc(scope_title)}</h2>
     <table>
       <thead><tr><th>Task</th><th>CPU %</th></tr></thead>
       <tbody>{task_body}</tbody>
     </table>
   </section>
     {_render_exec_table(exec_rows)}
-    {_render_stats_table('Inter-Arrival Time', inter_rows)}
+    {_render_stats_table(f'Inter-Arrival Time{scope_title}', inter_rows)}
         <div class=\"report-foot\">Generated by BTF Viewer</div>
     </div>
 </body>
@@ -8725,13 +8972,37 @@ class _StatsPanel(QWidget):
         if not path:
             return
 
-        total_ns = trace.time_max - trace.time_min
-        span_str = _format_time(total_ns, trace.time_scale).replace("µs", "us").replace("μs", "us")
-        sti_count = sum(1 for ev in trace.sti_events if not _is_tag_sti_channel(ev.target))
-        core_rows = self._core_util_rows(trace)
-        task_rows = self._task_cpu_rows(trace)
-        exec_rows = self._exec_slice_rows_export(trace)
-        inter_rows = self._inter_arrival_rows_export(trace)
+        rng = self._stats_range()
+        lo = hi = None
+        scope_suffix = ""
+        if rng is not None:
+            lo, hi, n_cur = rng
+            total_ns = hi - lo
+            span_str = _format_time(total_ns, trace.time_scale)
+            scope_suffix = f" (cursor range C1–C{n_cur})"
+        else:
+            total_ns = trace.time_max - trace.time_min
+            span_str = _format_time(total_ns, trace.time_scale)
+        span_str = span_str.replace("µs", "us").replace("μs", "us")
+
+        if lo is not None and hi is not None:
+            sti_count = sum(
+                1 for ev in trace.sti_events
+                if not _is_tag_sti_channel(ev.target) and lo <= ev.time <= hi)
+            task_count = sum(
+                1 for _segs in trace.seg_map_by_merge_key.values()
+                if any(_seg_overlaps_range(s, lo, hi) for s in _segs)
+            )
+            seg_count = sum(1 for s in trace.segments if _seg_overlaps_range(s, lo, hi))
+        else:
+            sti_count = sum(1 for ev in trace.sti_events if not _is_tag_sti_channel(ev.target))
+            task_count = len(trace.tasks)
+            seg_count = len(trace.segments)
+
+        core_rows = self._core_util_rows(trace, lo, hi)
+        task_rows = self._task_cpu_rows(trace, lo=lo, hi=hi)
+        exec_rows = self._exec_slice_rows_export(trace, lo, hi)
+        inter_rows = self._inter_arrival_rows_export(trace, lo, hi)
 
         def _us(v: object) -> str:
             return str(v).replace("µs", "us").replace("μs", "us")
@@ -8742,13 +9013,15 @@ class _StatsPanel(QWidget):
 
                 writer.writerow(["Summary"])
                 writer.writerow(["Metric", "Value"])
-                writer.writerow(["Span", _us(span_str)])
-                writer.writerow(["Tasks", len(trace.tasks)])
-                writer.writerow(["Segments", len(trace.segments)])
+                writer.writerow([f"Span{scope_suffix}", _us(span_str)])
+                if scope_suffix:
+                    writer.writerow(["Cursor range", scope_suffix.strip(" ()")])
+                writer.writerow(["Tasks", task_count])
+                writer.writerow(["Segments", seg_count])
                 writer.writerow(["STI Events", sti_count])
 
                 writer.writerow([])
-                writer.writerow(["Core Utilisation (excl. IDLE/TICK)"])
+                writer.writerow([f"Core Utilisation (excl. IDLE/TICK){scope_suffix}"])
                 writer.writerow(["Core", "CPU %"])
                 if core_rows:
                     for core, pct in core_rows:
@@ -8757,7 +9030,7 @@ class _StatsPanel(QWidget):
                     writer.writerow(["No data", ""])
 
                 writer.writerow([])
-                writer.writerow(["Top Tasks by CPU (excl. IDLE/TICK)"])
+                writer.writerow([f"Top Tasks by CPU (excl. IDLE/TICK){scope_suffix}"])
                 writer.writerow(["Task", "CPU %"])
                 if task_rows:
                     for _, name, pct in task_rows:
@@ -8766,7 +9039,7 @@ class _StatsPanel(QWidget):
                     writer.writerow(["No data", ""])
 
                 writer.writerow([])
-                writer.writerow(["Execution Time Per Slice"])
+                writer.writerow([f"Execution Time Per Slice{scope_suffix}"])
                 writer.writerow(["Task", "Runs", "CPU%", "Min", "Avg", "TrimMean(5%)", "Max", "p50", "p95"])
                 if exec_rows:
                     for mk_r, name, runs, cpu, mn, avg, tmean, mx, p50, p95 in exec_rows:
@@ -8775,7 +9048,7 @@ class _StatsPanel(QWidget):
                     writer.writerow(["No data", "", "", "", "", "", "", "", ""])
 
                 writer.writerow([])
-                writer.writerow(["Inter-Arrival Time"])
+                writer.writerow([f"Inter-Arrival Time{scope_suffix}"])
                 writer.writerow(["Task", "Runs", "Min", "Avg", "TrimMean(5%)", "Max", "p50", "p95"])
                 if inter_rows:
                     for mk_r, name, runs, mn, avg, tmean, mx, p50, p95 in inter_rows:
@@ -8794,15 +9067,36 @@ class _StatsPanel(QWidget):
         self._btn_export_csv.setEnabled(True)
         self._btn_export_html.setEnabled(True)
         self._clear()
-        total_ns = trace.time_max - trace.time_min
-        span_str = _format_time(total_ns, trace.time_scale)
-        sti_count = sum(1 for ev in trace.sti_events if not _is_tag_sti_channel(ev.target))
+        self._update_scope_header()
+
+        rng = self._stats_range()
+        lo = hi = None
+        scope = self._scope_suffix()
+        if rng is not None:
+            lo, hi, _n_cur = rng
+            total_ns = hi - lo
+            span_str = _format_time(total_ns, trace.time_scale)
+            sti_count = sum(
+                1 for ev in trace.sti_events
+                if not _is_tag_sti_channel(ev.target) and lo <= ev.time <= hi)
+            task_count = sum(
+                1 for _segs in trace.seg_map_by_merge_key.values()
+                if any(_seg_overlaps_range(s, lo, hi) for s in _segs)
+            )
+            seg_count = sum(1 for s in trace.segments if _seg_overlaps_range(s, lo, hi))
+        else:
+            total_ns = trace.time_max - trace.time_min
+            span_str = _format_time(total_ns, trace.time_scale)
+            sti_count = sum(1 for ev in trace.sti_events if not _is_tag_sti_channel(ev.target))
+            task_count = len(trace.tasks)
+            seg_count = len(trace.segments)
+
         _fs = f"{self._ui_font_size}pt"
 
         # -- Summary row ---------------------------------------------------
         self._ilay.addWidget(self._lbl(
-            f"Span: {span_str}  |  Tasks: {len(trace.tasks)}  |  "
-            f"Segments: {len(trace.segments):,}  |  STI events: {sti_count:,}",
+            f"Span: {span_str}{scope}  |  Tasks: {task_count}  |  "
+            f"Segments: {seg_count:,}  |  STI events: {sti_count:,}",
             color="#888888",
             ui_fs=_fs,
         ))
@@ -8810,8 +9104,9 @@ class _StatsPanel(QWidget):
         # -- Core utilisation (excl. IDLE) ---------------------------------
         if trace.core_names:
             self._ilay.addWidget(self._sep())
-            self._ilay.addWidget(self._lbl("Core Utilisation (excl. IDLE/TICK):", bold=True, ui_fs=_fs))
-            for core, pct in self._core_util_rows(trace):
+            self._ilay.addWidget(self._lbl(
+                f"Core Utilisation (excl. IDLE/TICK){scope}:", bold=True, ui_fs=_fs))
+            for core, pct in self._core_util_rows(trace, lo, hi):
                 row = QWidget()
                 hlay = QHBoxLayout(row)
                 hlay.setContentsMargins(0, 0, 0, 0)
@@ -8848,8 +9143,9 @@ class _StatsPanel(QWidget):
 
         # -- Top tasks by CPU time (excl. IDLE, top 10) -------------------
         self._ilay.addWidget(self._sep())
-        self._ilay.addWidget(self._lbl("Top Tasks by CPU (excl. IDLE/TICK):", bold=True, ui_fs=_fs))
-        for mk, disp, pct in self._task_cpu_rows(trace):
+        self._ilay.addWidget(self._lbl(
+            f"Top Tasks by CPU (excl. IDLE/TICK){scope}:", bold=True, ui_fs=_fs))
+        for mk, disp, pct in self._task_cpu_rows(trace, lo=lo, hi=hi):
 
             row = QWidget()
             hlay = QHBoxLayout(row)
@@ -8899,20 +9195,24 @@ class _StatsPanel(QWidget):
 
         # -- Execution time per slice -------------------------------------
         self._ilay.addWidget(self._sep())
-        self._ilay.addWidget(self._lbl("Execution Time Per Slice:", bold=True, ui_fs=_fs))
-        _exec_rows = self._exec_slice_rows(trace)
+        self._ilay.addWidget(self._lbl(
+            f"Execution Time Per Slice{scope}:", bold=True, ui_fs=_fs))
+        _exec_rows = self._exec_slice_rows(trace, lo, hi)
+        empty_exec = ("No slices fully inside cursor range" if scope
+                      else "No user-task slices found")
         self._ilay.addWidget(self._build_stats_table(
             _exec_rows,
             _fs,
-            "No user-task slices found",
+            empty_exec,
             include_cpu=True,
             on_row_click=lambda mk: self._open_plot(trace, mk, "exec"),
         ))
 
         # -- Inter-arrival time -------------------------------------------
         self._ilay.addWidget(self._sep())
-        self._ilay.addWidget(self._lbl("Inter-Arrival Time:", bold=True, ui_fs=_fs))
-        _inter_rows = self._inter_arrival_rows(trace)
+        self._ilay.addWidget(self._lbl(
+            f"Inter-Arrival Time{scope}:", bold=True, ui_fs=_fs))
+        _inter_rows = self._inter_arrival_rows(trace, lo, hi)
         self._ilay.addWidget(self._build_stats_table(
             _inter_rows,
             _fs,
@@ -13615,6 +13915,7 @@ class MainWindow(QMainWindow):
         _process_ui_events_safely()
         self._legend.rebuild(trace, show_sti=self._show_sti)
         self._stats_panel._ui_font_size = self._ui_font_size_val
+        self._stats_panel.set_cursor_times(self._view._scene.cursor_times(), refresh_stats=False)
         self._stats_panel.rebuild(trace)
         self._cpu_load_graph.set_trace(trace)
         self._cpu_load_graph.set_font_size(self._font_size_val)
@@ -14025,6 +14326,8 @@ class MainWindow(QMainWindow):
 
     def _on_cursors_changed(self, times: list) -> None:
         self._cursor_bar.rebuild(times, self._trace)
+        if hasattr(self, "_stats_panel"):
+            self._stats_panel.set_cursor_times(times)
         has_range = len(times) >= 2
         self._act_zoom_range.setEnabled(has_range)
         self._tb_zoom_range_btn.setEnabled(has_range)
