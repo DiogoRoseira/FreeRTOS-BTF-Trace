@@ -1,5 +1,5 @@
 """
-btf_viewer.py – Single-file RTOS BTF Viewer (PyQt5).
+btf_viewer.py - Single-file RTOS BTF Viewer (PyQt5).
 
 Usage:
     python btf_viewer.py [trace.btf]
@@ -14,7 +14,7 @@ Architecture overview
      Reads the .btf text file line-by-line and reconstructs task
      execution segments from the sparse event stream (resume / preempt
      pairs).  All derived lookup tables (seg_map_by_merge_key, core_segs,
-     core_task_segs, …) are pre-built here once so that scene rebuilds
+     core_task_segs, ...) are pre-built here once so that scene rebuilds
      never iterate over raw segments again.
 
   2. Data model  (dataclasses: RawEvent, TaskSegment, StiEvent, BtfTrace)
@@ -24,18 +24,18 @@ Architecture overview
   3. Timeline scene  (TimelineScene : QGraphicsScene)
      Converts BtfTrace data into QGraphicsItems at a given zoom level
      (timescale_per_px).  Four builder methods cover the two view modes
-     (task / core) × two orientations (horizontal / vertical).  The scene
+     (task / core) x two orientations (horizontal / vertical).  The scene
      is fully torn down and rebuilt on every zoom/scroll action.
 
-  4. Graphics items  (_RulerItem, _BatchRowItem, _BatchStiItem, …)
+  4. Graphics items  (_RulerItem, _BatchRowItem, _BatchStiItem, ...)
      Custom QGraphicsItem subclasses.  _BatchRowItem and _BatchStiItem
      each represent an entire row with a single Qt item and use a
      3-tier Level-of-Detail (LOD) paint strategy to keep frame times
      low across the full zoom range (see _BatchRowItem docstring).
 
   5. Timeline view  (TimelineView : QGraphicsView)
-     Wraps the scene; handles mouse events (click → cursor, drag → pan,
-     Ctrl+wheel / pinch → zoom, middle-drag → range-zoom), label-column
+     Wraps the scene; handles mouse events (click -> cursor, drag -> pan,
+     Ctrl+wheel / pinch -> zoom, middle-drag -> range-zoom), label-column
      resize, and frozen-label repositioning on scroll.
 
   6. Main window  (MainWindow : QMainWindow)
@@ -44,19 +44,19 @@ Architecture overview
 
 Section index
 -------------
-  USER CONFIGURATION  – fonts, layout, colours, cursors, LOD thresholds
+  USER CONFIGURATION  - fonts, layout, colours, cursors, LOD thresholds
                         (edit here to customise the viewer appearance)
-  BTF Parser          – dataclasses + task-name helpers + _parse_btf()
-  Timeline Widget     – internal colour helpers, _format_time, _monospace_font,
+  BTF Parser          - dataclasses + task-name helpers + _parse_btf()
+  Timeline Widget     - internal colour helpers, _format_time, _monospace_font,
                         _lod_reduce, _nice_grid_step
-  Scene               – TimelineScene and its four builder methods
-  Graphics Items      – _RulerItem, _BatchRowItem, _BatchStiItem,
+  Scene               - TimelineScene and its four builder methods
+  Graphics Items      - _RulerItem, _BatchRowItem, _BatchStiItem,
                         _TaskLabelItem, _CoreHeaderItem,
                         _SegmentItem (legacy), _StiMarkerItem (legacy)
-  View                – TimelineView (pan / zoom / cursor mouse handling)
-  Main Window         – _CursorButton, _CursorBarWidget, _LegendWidget,
+  View                - TimelineView (pan / zoom / cursor mouse handling)
+  Main Window         - _CursorButton, _CursorBarWidget, _LegendWidget,
                         _StatsPanel, _RcSettings, _WheelSpinBox, MainWindow
-  Entry point         – main()
+  Entry point         - main()
 """
 
 from __future__ import annotations
@@ -173,12 +173,12 @@ from PyQt5.QtWidgets import (
 # ===========================================================================
 
 # ---- Fonts ----------------------------------------------------------------
-FONT_SIZE                = 10   # Timeline label font size (pt).  Adjustable at runtime
+FONT_SIZE                = 8    # Timeline label font size (pt).  Adjustable at runtime
                                 # via the Font spinbox in the toolbar.
 UI_FONT_SIZE             = 8    # Application UI font: menus, toolbar, status bar (pt).
 
 # ---- Rendering -----------------------------------------------------------
-# Vertical-mode label rendering: use a pre-rendered QPixmap rotated 90° instead
+# Vertical-mode label rendering: use a pre-rendered QPixmap rotated 90deg instead
 # of a rotated QGraphicsTextItem.  On Windows, GDI cannot antialias rotated text,
 # so the pixmap path (render text horizontally, then rotate the image) produces
 # much crisper labels.  Enabled by default on Windows; other platforms use the
@@ -187,14 +187,14 @@ _VERTICAL_LABEL_USE_PIXMAP_DEFAULT: bool = sys.platform == "win32"
 
 # ---- Layout ---------------------------------------------------------------
 LABEL_WIDTH              = 160  # Width of the frozen task-label column (px).
-RULER_HEIGHT             =  40  # Height of the time ruler row (px) — horizontal mode.
-RULER_WIDTH              = 120  # Width of the time ruler column (px) — vertical mode.
+RULER_HEIGHT             =  40  # Height of the time ruler row (px) - horizontal mode.
+RULER_WIDTH              = 120  # Width of the time ruler column (px) - vertical mode.
 ROW_HEIGHT               =  22  # Height of each task / core row (px).
 ROW_GAP                  =   4  # Vertical gap between rows (px).
 STI_ROW_H                =  18  # Height of a collapsed STI row (px)
-CPU_LOAD_ROW_H           =  60  # CPU load graph row height (px) — independent of timeline rows.
+CPU_LOAD_ROW_H           =  60  # CPU load graph row height (px) - independent of timeline rows.
 CPU_LOAD_ROW_GAP         =   2  # Gap between CPU load rows (px).
-CPU_LOAD_COLLAPSED_H     =  20  # Height of a collapsed CPU load row (px — enough to show label).
+CPU_LOAD_COLLAPSED_H     =  20  # Height of a collapsed CPU load row (px - enough to show label).
 STI_WAVEFORM_H           =  80  # Height of an expanded STI waveform row (px).
 STI_LINE_STYLE           = "linear"  # Default STI waveform draw style: "step" or "linear".
 
@@ -208,7 +208,7 @@ DEFAULT_DOCK_LAYOUT_VERSION = "7"
 # of a host-dependent serialized Qt dock_state blob.
 DEFAULT_DOCK_STATE_B64 = ""
 
-# Regex pattern: only tag_event and tag0_event…tag7_event channels can be expanded.
+# Regex pattern: only tag_event and tag0_event...tag7_event channels can be expanded.
 # Uses a capturing group so the digit (if any) can be extracted for sort ordering.
 _STI_EXPANDABLE_RE = re.compile(r'^tag([0-7])?_event$', re.IGNORECASE)
 
@@ -221,7 +221,7 @@ def _sti_channel_sort_key(channel: str) -> tuple:
 
     Order:
       1. tag_event          (treated as digit -1 so it precedes tag0)
-      2. tag0_event … tag7_event  (numeric digit order)
+      2. tag0_event ... tag7_event  (numeric digit order)
       3. all other channels (alphabetical)
     """
     m = _STI_EXPANDABLE_RE.match(channel)
@@ -252,7 +252,7 @@ _LOD_SUMMARY_BINS        = 4096
 _LOD_SUMMARY_BINS_ULTRA  = 1024
 
 # ---- Cursors --------------------------------------------------------------
-_MAX_CURSORS         = 8  # Hard upper bound – must equal len(_CURSOR_COLORS).
+_MAX_CURSORS         = 8  # Hard upper bound - must equal len(_CURSOR_COLORS).
 _DEFAULT_MAX_CURSORS = 4  # Default number of simultaneously visible cursors.
 _CURSOR_COLORS = [
     "#FF4444",  # 1 red
@@ -274,7 +274,7 @@ _PALETTE = [
     "#7B68EE", "#EE687B", "#68EE7B", "#EEB468",
 ]
 
-# Okabe-Ito 8-colour palette — distinguishable for deuteranopia / protanopia.
+# Okabe-Ito 8-colour palette - distinguishable for deuteranopia / protanopia.
 _PALETTE_COLORBLIND = [
     "#0072B2",  # blue
     "#E69F00",  # orange
@@ -297,7 +297,7 @@ class _RenderRuntimeState:
 _RENDER_RUNTIME = _RenderRuntimeState()
 
 # Colour map for core header dots.
-# Core dot / header colors – 16 hand-picked distinct hues that cycle for
+# Core dot / header colors - 16 hand-picked distinct hues that cycle for
 # more than 16 cores.  Index by numeric core ID extracted from "Core_N".
 _CORE_PALETTE = [
     "#FF9933",  # 0  orange
@@ -323,7 +323,7 @@ _CORE_PALETTE = [
 # ---------------------------------------------------------------------------
 
 def _svg_icon(path_data: str, color: str = "#9E9E9E", size: int = 16) -> "QIcon":
-    """Build a QIcon from an SVG path string (16×16 viewBox by default)."""
+    """Build a QIcon from an SVG path string (16x16 viewBox by default)."""
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" '
         f'viewBox="0 0 16 16"><path fill="{color}" fill-rule="evenodd" d="{path_data}"/></svg>'
@@ -333,7 +333,7 @@ def _svg_icon(path_data: str, color: str = "#9E9E9E", size: int = 16) -> "QIcon"
     pm.loadFromData(ba, "SVG")
     return QIcon(pm)
 
-# Icon path data (16×16 viewBox, single-path SVG outlines)
+# Icon path data (16x16 viewBox, single-path SVG outlines)
 _IC_OPEN   = ("M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.267a2.5 2.5 0 0 1-2.483-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14V3.5z"
               "M2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.374 3.334 5.82 3 5.264 3H2.5a.5.5 0 0 0-.5.5V6z"
               "m-.367 1a.5.5 0 0 0-.496.562l.64 5.124A1.5 1.5 0 0 0 3.267 14h9.466a1.5 1.5 0 0 0 1.49-1.314l.64-5.124A.5.5 0 0 0 14.367 7H1.633z")
@@ -387,7 +387,7 @@ _IC_SETTINGS = ("M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1
                 "c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34z"
                 "M8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z")
 
-# App icon — multi-colour 72×72 SVG rendered in the About dialog header.
+# App icon - multi-colour 72x72 SVG rendered in the About dialog header.
 _APP_VERSION = "1.2.1"
 _APP_ICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">'
@@ -446,7 +446,7 @@ class RawEvent:
     event_type: str   # 'T' for task events, 'STI' for trace items
     target:     str   # receiving entity: task name or STI channel
     tgt_inst:   int   # target instance id (column 5 in the BTF CSV)
-    event:      str   # event verb: 'resume', 'preempt', 'trigger', …
+    event:      str   # event verb: 'resume', 'preempt', 'trigger', ...
     note:       str   # optional annotation (e.g. 'task_create', mutex name)
 
 @dataclass
@@ -505,7 +505,7 @@ class ViewClipParams:
 @dataclass
 class BtfTrace:
     """Parsed result of a .btf file."""
-    time_scale: str                     # "ns", "us", "ms" …
+    time_scale: str                     # "ns", "us", "ms" ...
     tasks: List[str]                    # ordered task name list
     segments: List[TaskSegment]
     sti_events: List[StiEvent]
@@ -517,7 +517,7 @@ class BtfTrace:
     # Pre-built, start-time-sorted segment map keyed by _task_merge_key.
     # Avoids O(n_segments) iteration on every scene rebuild.
     seg_map_by_merge_key: Dict[str, List[TaskSegment]] = field(default_factory=dict)
-    # Pre-built core-view data – cached once at parse time so core-view
+    # Pre-built core-view data - cached once at parse time so core-view
     # rebuild() never iterates trace.segments again (O(1) access).
     core_names:      List[str]                                        = field(default_factory=list)
     core_segs:       Dict[str, List[TaskSegment]]                     = field(default_factory=dict)
@@ -529,7 +529,7 @@ class BtfTrace:
     task_repr: Dict[str, str]                                         = field(default_factory=dict)
 
     # ---- Fast viewport-clip support (1M-event performance) ----------------
-    # Pre-sorted start-time lists (ints) for each key – enable O(log n) bisect
+    # Pre-sorted start-time lists (ints) for each key - enable O(log n) bisect
     # clipping so builders only iterate segments visible in the current viewport.
     seg_start_by_merge_key:  Dict[str, List[int]]             = field(default_factory=dict)
     core_seg_starts:         Dict[str, List[int]]             = field(default_factory=dict)
@@ -554,9 +554,9 @@ class BtfTrace:
     core_task_seg_lod_starts:       Dict[str, Dict[str, List[int]]]         = field(default_factory=dict)
     core_task_seg_lod_ultra:        Dict[str, Dict[str, List[TaskSegment]]] = field(default_factory=dict)
     core_task_seg_lod_ultra_starts: Dict[str, Dict[str, List[int]]]         = field(default_factory=dict)
-    # Map from merge-key → timestamp of the task_create event (first occurrence).
+    # Map from merge-key -> timestamp of the task_create event (first occurrence).
     task_create_times: Dict[str, int]                                       = field(default_factory=dict)
-    # Sorted timestamps from STI TICK events – rendered as ruler marks.
+    # Sorted timestamps from STI TICK events - rendered as ruler marks.
     tick_sti_times: List[int]                                               = field(default_factory=list)
 
 # ---------------------------------------------------------------------------
@@ -640,7 +640,7 @@ def _task_merge_key(raw: str) -> str:
     _, task_id, name = _parse_task_name(raw)
     if task_id is not None:
         return f"\x00{task_id}\x00{name}"
-    return raw  # no [core/id] prefix → use as-is
+    return raw  # no [core/id] prefix -> use as-is
 
 # ---------------------------------------------------------------------------
 # Parser
@@ -660,7 +660,7 @@ def _parse_btf(filepath: str,
 
     *progress_callback*, if given, is called as
     ``progress_callback(pct, message)``
-    where *pct* is an integer 0–100 and *message* is a short status string.
+    where *pct* is an integer 0-100 and *message* is a short status string.
     """
 
     meta: Dict[str, str] = {}
@@ -669,12 +669,12 @@ def _parse_btf(filepath: str,
     # T-events grouped by timestamp for O(1) same-tick access
     t_events_by_time: Dict[int, List[Tuple]] = defaultdict(list)
     sti_events: List[StiEvent] = []
-    tick_sti_times: List[int] = []  # timestamps from STI TICK events → rendered on ruler
+    tick_sti_times: List[int] = []  # timestamps from STI TICK events -> rendered on ruler
     time_min = 0
     time_max = 0
     first_event = True
     _skipped_lines: int = 0  # lines with unparseable timestamps (reported in meta)
-    # raw_name → first task_create timestamp
+    # raw_name -> first task_create timestamp
     _task_create_raw: Dict[str, int] = {}
 
     # ------------------------------------------------------------------
@@ -762,13 +762,13 @@ def _parse_btf(filepath: str,
     # Phase 2 : state-machine segment reconstruction
     # Replay events in chronological order.  The state machine tracks one
     # open (start, core) interval per task in *open_seg*.
-    # _open_seg  → record the start of a new execution interval.
-    # _close_seg → seal the current open interval into a TaskSegment.
+    # _open_seg  -> record the start of a new execution interval.
+    # _close_seg -> seal the current open interval into a TaskSegment.
     #
     # At each timestamp we process events in two passes:
-    #   Pass A  – resume events: close the pre-empted task, open the
+    #   Pass A  - resume events: close the pre-empted task, open the
     #             newly resumed task on the correct core.
-    #   Pass B  – preempt events that have NO matching resume at the same
+    #   Pass B  - preempt events that have NO matching resume at the same
     #             tick: these are naked pre-emptions (e.g. task termination
     #             or OS reclaim) so we just close the segment.
     # ------------------------------------------------------------------
@@ -845,7 +845,7 @@ def _parse_btf(filepath: str,
     for task in list(open_seg.keys()):
         _close_seg(task, time_max)
 
-    # Free the raw event dict – no longer needed after segment reconstruction.
+    # Free the raw event dict - no longer needed after segment reconstruction.
     t_events_by_time.clear()
 
     if _skipped_lines:
@@ -855,7 +855,7 @@ def _parse_btf(filepath: str,
         progress_callback(55, "Building lookup tables…")
 
     # ------------------------------------------------------------------
-    # Phase 3 : post-processing – build sorted task list + lookup tables
+    # Phase 3 : post-processing - build sorted task list + lookup tables
     # All collections created here are stored in BtfTrace so that scene
     # rebuild() calls never have to iterate raw segments again.
     # ------------------------------------------------------------------
@@ -1062,7 +1062,7 @@ def _parse_btf(filepath: str,
         core_task_order=_core_task_order,
         core_task_segs=_core_task_segs,
         task_repr=_mk_repr,
-        # Phase 4 – 1M-event performance fields
+        # Phase 4 - 1M-event performance fields
         seg_start_by_merge_key=_seg_starts_mk,
         core_seg_starts=_core_seg_starts,
         core_task_seg_starts=dict(_core_task_starts),
@@ -1099,7 +1099,7 @@ def _parse_btf(filepath: str,
 # ---------------------------------------------------------------------------
 
 class _InfoPopup(QLabel):
-    """Frameless persistent info popup – shown on hover-enter, hidden on hover-leave."""
+    """Frameless persistent info popup - shown on hover-enter, hidden on hover-leave."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1229,7 +1229,7 @@ def _complementary_color_cached(hex_str: str) -> QColor:
     """Cached implementation keyed by hex string (e.g. '#4e9af1')."""
     c = QColor(hex_str)
     h, s, v, _ = c.getHsvF()
-    if h < 0:          # achromatic – fall back to a bright contrasting colour
+    if h < 0:          # achromatic - fall back to a bright contrasting colour
         return QColor(255, 215, 0)
     h = (h + 0.5) % 1.0
     return QColor.fromHsvF(h, min(1.0, max(s, 0.85)), min(1.0, max(v, 0.90)))
@@ -1322,7 +1322,7 @@ def _to_ns(value: float, time_scale: str) -> float:
 
 def _format_time(value: float, time_scale: str = "ns", decimals: int = 3) -> str:
     """Format a timestamp (in the trace's native *time_scale* unit) into a
-    human-readable string with automatic unit scaling (ns → µs → ms → s).
+    human-readable string with automatic unit scaling (ns -> us -> ms -> s).
 
     *decimals* controls the number of decimal places (default 3).
     Pass ``decimals=1`` for a compact 'xx.x' display.
@@ -1338,7 +1338,7 @@ def _format_timescale_per_px(timescale_per_px: float, time_scale: str = "ns") ->
     """Format *timescale_per_px* (value per pixel in the trace's native unit)
     to an auto-scaled human-readable string in 'xx.x unit/px' format.
 
-    Automatically selects the most readable unit from ns, µs, ms, s.
+    Automatically selects the most readable unit from ns, us, ms, s.
     """
     ns = _to_ns(timescale_per_px, time_scale)
     for threshold, divisor, label in _TIME_TIERS:
@@ -1371,8 +1371,8 @@ def _make_rotated_label(scene, text: str, font: "QFont", color: "QColor",
     *_VERTICAL_LABEL_USE_PIXMAP_DEFAULT* (default: True on Windows, False elsewhere):
 
     Pixmap strategy (Windows workaround)
-        Renders the text onto a QPixmap horizontally — where all platforms
-        apply full antialiasing — then rotates the finished image by -90°.
+        Renders the text onto a QPixmap horizontally - where all platforms
+        apply full antialiasing - then rotates the finished image by -90deg.
         This sidesteps the Windows/GDI limitation that prevents antialiasing
         of rotated text glyphs, producing smooth labels on all Windows
         rendering back-ends (GDI, Direct2D, OpenGL).
@@ -1381,11 +1381,11 @@ def _make_rotated_label(scene, text: str, font: "QFont", color: "QColor",
         Creates a QGraphicsTextItem (not SimpleTextItem, which renders as a
         filled silhouette) and sets QFont.PreferAntialias so Qt's own
         subpixel renderer is used instead of GDI.  Rotation is applied via
-        QGraphicsItem.setRotation(-90°).  Works correctly on macOS / Linux.
+        QGraphicsItem.setRotation(-90deg).  Works correctly on macOS / Linux.
 
     *x_center* is the horizontal centre of the column the label belongs to.
     The item is horizontally centred on that column.  The *y* parameter is the
-    **bottom edge** of the label in scene coordinates — the label text grows
+    **bottom edge** of the label in scene coordinates - the label text grows
     upward from that point in both rendering paths.
     """
     if _RENDER_RUNTIME.vertical_label_use_pixmap:
@@ -1414,14 +1414,14 @@ def _make_rotated_label(scene, text: str, font: "QFont", color: "QColor",
             p.drawText(QRectF(0, 0, dev_w, dev_h), Qt.AlignCenter, text)
         finally:
             p.end()
-        # Rotate -90° and use SmoothTransformation so the resampling step
+        # Rotate -90deg and use SmoothTransformation so the resampling step
         # does not introduce additional jaggedness.
         rotated = pm.transformed(QTransform().rotate(-90), Qt.SmoothTransformation)
         rotated.setDevicePixelRatio(dpr)
         item = QGraphicsPixmapItem(rotated)
         # The pixmap has no further rotation applied, so pos.y is the TOP of the
         # image (extends downward).  The TextItem path anchors pos.y at the BOTTOM
-        # of the text (it extends upward after the -90° rotation).  Shift the
+        # of the text (it extends upward after the -90deg rotation).  Shift the
         # pixmap up by its own height so both paths share the same y anchor: the
         # bottom edge of the label sits at y, and the text grows upward.
         item.setPos(x_center - rotated.width() / 2.0, y - rotated.height())
@@ -1467,7 +1467,7 @@ def _lod_reduce(segs: list, time_min: int, px_per_ns: float,
 
     At coarse zoom levels (timescale_per_px >> 1) thousands of segments are
     sub-pixel wide and stacked on top of each other.  Keeping only one
-    segment per pixel column reduces the rendered count by up to 30× at the
+    segment per pixel column reduces the rendered count by up to 30x at the
     default fit-to-width zoom with no visible quality loss.  Callers are
     responsible for passing segments pre-sorted by start time.
 
@@ -1486,7 +1486,7 @@ def _lod_reduce(segs: list, time_min: int, px_per_ns: float,
             result.append(seg)
             prev_bin = b
         elif seg.end > result[-1].end:
-            # Same pixel column but this segment extends further right –
+            # Same pixel column but this segment extends further right -
             # replace the previous entry so the more important one is visible.
             result[-1] = seg
     return result
@@ -1542,7 +1542,7 @@ def _visible_segs(lod: SegLodData, vp: ViewClipParams) -> list:
     return result
 
 def _nice_grid_step(timescale_per_px: float, target_px: float = 100.0) -> int:
-    """Return a 'nice' grid step (in ns) so that one step ≈ target_px pixels."""
+    """Return a 'nice' grid step (in ns) so that one step ~= target_px pixels."""
     ideal_ns = timescale_per_px * target_px
     best = _GRID_STEPS[0]
     for step in _GRID_STEPS:
@@ -1569,10 +1569,10 @@ class TimelineScene(QGraphicsScene):
     The scene is stateless between rebuilds: every zoom or orientation change
     calls rebuild() which calls one of four builder methods:
 
-        _build_horizontal       – task view, horizontal (time on X axis)
-        _build_vertical         – task view, vertical   (time on Y axis)
-        _build_horizontal_core  – core view, horizontal
-        _build_vertical_core    – core view, vertical
+        _build_horizontal       - task view, horizontal (time on X axis)
+        _build_vertical         - task view, vertical   (time on Y axis)
+        _build_horizontal_core  - core view, horizontal
+        _build_vertical_core    - core view, vertical
 
     Because there is no incremental update, the scene can handle 1M+ events
     without housekeeping overhead; the cost is paid only when zooming.
@@ -1590,7 +1590,7 @@ class TimelineScene(QGraphicsScene):
         # every addItem() / removeItem() / clear() call which dominates rebuild
         # time when the scene is torn down and re-created on each scroll/zoom.
         # Hit-testing is O(n_items) with NoIndex; that is fine because a
-        # culled rebuild only materialises ~30–70 items at a time.
+        # culled rebuild only materialises ~30-70 items at a time.
         self.setItemIndexMethod(QGraphicsScene.NoIndex)
         # -- Trace data --------------------------------------------------
         self._trace: Optional[BtfTrace] = None
@@ -1605,7 +1605,7 @@ class TimelineScene(QGraphicsScene):
         self._view_mode   = "task"       # "task" or "core"
         self._core_expanded: Dict[str, bool] = {}   # True = expanded (default)
         self._sti_expanded: set = set()             # channels with expanded waveform
-        self._sti_log_scale: bool = False           # log₂ scale for STI waveform
+        self._sti_log_scale: bool = False           # log2 scale for STI waveform
         self._sti_line_style: str = STI_LINE_STYLE  # waveform draw style: "step" or "linear"
         self._sti_row_h_val:      int = STI_ROW_H       # collapsed STI row height (px)
         self._sti_waveform_h_val: int = STI_WAVEFORM_H  # expanded STI waveform height (px)
@@ -1628,13 +1628,13 @@ class TimelineScene(QGraphicsScene):
         # it instead of deriving the range from the stale scroll position.
         self._ns_range_hint: Optional[tuple] = None
         # When a rebuild is triggered by an operation that will reposition the
-        # view (fit, load, orientation switch, …), the scroll position at the
+        # view (fit, load, orientation switch, ...), the scroll position at the
         # time _update_viewport_bounds() runs is stale.  Setting this flag
         # makes _update_viewport_bounds() skip orth culling for that one
         # rebuild, ensuring all rows/columns are built.
         self._skip_orth_culling: bool = False
         # Viewport orthogonal bounds (row Y for horizontal view, column X for
-        # vertical view).  Initialised to ±∞ so all rows are built on the
+        # vertical view).  Initialised to +/-inf so all rows are built on the
         # first rebuild before a live view is attached.
         self._vp_scene_orth_lo: float = -1e18
         self._vp_scene_orth_hi: float = +1e18
@@ -1672,7 +1672,7 @@ class TimelineScene(QGraphicsScene):
         self._locked_ns:    Optional[int] = None   # reference time of locked selection
         self._locked_segment_key: Optional[tuple] = None  # (mk, start, end, core)
         self._hovered_task: Optional[str] = None   # hover task (transient)
-        # task_key → [(QRectF, QColor)] – populated by builders, used for hover overlays
+        # task_key -> [(QRectF, QColor)] - populated by builders, used for hover overlays
         self._task_row_rects: Dict[str, list] = {}
         self._hover_overlay_items: list = []   # lightweight overlay items (no rebuild)
         # -- Mouse-hover indicator ---------------------------------------
@@ -1741,15 +1741,15 @@ class TimelineScene(QGraphicsScene):
         self._timescale_per_px_fit = self._timescale_per_px   # record fit-to-view limit
         # Scale the max-zoom-in limit to the trace's native time unit.
         # _TIMESCALE_PER_PX_DEFAULT is 2 ns/px; dividing by the ns-per-trace-unit
-        # multiplier yields the equivalent limit in trace units (e.g. 0.002 µs/px
-        # for a µs-scale trace), ensuring zoom-in works correctly regardless of
+        # multiplier yields the equivalent limit in trace units (e.g. 0.002 us/px
+        # for a us-scale trace), ensuring zoom-in works correctly regardless of
         # the time scale used by the BTF file.
         _ns_mult = _NS_MULTIPLIERS.get(trace.time_scale, 1)
         self._timescale_per_px_default = _TIMESCALE_PER_PX_DEFAULT / _ns_mult
         # Do NOT set _skip_orth_culling here: the viewport bounds are valid
         # (window is visible) and orth culling keeps the initial build to
         # O(visible_rows) instead of O(all_rows), preventing a UI freeze
-        # when loading large traces (e.g. 128 cores × 1000 tasks).
+        # when loading large traces (e.g. 128 cores x 1000 tasks).
         self.rebuild()
 
     def set_horizontal(self, horizontal: bool) -> None:
@@ -1799,7 +1799,7 @@ class TimelineScene(QGraphicsScene):
         self.rebuild()
 
     def set_sti_log_scale(self, enabled: bool) -> None:
-        """Switch the STI waveform y-axis between linear and log₂ scale."""
+        """Switch the STI waveform y-axis between linear and log2 scale."""
         self._sti_log_scale = bool(enabled)
         if self._sti_expanded:
             self.rebuild()
@@ -1835,7 +1835,7 @@ class TimelineScene(QGraphicsScene):
         self.rebuild()
 
     def set_max_cursors(self, n: int) -> None:
-        """Set the maximum number of simultaneous cursors (4–8)."""
+        """Set the maximum number of simultaneous cursors (4-8)."""
         self._max_cursors = max(4, min(n, _MAX_CURSORS))
         # Evict oldest cursors if the current count now exceeds the new limit.
         while len(self._cursor_times) > self._max_cursors:
@@ -1845,8 +1845,8 @@ class TimelineScene(QGraphicsScene):
     def set_marks(self, bookmarks: list, annotations: list) -> None:
         """Update the mark overlay from bookmark / annotation lists.
 
-        bookmarks   – list of TraceBookmark (ns, label)
-        annotations – list of TraceAnnotation (ns, note)
+        bookmarks   - list of TraceBookmark (ns, label)
+        annotations - list of TraceAnnotation (ns, note)
         """
         data = []
         for b in bookmarks:
@@ -1927,7 +1927,7 @@ class TimelineScene(QGraphicsScene):
 
                 short = (label[:24] + "…") if len(label) > 24 else label
                 lbl = self.addSimpleText(short, font)
-                lbl.setBrush(QBrush(color))
+                lbl.setBrush(QBrush(QColor("#000000")))
                 lbl.setZValue(29)
                 tw = fm.horizontalAdvance(short)
                 th = fm.height()
@@ -1937,7 +1937,7 @@ class TimelineScene(QGraphicsScene):
                 bg = self.addRect(
                     QRectF(0, 0, tw + 4, th + 2),
                     QPen(Qt.NoPen),
-                    QBrush(QColor(0, 0, 0, 160)),
+                    QBrush(color),
                 )
                 bg.setZValue(28)
                 bg.setPos(lbl_x - 2, lbl_y - 1)
@@ -1984,7 +1984,7 @@ class TimelineScene(QGraphicsScene):
 
                 short = (label[:24] + "…") if len(label) > 24 else label
                 lbl = self.addSimpleText(short, font)
-                lbl.setBrush(QBrush(color))
+                lbl.setBrush(QBrush(QColor("#000000")))
                 lbl.setZValue(29)
                 tw = fm.horizontalAdvance(short)
                 th = fm.height()
@@ -1994,7 +1994,7 @@ class TimelineScene(QGraphicsScene):
                 bg = self.addRect(
                     QRectF(0, 0, tw + 4, th + 2),
                     QPen(Qt.NoPen),
-                    QBrush(QColor(0, 0, 0, 160)),
+                    QBrush(color),
                 )
                 bg.setZValue(28)
                 bg.setPos(lbl_x - 2, lbl_y - 1)
@@ -2052,8 +2052,8 @@ class TimelineScene(QGraphicsScene):
     def set_timescale_per_px_default(self, v: float) -> None:
         """Change the maximum zoom-in limit (in trace-native time-units/px) and rebuild if needed."""
         # Accept any positive value; do not apply a unit-dependent hard range here
-        # because the value is already in trace-native units (ns, µs, or ms) and
-        # a limit of 0.5 makes no sense for µs/ms traces (0.5 µs/px = 500 ns/px).
+        # because the value is already in trace-native units (ns, us, or ms) and
+        # a limit of 0.5 makes no sense for us/ms traces (0.5 us/px = 500 ns/px).
         self._timescale_per_px_default = max(1e-9, v)
         if self._timescale_per_px < self._timescale_per_px_default:
             self._timescale_per_px = self._timescale_per_px_default
@@ -2078,12 +2078,12 @@ class TimelineScene(QGraphicsScene):
         new_val = self._timescale_per_px / factor
         # Clamp: don't zoom in past _timescale_per_px_default (2 ns/px in trace
         # units, scaled by set_trace) or zoom out past fit-to-view level.
-        # _timescale_per_px_default is always ≤ _timescale_per_px_fit after
+        # _timescale_per_px_default is always <= _timescale_per_px_fit after
         # set_trace() rescales it, so max(default, min(val, fit)) is correct.
         new_val = max(self._timescale_per_px_default,
                       min(new_val, self._timescale_per_px_fit))
         if new_val == self._timescale_per_px:
-            return  # already at limit – skip expensive rebuild
+            return  # already at limit - skip expensive rebuild
         self._timescale_per_px = new_val
         self.rebuild()
 
@@ -2378,7 +2378,7 @@ class TimelineScene(QGraphicsScene):
             self.highlight_changed.emit(task_name, True)
             self.rebuild()
         else:
-            # Hover: update overlay only – no rebuild
+            # Hover: update overlay only - no rebuild
             self._remove_hover_overlay()
             self._hovered_task = task_name
             self._apply_hover_overlay(task_name)
@@ -2535,7 +2535,7 @@ class TimelineScene(QGraphicsScene):
 
                 t_str = _format_time(ns, self._trace.time_scale, decimals=3)
                 lbl = self.addSimpleText(f"C{orig_idx+1}: {t_str}", font_big)
-                lbl.setBrush(QBrush(color))
+                lbl.setBrush(QBrush(QColor("#000000")))
                 lbl.setZValue(32)
                 tw = fm_bold.horizontalAdvance(lbl.text())
                 th = fm_bold.height()
@@ -2545,7 +2545,7 @@ class TimelineScene(QGraphicsScene):
                 bg = self.addRect(
                     QRectF(0, 0, tw + 4, th + 2),
                     QPen(Qt.NoPen),
-                    QBrush(QColor(0, 0, 0, 180)),
+                    QBrush(color),
                 )
                 bg.setZValue(31)
                 bg.setPos(lbl_x - 2, lbl_y - 1)
@@ -2564,13 +2564,13 @@ class TimelineScene(QGraphicsScene):
                     mid_x   = self._label_width + self._ns_to_px((ns + prev_ns) // 2)
                     d_lbl   = self.addSimpleText(d_str, font)
                     d_w     = QFontMetrics(font).horizontalAdvance(d_str)
-                    d_lbl.setBrush(QBrush(QColor("#FFFFFF")))
+                    d_lbl.setBrush(QBrush(QColor("#000000")))
                     d_lbl.setZValue(32)
                     bg_rect = self.addRect(
                         QRectF(mid_x - d_w / 2 - 3, RULER_HEIGHT + 4,
                                d_w + 6, QFontMetrics(font).height() + 4),
                         QPen(Qt.NoPen),
-                        QBrush(QColor(0, 0, 0, 160)),
+                        QBrush(color),
                     )
                     bg_rect.setZValue(31)
                     d_lbl.setPos(mid_x - d_w / 2, RULER_HEIGHT + 6)
@@ -2587,7 +2587,7 @@ class TimelineScene(QGraphicsScene):
 
                 t_str = _format_time(ns, self._trace.time_scale, decimals=3)
                 lbl = self.addSimpleText(f"C{orig_idx+1}: {t_str}", font_big)
-                lbl.setBrush(QBrush(color))
+                lbl.setBrush(QBrush(QColor("#000000")))
                 lbl.setZValue(32)
                 tw = fm_bold.horizontalAdvance(lbl.text())
                 th = fm_bold.height()
@@ -2599,7 +2599,7 @@ class TimelineScene(QGraphicsScene):
                 bg = self.addRect(
                     QRectF(0, 0, tw + 4, th + 2),
                     QPen(Qt.NoPen),
-                    QBrush(QColor(0, 0, 0, 180)),
+                    QBrush(color),
                 )
                 bg.setZValue(31)
                 bg.setPos(lbl_x - 2, lbl_y - 1)
@@ -2617,12 +2617,12 @@ class TimelineScene(QGraphicsScene):
                     mid_y   = label_row_h + self._ns_to_px((ns + prev_ns) // 2)
                     d_lbl   = self.addSimpleText(d_str, font)
                     dh      = QFontMetrics(font).height()
-                    d_lbl.setBrush(QBrush(QColor("#FFFFFF")))
+                    d_lbl.setBrush(QBrush(QColor("#000000")))
                     d_lbl.setZValue(32)
                     bg_rect = self.addRect(
                         QRectF(RULER_WIDTH + 4, mid_y - dh / 2 - 2,
                                QFontMetrics(font).horizontalAdvance(d_str) + 6, dh + 4),
-                        QPen(Qt.NoPen), QBrush(QColor(0, 0, 0, 160))
+                        QPen(Qt.NoPen), QBrush(color)
                     )
                     bg_rect.setZValue(31)
                     d_lbl.setPos(RULER_WIDTH + 7, mid_y - dh / 2)
@@ -2655,7 +2655,7 @@ class TimelineScene(QGraphicsScene):
 
         views = self.views()
         if not views:
-            # No attached view yet (e.g. during unit tests) – use full range.
+            # No attached view yet (e.g. during unit tests) - use full range.
             self._vp_ns_lo = t_min
             self._vp_ns_hi = t_max
             self._vp_scene_orth_lo = -1e18
@@ -2705,7 +2705,7 @@ class TimelineScene(QGraphicsScene):
 
         # Orthogonal axis bounds for row/column culling during rebuild.
         # Guard: if the viewport rect has no size yet (widget not shown),
-        # keep ±∞ so the first rebuild always builds all rows.
+        # keep +/-inf so the first rebuild always builds all rows.
         if self._skip_orth_culling or vp_rect.width() <= 1 or vp_rect.height() <= 1:
             self._skip_orth_culling = False
             self._vp_scene_orth_lo = -1e18
@@ -2954,7 +2954,7 @@ class TimelineScene(QGraphicsScene):
                         _task_brush(_seg.task), _tick_no_pen, _seg,
                     ))
                     _ht_xs.append((_x1 - 0.5, _x1 + 1.5, len(_ht_data) - 1))
-            # STI TICK timestamps – drawn as same-style marks, no tooltip.
+            # STI TICK timestamps - drawn as same-style marks, no tooltip.
             if _tick_sti:
                 _sti_tick_brush = QBrush(QColor("#E8C84A"))
                 _lo = max(0, bisect_left(_tick_sti, vp.ns_lo) - 1)
@@ -2978,7 +2978,7 @@ class TimelineScene(QGraphicsScene):
         _bg_odd      = QBrush(self._c_row_odd)
         _sep_pen     = QPen(self._c_sep, 0.5)
         _lbl_color   = self._c_label_txt
-        _stripe_rows: list = []   # accumulated by task + STI loops → one _RowStripesItem
+        _stripe_rows: list = []   # accumulated by task + STI loops -> one _RowStripesItem
 
         # --- Task rows ---------------------------------------------------
         # Compute first/last visible row indices from the cached orth bounds.
@@ -3233,7 +3233,7 @@ class TimelineScene(QGraphicsScene):
                         _task_brush(_seg.task), _tick_no_pen_v, _seg,
                     ))
                     _vt_xs.append((_y1 - 0.5, _y1 + 1.5, len(_vt_data) - 1))
-            # STI TICK timestamps – drawn as same-style marks, no tooltip.
+            # STI TICK timestamps - drawn as same-style marks, no tooltip.
             if _tick_sti_v:
                 _sti_tick_brush_v = QBrush(QColor("#E8C84A"))
                 _lo2 = max(0, bisect_left(_tick_sti_v, vp.ns_lo) - 1)
@@ -3389,7 +3389,7 @@ class TimelineScene(QGraphicsScene):
 
             _sti_x_acc += cw_sti
 
-        # --- Corner: ruler-column × label-row intersection ---------------
+        # --- Corner: ruler-column x label-row intersection ---------------
         _vt_corner_rect = self.addRect(QRectF(0, 0, RULER_WIDTH, label_row_h),
                                        QPen(Qt.NoPen), QBrush(self._c_corner_bg))
         _vt_corner_rect.setZValue(40)   # above ruler (35-37) and label row (10-37)
@@ -3408,7 +3408,7 @@ class TimelineScene(QGraphicsScene):
     # ------------------------------------------------------------------
 
     def _build_horizontal_core(self) -> None:
-        """Horizontal core view: expandable cores → per-task sub-rows."""
+        """Horizontal core view: expandable cores -> per-task sub-rows."""
         trace   = self._trace
         font    = _monospace_font(self._font_size)
         font_sm = _monospace_font(max(6, self._font_size - 1))
@@ -3423,7 +3423,7 @@ class TimelineScene(QGraphicsScene):
         if self._task_filter_q:
             sti_rows = [c for c in sti_rows if self._sti_channel_matches_filter(c)]
 
-        # TICK is rendered on the ruler band — exclude it from per-task sub-rows.
+        # TICK is rendered on the ruler band - exclude it from per-task sub-rows.
         core_tasks = {c: [t for t in tasks if _parse_task_name(t)[2] != "TICK"]
                       for c, tasks in core_tasks.items()}
 
@@ -3438,7 +3438,7 @@ class TimelineScene(QGraphicsScene):
             core_names = _filtered_core_names
             core_tasks = _filtered_core_tasks
 
-        # TICK is a global event — shown as a sticky first row above all cores.
+        # TICK is a global event - shown as a sticky first row above all cores.
         _tick_mk   = _task_merge_key("TICK")
         _tick_segs = trace.seg_map_by_merge_key.get(_tick_mk, [])
         _tick_sti_h = trace.tick_sti_times
@@ -3471,14 +3471,14 @@ class TimelineScene(QGraphicsScene):
         _lbg.setZValue(35)   # must be above cursor lines (z=30-32)
         self._frozen_items.append((_lbg, 0))
 
-        # Grid-only ruler (not frozen — grid lines stay at their scene positions).
+        # Grid-only ruler (not frozen - grid lines stay at their scene positions).
         _ruler_grid = _RulerItem(trace, self._timescale_per_px, total_w, total_h,
                                    font, trace.time_scale, self._show_grid,
                                    horiz=True, axis_offset=self._label_width,
                                    draw_header=False)
         _ruler_grid.setZValue(0.5)
         self.addItem(_ruler_grid)
-        # Header-only ruler (frozen by Y — always visible at viewport top).
+        # Header-only ruler (frozen by Y - always visible at viewport top).
         _ruler_hdr = _RulerItem(trace, self._timescale_per_px, total_w, total_h,
                                  font, trace.time_scale, show_grid=False,
                                  horiz=True, axis_offset=self._label_width,
@@ -3783,7 +3783,7 @@ class TimelineScene(QGraphicsScene):
         self._frozen_top_items.append((hdr_lbl, hdr_lbl.pos().y()))
 
     def _build_vertical_core(self) -> None:
-        """Vertical core view: expandable core columns → per-task sub-columns."""
+        """Vertical core view: expandable core columns -> per-task sub-columns."""
         trace   = self._trace
         font    = _monospace_font(self._font_size)
         font_sm = _monospace_font(max(6, self._font_size - 1))
@@ -3796,7 +3796,7 @@ class TimelineScene(QGraphicsScene):
         if self._task_filter_q:
             sti_cols = [c for c in sti_cols if self._sti_channel_matches_filter(c)]
 
-        # TICK is rendered on the ruler band — exclude it from per-task sub-columns.
+        # TICK is rendered on the ruler band - exclude it from per-task sub-columns.
         core_tasks = {c: [t for t in tasks if _parse_task_name(t)[2] != "TICK"]
                       for c, tasks in core_tasks.items()}
 
@@ -3811,7 +3811,7 @@ class TimelineScene(QGraphicsScene):
             core_names = _filtered_core_names
             core_tasks = _filtered_core_tasks
 
-        # TICK is a global event — shown as a band in the ruler column.
+        # TICK is a global event - shown as a band in the ruler column.
         _tick_mk   = _task_merge_key("TICK")
         _tick_segs = trace.seg_map_by_merge_key.get(_tick_mk, [])
         _tick_sti_v2 = trace.tick_sti_times
@@ -3927,7 +3927,7 @@ class TimelineScene(QGraphicsScene):
                 self.addRect(QRectF(x_left, label_row_h, col_w, timeline_h),
                              QPen(Qt.NoPen), QBrush(self._c_core_sum_bg)).setZValue(0)
 
-                # Clickable core column header (▼/▶ expand toggle)
+                # Clickable core column header (v/> expand toggle)
                 hdr_item = _CoreHeaderItem(
                     QRectF(x_left, 0, col_w, label_row_h), core, self)
                 hdr_item.setBrush(QBrush(self._c_core_hdr_bg))
@@ -4069,7 +4069,7 @@ class TimelineScene(QGraphicsScene):
             self._frozen_top_items.append((lbl_bg_vc, 0))
 
             # Rotated label with optional expand indicator
-            _ind_txt_vc  = ("▼ " if is_exp else "▶ ") if expandable else ""
+            _ind_txt_vc  = ("v " if is_exp else "> ") if expandable else ""
             _lbl_avail_vc = max(0, label_row_h - 14)
             _lbl_txt_vc  = QFontMetrics(font).elidedText(
                 _ind_txt_vc + channel, Qt.ElideRight, _lbl_avail_vc)
@@ -4109,7 +4109,7 @@ class TimelineScene(QGraphicsScene):
             col_idx += 1
             _sti_x_acc_vc += cw_sti_vc
 
-        # --- Corner: ruler-column × label-row intersection ---------------
+        # --- Corner: ruler-column x label-row intersection ---------------
         _vc_corner = self.addRect(QRectF(0, 0, RULER_WIDTH, label_row_h),
                                   QPen(Qt.NoPen), QBrush(self._c_corner_bg))
         _vc_corner.setZValue(40)
@@ -4131,8 +4131,8 @@ class _RulerItem(QGraphicsItem):
 
     Parameters
     ----------
-    horiz : True  → time on X axis (horizontal layout)
-             False → time on Y axis (vertical layout)
+    horiz : True  -> time on X axis (horizontal layout)
+             False -> time on Y axis (vertical layout)
     axis_offset : pixels from scene origin to the time=0 coordinate
                   (LABEL_WIDTH for horizontal, label_row_h for vertical)
     """
@@ -4233,12 +4233,12 @@ class _RulerItem(QGraphicsItem):
 class _RowStripesItem(QGraphicsItem):
     """Draws N row background rectangles and optional separator lines in one pass.
 
-    Replaces 2×N individual QGraphicsRectItem/QGraphicsLineItem scene items with
+    Replaces 2xN individual QGraphicsRectItem/QGraphicsLineItem scene items with
     a single item, eliminating PyQt bridge-call overhead that accumulates during
     rebuild when many rows are visible simultaneously.
 
     rows: sequence of (y_top, row_h, gap, brush, sep_pen_or_None)
-        sep_pen_or_None — QPen for a horizontal line at y = y_top+row_h+gap-1,
+        sep_pen_or_None - QPen for a horizontal line at y = y_top+row_h+gap-1,
                           or None to omit the separator for that row.
     """
 
@@ -4308,16 +4308,16 @@ class _BatchRowItem(QGraphicsItem):
     Paint cost is bounded to O(visible_segments) at all zoom levels by
     combining pre-merged coarse data with binary-search viewport clipping:
 
-    Tier 1 – micro  (lod < _PAINT_LOD_MICRO = 0.12)
+    Tier 1 - micro  (lod < _PAINT_LOD_MICRO = 0.12)
         Single tinted rectangle per row.  Used at far-out zoom where all
         segments are sub-pixel.  O(1) draw calls.
 
-    Tier 2 – coarse (lod < _PAINT_LOD_COARSE = 0.45)
+    Tier 2 - coarse (lod < _PAINT_LOD_COARSE = 0.45)
         Uses _coarse_data (segments merged within 6 px) via binary search
         on _coarse_xs to skip off-screen entries.  No pen outlines drawn.
         O(visible_merged) draw calls.
 
-    Tier 3 – full detail
+    Tier 3 - full detail
         Full segment rectangles with pen outlines and optional inline text
         labels.  Binary search on _xs limits paint to visible viewport
         slice.  O(visible) draw calls.
@@ -4374,9 +4374,9 @@ class _BatchRowItem(QGraphicsItem):
         # The enlarged rect is (ROW_HEIGHT+ROW_GAP)*1.10 in the relevant axis,
         # centred on the inner segment rect's midpoint.  Geometry per orientation:
         #   Horiz: inner rect height = ROW_HEIGHT-2, centre at row.y + ROW_HEIGHT/2
-        #          → protrusion above row.y  = _new_dim/2 - ROW_HEIGHT/2  = 3.3 px
+        #          -> protrusion above row.y  = _new_dim/2 - ROW_HEIGHT/2  = 3.3 px
         #   Vert:  inner rect width = col_w-2, centre at col.x + col_w/2
-        #          where col_w = ROW_HEIGHT+ROW_GAP  → protrusion = 1.3 px
+        #          where col_w = ROW_HEIGHT+ROW_GAP  -> protrusion = 1.3 px
         # Add 2 px for the 2.5-px pen half-width + rounding safety.
         _has_hl = any(p.widthF() > 2.0 for _, _, p, _ in seg_data) if seg_data else False
         if _has_hl:
@@ -4470,7 +4470,7 @@ class _BatchRowItem(QGraphicsItem):
 
         if lod < _PAINT_LOD_COARSE:
             # ---- Tier 2: coarse LOD ----------------------------------------------
-            # Use pre-merged coarse_data.  rebuild() already clips to ±1.5×
+            # Use pre-merged coarse_data.  rebuild() already clips to +/-1.5x
             # the viewport so painting all coarse entries is safe.
             painter.setPen(Qt.NoPen)
             _rebase = (abs(option.exposedRect.left()) > 2_000_000.0) if self._horiz else (abs(option.exposedRect.top()) > 2_000_000.0)
@@ -4492,7 +4492,7 @@ class _BatchRowItem(QGraphicsItem):
             return
 
         # ---- Tier 3: full detail ------------------------------------------------
-        # rebuild() already pre-clips segments to ±1.5× the viewport, so
+        # rebuild() already pre-clips segments to +/-1.5x the viewport, so
         # painting all of _seg_data is safe and correct.
         seg_slice = self._seg_data
         _rebase = (abs(option.exposedRect.left()) > 2_000_000.0) if self._horiz else (abs(option.exposedRect.top()) > 2_000_000.0)
@@ -4533,7 +4533,7 @@ class _BatchRowItem(QGraphicsItem):
             painter.drawRect(draw_rect)
         if _rebase:
             painter.restore()
-        # Inline text labels – second pass to minimise font/pen switches.
+        # Inline text labels - second pass to minimise font/pen switches.
         if self._label_font and self._label_text and self._label_fm:
             painter.setPen(QPen(QColor("#FFFFFF")))
             painter.setFont(self._label_font)
@@ -4822,7 +4822,7 @@ class _TaskLabelItem(QGraphicsRectItem):
 
     def mousePressEvent(self, event):
         if self._tl_scene._locked_task == self._task_name:
-            self._tl_scene.set_highlighted_task(None)   # second click → cancel lock
+            self._tl_scene.set_highlighted_task(None)   # second click -> cancel lock
         else:
             self._tl_scene.set_highlighted_task(
                 self._task_name, locked=True, core_name=self._core_name)
@@ -4854,7 +4854,7 @@ class _TaskLabelItem(QGraphicsRectItem):
             QTimer.singleShot(0, scene.clear_hover)
 
 class _CoreHeaderItem(QGraphicsRectItem):
-    """Clickable label area for a core row — toggles expand/collapse."""
+    """Clickable label area for a core row - toggles expand/collapse."""
 
     _NORMAL_BRUSH = QBrush(QColor("#2B2B45"))
     _HOVER_BRUSH  = QBrush(QColor(100, 100, 220, 55))
@@ -4882,7 +4882,7 @@ class _CoreHeaderItem(QGraphicsRectItem):
         super().hoverLeaveEvent(event)
 
 class _StiLabelItem(QGraphicsRectItem):
-    """Clickable label area for an STI channel row — toggles waveform expand/collapse.
+    """Clickable label area for an STI channel row - toggles waveform expand/collapse.
 
     Only tag_event / tag[0-7]_event channels are *expandable*; for other channels
     the item still provides a consistent hit area but does nothing on click.
@@ -4924,7 +4924,7 @@ class _BatchStiWaveformItem(QGraphicsItem):
     Numeric values are taken from ``StiEvent.note`` (falling back to
     ``StiEvent.event``).  Non-numeric notes are assigned a stable integer
     category index so that categorical channels still produce a readable chart.
-    When *log_scale* is True the y-axis uses log₂(1 + |value|) with the
+    When *log_scale* is True the y-axis uses log2(1 + |value|) with the
     original sign preserved.
     """
 
@@ -4940,7 +4940,7 @@ class _BatchStiWaveformItem(QGraphicsItem):
         self._x_offset      = x_offset
         self._log_scale     = log_scale
         self._line_style    = line_style  # "step" (hold) or "linear" (point-to-point)
-        self._category_map: dict = {}     # note → stable int (for categorical channels)
+        self._category_map: dict = {}     # note -> stable int (for categorical channels)
         self.setCacheMode(QGraphicsItem.NoCache)
         self.setAcceptHoverEvents(True)
 
@@ -5074,8 +5074,8 @@ class _BatchStiWaveformColumnItem(QGraphicsItem):
     """Renders an expanded STI step-chart waveform inside a vertical COLUMN.
 
     Unlike _BatchStiWaveformItem (time on X, values on Y), this variant uses:
-      - Y axis  → time
-      - X axis  → numeric value
+      - Y axis  -> time
+      - X axis  -> numeric value
 
     Parameters
     ----------
@@ -5085,7 +5085,7 @@ class _BatchStiWaveformColumnItem(QGraphicsItem):
     time_min      : int      Trace time_min (scene Y = y_offset + (t - time_min) * px_per_ns)
     px_per_ns     : float    Scene pixels per nanosecond (vertical axis)
     y_offset      : float    Scene Y coordinate of time=time_min
-    log_scale     : bool     Use log₂(1+|v|) mapping
+    log_scale     : bool     Use log2(1+|v|) mapping
     line_style    : str      "step" (hold) or "linear"
     """
 
@@ -5208,7 +5208,7 @@ class _BatchStiWaveformColumnItem(QGraphicsItem):
 # ===========================================================================
 
 class _NavigatorPopup(QWidget):
-    """260×130 thumbnail that shows the full trace with a viewport indicator.
+    """260x130 thumbnail that shows the full trace with a viewport indicator.
 
     Painted entirely in Python and overlaid on the TimelineView viewport at
     the bottom-right corner.  The widget is mouse-transparent so it does not
@@ -5291,8 +5291,8 @@ class TimelineView(QGraphicsView):
 
     zoom_changed         = pyqtSignal(float)
     cursors_changed      = pyqtSignal(list)
-    mark_moved           = pyqtSignal(str, int, int)  # kind, id, new_ns — final drop
-    mark_dragging        = pyqtSignal(str, int, int)  # kind, id, new_ns — live during drag
+    mark_moved           = pyqtSignal(str, int, int)  # kind, id, new_ns - final drop
+    mark_dragging        = pyqtSignal(str, int, int)  # kind, id, new_ns - live during drag
     bookmark_requested          = pyqtSignal(int)   # ns at right-click position
     annotation_requested        = pyqtSignal(int)   # ns at right-click position
     clear_bookmarks_requested   = pyqtSignal()      # clear all bookmarks
@@ -5326,11 +5326,11 @@ class TimelineView(QGraphicsView):
         # distinguish left / middle / right action paths in mouseReleaseEvent.
         self._press_pos: Optional[QPoint] = None
         self._press_btn: Qt.MouseButton = Qt.NoButton
-        self._drag_threshold    = 6    # px – min movement to enter pan mode
+        self._drag_threshold    = 6    # px - min movement to enter pan mode
         self._dragging_cursor_idx = -1  # index of cursor being dragged, or -1
-        self._cursor_drag_threshold = 8 # px – click-zone around a cursor line
+        self._cursor_drag_threshold = 8 # px - click-zone around a cursor line
         self._dragging_mark_idx = -1    # index into _mark_data being dragged, or -1
-        self._mark_drag_threshold = 6   # px – click-zone around a mark line
+        self._mark_drag_threshold = 6   # px - click-zone around a mark line
 
         # Label-column resize drag state
         self._LABEL_RESIZE_ZONE   = 6   # px hit zone around the right border
@@ -5367,7 +5367,7 @@ class TimelineView(QGraphicsView):
         # fire one rebuild on a short (60 ms) timer. This prevents janky
         # intermediate renders during fast scrolling.
         self._pinch_accum = 1.0
-        # macOS native pinch zoom — intercept events on the viewport widget
+        # macOS native pinch zoom - intercept events on the viewport widget
         self.viewport().installEventFilter(self)
         # Reposition frozen label-column items whenever the scene is rebuilt
         self._scene.scene_rebuilt.connect(self._reposition_frozen)
@@ -5379,7 +5379,7 @@ class TimelineView(QGraphicsView):
         self._zoom_anchor_pos: Optional[QPoint] = None
         self._zoom_timer = QTimer(self)
         self._zoom_timer.setSingleShot(True)
-        self._zoom_timer.setInterval(60)   # ms – coalesce wheel events
+        self._zoom_timer.setInterval(60)   # ms - coalesce wheel events
         self._zoom_timer.timeout.connect(self._flush_zoom)
 
         # Two-timer scroll-rebuild strategy:
@@ -5393,11 +5393,11 @@ class TimelineView(QGraphicsView):
         # blank rows once the orth-buffer is exhausted.
         self._pan_timer = QTimer(self)
         self._pan_timer.setSingleShot(True)
-        self._pan_timer.setInterval(120)   # ms – settle after scroll stops
+        self._pan_timer.setInterval(120)   # ms - settle after scroll stops
         self._pan_timer.timeout.connect(self._on_pan_timeout)
         self._pan_heartbeat = QTimer(self)
         self._pan_heartbeat.setSingleShot(False)
-        self._pan_heartbeat.setInterval(50) # ms – in-flight rebuild (≈20 fps)
+        self._pan_heartbeat.setInterval(50) # ms - in-flight rebuild (~=20 fps)
         self._pan_heartbeat.timeout.connect(self._on_pan_heartbeat)
 
         # -- Fit / resize mode -------------------------------------------
@@ -5405,7 +5405,7 @@ class TimelineView(QGraphicsView):
         self._fit_mode: bool = False
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
-        self._resize_timer.setInterval(80)   # ms – debounce rapid resize events
+        self._resize_timer.setInterval(80)   # ms - debounce rapid resize events
         self._resize_timer.timeout.connect(self._on_resize_timeout)
 
         # Cache of the last scene-left used for frozen label positioning.
@@ -5419,12 +5419,12 @@ class TimelineView(QGraphicsView):
         self._view_pos_by_orientation: Dict[bool, Tuple[int, float]] = {}
 
         # -- Navigator popup overlay ------------------------------------
-        # A 260×130 thumbnail that appears at the top-left of the canvas
+        # A 260x130 thumbnail that appears at the top-left of the canvas
         # whenever the viewport is scrolled / zoomed while content overflows.
         self._nav_popup = _NavigatorPopup(self.viewport())
         self._nav_hide_timer = QTimer(self)
         self._nav_hide_timer.setSingleShot(True)
-        self._nav_hide_timer.setInterval(1800)  # ms – fade-out after idle
+        self._nav_hide_timer.setInterval(1800)  # ms - fade-out after idle
         self._nav_hide_timer.timeout.connect(self._nav_popup.fade_out)
         # Background pixmap cache for the nav popup.  Rebuilt only when the
         # trace, view-mode, STI visibility or expansion state changes.
@@ -5605,10 +5605,10 @@ class TimelineView(QGraphicsView):
         trace = self._scene._trace
         # When transitioning from fit mode the viewport centre is the middle of
         # the entire trace.  At 1:1 zoom the viewport window is very narrow
-        # (viewport_width × timescale_per_px ≈ 1280 ns for a typical 640 px window),
+        # (viewport_width x timescale_per_px ~= 1280 ns for a typical 640 px window),
         # so centering on the trace midpoint almost never lands on a segment.
         # Instead, scroll to time_min so the first segments are immediately
-        # visible — which is the same position the viewer starts at on launch.
+        # visible - which is the same position the viewer starts at on launch.
         vp_center = self.viewport().rect().center()
         scene_pt  = self.mapToScene(vp_center)
         if was_fit_mode:
@@ -5622,11 +5622,11 @@ class TimelineView(QGraphicsView):
         # Supply an explicit ns range hint centred on center_ns so that
         # _update_viewport_bounds() loads the correct segment region.
         #
-        # Using the viewport pixel size alone (±640 px * 2 ns/px = ±1280 ns)
+        # Using the viewport pixel size alone (+/-640 px * 2 ns/px = +/-1280 ns)
         # is too narrow: tasks with long periods may have NO segment in that
-        # window.  Instead use ±(1% of trace span) or ±10 viewports, whichever
+        # window.  Instead use +/-(1% of trace span) or +/-10 viewports, whichever
         # is larger.  The 150 % margin inside _update_viewport_bounds adds
-        # another 3× on top so the first scroll after 1:1 is also covered.
+        # another 3x on top so the first scroll after 1:1 is also covered.
         _span = max(trace.time_max - trace.time_min, 1)
         _vp_half = int(self._fit_viewport_size() * 10 * self._scene._timescale_per_px_default)
         _half = max(_vp_half, _span // 100)
@@ -5677,7 +5677,7 @@ class TimelineView(QGraphicsView):
         buf_dev.close()
         png_bytes = bytes(buf)
 
-        # On Linux prefer xclip / xsel / wl-copy — Qt clipboard is unreliable for images on X11/Wayland
+        # On Linux prefer xclip / xsel / wl-copy - Qt clipboard is unreliable for images on X11/Wayland
         for tool, args in [
             ('xclip',   ['xclip',   '-selection', 'clipboard', '-t', 'image/png']),
             ('xsel',    ['xsel',    '--clipboard', '--input']),
@@ -5688,7 +5688,7 @@ class TimelineView(QGraphicsView):
                 proc.communicate(png_bytes)
                 if proc.returncode == 0:
                     return tool
-                # tool failed — try the next one
+                # tool failed - try the next one
 
         # Fallback: Qt clipboard (works on Windows/macOS, variable on Linux)
         # Set both a pixmap (X11 PIXMAP atom, understood by xclipboard) and
@@ -5706,11 +5706,11 @@ class TimelineView(QGraphicsView):
     # Mouse interaction
     # ------------------------------------------------------------------
     # mousePressEvent priority (in order of evaluation):
-    #   1. MiddleButton  → start time-range selection band
-    #   2. LeftButton near label-column border → start resize drag
-    #   3. LeftButton near a cursor line → start cursor drag
-    #   4. LeftButton inside label column → let _TaskLabelItem handle it
-    #   5. Anything else → default ScrollHandDrag (pan)
+    #   1. MiddleButton  -> start time-range selection band
+    #   2. LeftButton near label-column border -> start resize drag
+    #   3. LeftButton near a cursor line -> start cursor drag
+    #   4. LeftButton inside label column -> let _TaskLabelItem handle it
+    #   5. Anything else -> default ScrollHandDrag (pan)
     # ------------------------------------------------------------------
 
     def _ensure_seg_nav_cache(self) -> None:
@@ -5919,15 +5919,15 @@ class TimelineView(QGraphicsView):
     def keyPressEvent(self, event) -> None:
         """Arrow-key navigation.
 
-        Horizontal mode — time axis is horizontal:
-          Left / Right         — scroll along time axis by 20 % of viewport width
-          Shift + Left / Right — jump to previous / next segment boundary
-          Up / Down            — scroll along row axis by 20 % of viewport height
+        Horizontal mode - time axis is horizontal:
+          Left / Right         - scroll along time axis by 20 % of viewport width
+          Shift + Left / Right - jump to previous / next segment boundary
+          Up / Down            - scroll along row axis by 20 % of viewport height
 
-        Vertical mode — time axis is vertical:
-          Up / Down            — scroll along time axis by 20 % of viewport height
-          Shift + Up / Down    — jump to previous / next segment boundary
-          Left / Right         — scroll along row axis by 20 % of viewport width
+        Vertical mode - time axis is vertical:
+          Up / Down            - scroll along time axis by 20 % of viewport height
+          Shift + Up / Down    - jump to previous / next segment boundary
+          Left / Right         - scroll along row axis by 20 % of viewport width
 
         All other keys pass through to the default handler.
         """
@@ -6104,7 +6104,7 @@ class TimelineView(QGraphicsView):
             self.cursors_changed.emit(self._scene.cursor_times())
             self._dbl_click_undo_ns = None
 
-        # Double-click on label-column resize border → auto-fit column width
+        # Double-click on label-column resize border -> auto-fit column width
         lw = self._scene._label_width
         if event.button() == Qt.LeftButton and self._scene._trace is not None:
             if self._scene._horizontal:
@@ -6405,7 +6405,7 @@ class TimelineView(QGraphicsView):
                     self._dragging_mark_idx = _i
                     break
             else:
-                # Mark was removed externally during drag — abort
+                # Mark was removed externally during drag - abort
                 self._dragging_mark_idx = -1
                 self.setDragMode(QGraphicsView.ScrollHandDrag)
                 self.viewport().unsetCursor()
@@ -6451,11 +6451,11 @@ class TimelineView(QGraphicsView):
 
     def mouseReleaseEvent(self, event) -> None:
         # Dispatch in order (first match returns early):
-        #   1. Middle-button release  → zoom to dragged range
+        #   1. Middle-button release  -> zoom to dragged range
         #   2. Label-column resize end
         #   3. Cursor drag end
-        #   4. Left-click (delta ≤ threshold) inside timeline  → place cursor
-        #   5. Right-click inside timeline → remove cursor / clear all
+        #   4. Left-click (delta <= threshold) inside timeline  -> place cursor
+        #   5. Right-click inside timeline -> remove cursor / clear all
 
         # Middle-button release: zoom to selected range
         if event.button() == Qt.MiddleButton and self._mid_press_ns is not None:
@@ -6521,13 +6521,13 @@ class TimelineView(QGraphicsView):
             return
         delta = (event.pos() - self._press_pos).manhattanLength()
         if delta <= self._drag_threshold:
-            # Use viewport coordinates — label column is always the leftmost
+            # Use viewport coordinates - label column is always the leftmost
             # _label_width pixels on screen regardless of horizontal scroll.
             lw = self._scene._label_width
             in_vp_label  = (event.pos().x()       < lw if self._scene._horizontal
                             else event.pos().y()       < lw)
             # Also block when the press originated inside the label column:
-            # a tiny drag (≤ drag_threshold) from the label into the timeline
+            # a tiny drag (<= drag_threshold) from the label into the timeline
             # must not place a cursor.
             press_in_label = (self._press_pos.x() < lw if self._scene._horizontal
                               else self._press_pos.y() < lw)
@@ -6540,15 +6540,15 @@ class TimelineView(QGraphicsView):
             if event.button() == Qt.LeftButton:
                 hit_seg = self._hit_segment_at(scene_pt)
                 if hit_seg is not None:
-                    # Single click on a task segment → highlight; second click on
-                    # same segment → un-highlight (toggle).
+                    # Single click on a task segment -> highlight; second click on
+                    # same segment -> un-highlight (toggle).
                     if self._scene._locked_segment_key == self._scene._segment_lock_key(hit_seg):
                         self._scene.set_highlighted_segment(None)
                     else:
                         self._scene.set_highlighted_segment(hit_seg)
                     self._dbl_click_undo_ns = None
                 else:
-                    # Click on ruler or empty area → place cursor.
+                    # Click on ruler or empty area -> place cursor.
                     if event.modifiers() & Qt.ShiftModifier:
                         ns = self._snap_to_boundary(ns)
                     # Place cursor immediately; mouseDoubleClickEvent will roll it
@@ -6580,7 +6580,7 @@ class TimelineView(QGraphicsView):
         coord = scene_pt.x() if self._scene._horizontal else scene_pt.y()
         ns = self._scene.scene_to_ns(coord)
 
-        # Shared icon color — timeline always uses a dark background
+        # Shared icon color - timeline always uses a dark background
         _icon_color = "#D4D4D4"
 
         # --- Segment-specific actions (shown when right-clicking on a segment) ---
@@ -6613,7 +6613,7 @@ class TimelineView(QGraphicsView):
                      self.cursors_changed.emit(self._scene.cursor_times()))
         )
         if self._scene.cursor_times():
-            # Remove nearest cursor — use an eraser/minus-cursor icon
+            # Remove nearest cursor - use an eraser/minus-cursor icon
             menu.addAction(
                 _svg_icon("M2 2.5A.5.5 0 0 1 2.5 2h4a.5.5 0 0 1 0 1H3v9h9v-3.5a.5.5 0 0 1 1 0V12.5a.5.5 0 0 1-.5.5h-10a.5.5 0 0 1-.5-.5v-10zM14.854 2.854a.5.5 0 0 0-.708-.708L8 8.293 5.854 6.146a.5.5 0 1 0-.708.708l2.5 2.5a.5.5 0 0 0 .708 0l6.5-6.5z", _icon_color),
                 "Remove nearest cursor",
@@ -6628,13 +6628,13 @@ class TimelineView(QGraphicsView):
             )
         if self._scene._trace is not None:
             menu.addSeparator()
-            # Bookmark icon — flag/ribbon shape
+            # Bookmark icon - flag/ribbon shape
             menu.addAction(
                 _svg_icon("M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v13.5a.5.5 0 0 1-.74.439L8 13.069l-5.26 2.87A.5.5 0 0 1 2 15.5V2zm2-1a1 1 0 0 0-1 1v12.566l4.74-2.586a.5.5 0 0 1 .48 0L13 14.566V2a1 1 0 0 0-1-1H4z", _icon_color),
                 f"Add Bookmark here  ({_format_time(ns, self._scene._trace.time_scale, decimals=3)})",
                 lambda: self.bookmark_requested.emit(ns)
             )
-            # Annotation icon — pencil/note shape
+            # Annotation icon - pencil/note shape
             menu.addAction(
                 _svg_icon("M12.854 0.146a.5.5 0 0 0-.707 0L10.5 1.793 14.207 5.5l1.647-1.646a.5.5 0 0 0 0-.708l-3-3zm.646 6.061L9.793 2.5 3.293 9H3.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.5h.5a.5.5 0 0 1 .5.5v.207l6.5-6.5zm-7.468 7.468A.5.5 0 0 1 6 13.5V13h-.5a.5.5 0 0 1-.5-.5V12h-.5a.5.5 0 0 1-.5-.5V11h-.5a.5.5 0 0 1-.5-.5V10h-.5a.499.499 0 0 1-.175-.032l-.179.178a.5.5 0 0 0-.11.168l-2 5a.5.5 0 0 0 .65.65l5-2a.5.5 0 0 0 .168-.11l.178-.178z", _icon_color),
                 f"Add Annotation here  ({_format_time(ns, self._scene._trace.time_scale, decimals=3)})",
@@ -6681,7 +6681,7 @@ class TimelineView(QGraphicsView):
             dx  = event.angleDelta().x()
             hsb = self.horizontalScrollBar()
             vsb = self.verticalScrollBar()
-            # Shift+scroll → pan horizontally; plain scroll → natural direction
+            # Shift+scroll -> pan horizontally; plain scroll -> natural direction
             if event.modifiers() & Qt.ShiftModifier:
                 if dy != 0:
                     hsb.setValue(hsb.value() - dy)
@@ -6704,7 +6704,7 @@ class TimelineView(QGraphicsView):
         """Intercept native pinch-zoom gestures delivered to the viewport."""
         if obj is self.viewport():
             if e.type() == QEvent.Leave:
-                # Mouse left the viewport — ensure any hover highlight is cleared
+                # Mouse left the viewport - ensure any hover highlight is cleared
                 self._scene.clear_hover()
                 return False
             if e.type() == QEvent.NativeGesture:
@@ -6759,7 +6759,7 @@ class TimelineView(QGraphicsView):
                 self._scene._ns_range_hint = (hint_lo, hint_hi)
         self._scene.zoom(factor)
         if self._scene.timescale_per_px == prev_timescale_per_px:
-            return  # already at zoom limit – nothing changed, skip scroll/emit
+            return  # already at zoom limit - nothing changed, skip scroll/emit
         self.zoom_changed.emit(self._scene.timescale_per_px)
 
         # After rebuild, keep the time-axis anchor fixed without drifting on
@@ -6783,7 +6783,7 @@ class TimelineView(QGraphicsView):
     def _build_nav_bg(self, W: int, H: int, sc, tr, v_total: float) -> 'QPixmap':
         """Render the static background of the nav popup (rows + STI + border).
 
-        Does NOT include the orange viewport indicator – that is painted on a
+        Does NOT include the orange viewport indicator - that is painted on a
         copy of this pixmap in ``_paint_nav_pixmap`` so the expensive row
         painting only happens when the trace/mode/STI state actually changes.
         """
@@ -6858,7 +6858,7 @@ class TimelineView(QGraphicsView):
             return pix
 
         # Compute actual STI height in main-view pixels (matching scene layout) so
-        # the thumbnail allocates space proportionally — no more over-represented STI zone.
+        # the thumbnail allocates space proportionally - no more over-represented STI zone.
         _sti_main_h = 0.0
         if sc._show_sti and tr.sti_channels:
             for ch in tr.sti_channels:
@@ -6875,7 +6875,7 @@ class TimelineView(QGraphicsView):
         row_h         = task_area_h / n_rows if row_data else float(H)
         p.setPen(Qt.NoPen)
 
-        # Per-(task,core) colour cache – keyed by (task, core, blend) to avoid
+        # Per-(task,core) colour cache - keyed by (task, core, blend) to avoid
         # collisions between blended (task mode) and base (core-header) colours.
         _seg_color_cache: dict = {}
 
@@ -6975,7 +6975,7 @@ class TimelineView(QGraphicsView):
         return pix
 
     def _paint_nav_pixmap(self) -> QPixmap:
-        """Return a 260×130 minimap pixmap with the viewport indicator overlaid.
+        """Return a 260x130 minimap pixmap with the viewport indicator overlaid.
 
         The static background (all rows + border) is cached and only rebuilt
         when the trace, view-mode, STI visibility or expansion state changes.
@@ -7013,7 +7013,7 @@ class TimelineView(QGraphicsView):
         time_span = max(tr.time_max - tr.time_min, 1)
         # Compute the actual visible time range directly from the view geometry.
         # sc._vp_ns_lo/hi carry a 150% segment-loading margin and are set to a
-        # near-full-range buffer on orientation switches — both produce a
+        # near-full-range buffer on orientation switches - both produce a
         # misleadingly large (often full-width) indicator rectangle.
         vp_r = self.viewport().rect()
         if sc._horizontal:
@@ -7032,7 +7032,7 @@ class TimelineView(QGraphicsView):
         vx1 = (act_ns_lo - tr.time_min) / time_span * W
         vx2 = (act_ns_hi - tr.time_min) / time_span * W
 
-        # Thumbnail is proportional to actual view — simple linear indicator mapping.
+        # Thumbnail is proportional to actual view - simple linear indicator mapping.
         content_h = max(1.0, float(v_total) - RULER_HEIGHT)
         if content_h > 0 and v_range > 0:
             scroll_val = max(0.0, float(vbar.value() - vbar.minimum()) - RULER_HEIGHT)
@@ -7081,7 +7081,7 @@ class TimelineView(QGraphicsView):
         self._nav_hide_timer.start()
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:
-        """Called by Qt on every scroll — reposition frozen label-column items."""
+        """Called by Qt on every scroll - reposition frozen label-column items."""
         super().scrollContentsBy(dx, dy)
         # Frozen label column only depends on scene X, so skip work on pure
         # vertical scroll (common hot path when browsing many task rows).
@@ -7092,10 +7092,10 @@ class TimelineView(QGraphicsView):
         if dy != 0:
             self._reposition_frozen_top()
         # Trigger a debounced rebuild on any scroll so that:
-        #   • Time-axis scroll (dx in horizontal view / dy in vertical view)
+        #   * Time-axis scroll (dx in horizontal view / dy in vertical view)
         #     refreshes _vp_ns_lo/hi and repopulates segments that were outside
         #     the 10 % margin used during the last rebuild.
-        #   • Orthogonal scroll (row/column direction) populates rows/columns
+        #   * Orthogonal scroll (row/column direction) populates rows/columns
         #     that row-culling skipped during the last rebuild.
         if dx != 0 or dy != 0:
             self._pan_timer.start()            # restart settle countdown
@@ -7146,9 +7146,9 @@ class TimelineView(QGraphicsView):
     def _on_resize_timeout(self) -> None:
         """Debounced resize handler.
 
-        Fit mode  → rebuild at the new fit zoom so the trace always fills
+        Fit mode  -> rebuild at the new fit zoom so the trace always fills
                     the viewport (no blank space, no scrollbar).
-        Zoom mode → timescale_per_px is NEVER touched.  Only update _timescale_per_px_fit
+        Zoom mode -> timescale_per_px is NEVER touched.  Only update _timescale_per_px_fit
                     so the zoom-out clamp reflects the new viewport size, and
                     reposition the frozen label column items.
         """
@@ -7226,11 +7226,11 @@ class TimelineView(QGraphicsView):
         ns_lo = max(t_min, min(t_max, t_min + int((lo_coord - lw) * timescale_per_px)))
         ns_hi = max(t_min, min(t_max, t_min + int((hi_coord - lw) * timescale_per_px)))
 
-        # Time-axis coverage exceeded → need rebuild to repopulate segments.
+        # Time-axis coverage exceeded -> need rebuild to repopulate segments.
         if ns_lo < self._scene._vp_ns_lo or ns_hi > self._scene._vp_ns_hi:
             return True
 
-        # Orthogonal coverage exceeded → need rebuild to populate culled rows/cols.
+        # Orthogonal coverage exceeded -> need rebuild to populate culled rows/cols.
         if orth_lo < self._scene._vp_scene_orth_lo or orth_hi > self._scene._vp_scene_orth_hi:
             return True
 
@@ -7405,7 +7405,7 @@ class _ParseThread(QThread):
 # ---------------------------------------------------------------------------
 
 class _CursorButton(QPushButton):
-    """Status-bar cursor badge.  Click → jumps to cursor position."""
+    """Status-bar cursor badge.  Click -> jumps to cursor position."""
 
     def __init__(self, text: str, color: str, is_dark: bool = True,
                  parent: QWidget = None):
@@ -7436,10 +7436,10 @@ class _CursorButton(QPushButton):
         self.setStyleSheet(self._make_style(self._color, is_dark=is_dark))
 
 class _CursorDeleteButton(QPushButton):
-    """Small × button paired with a _CursorButton to form a delete pill."""
+    """Small x button paired with a _CursorButton to form a delete pill."""
 
     def __init__(self, color: str, is_dark: bool = True, parent: QWidget = None):
-        super().__init__("×", parent)
+        super().__init__("x", parent)
         self._color   = color
         self._is_dark = is_dark
         self.setStyleSheet(self._make_style(color, is_dark=is_dark))
@@ -7468,8 +7468,8 @@ class _CursorDeleteButton(QPushButton):
 
 class _CursorBarWidget(QWidget):
     """A row of per-cursor badge+delete pills in the status bar."""
-    jump_requested          = pyqtSignal(int)   # ns – scroll timeline
-    cursor_delete_requested = pyqtSignal(int)   # ns – remove this cursor
+    jump_requested          = pyqtSignal(int)   # ns - scroll timeline
+    cursor_delete_requested = pyqtSignal(int)   # ns - remove this cursor
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -7500,7 +7500,7 @@ class _CursorBarWidget(QWidget):
         self._delta_label = None
 
     def _make_pill(self, orig_idx: int, t: int, color: str) -> None:
-        """Create one badge+× pill and append to layout / _pills."""
+        """Create one badge+x pill and append to layout / _pills."""
         badge = _CursorButton(f"C{orig_idx + 1}", color, is_dark=self._is_dark)
         badge.setToolTip(f"C{orig_idx + 1}: click to jump to this cursor")
         del_btn = _CursorDeleteButton(color, is_dark=self._is_dark)
@@ -7512,7 +7512,7 @@ class _CursorBarWidget(QWidget):
             lambda checked=False, ns=ns_cap: self.cursor_delete_requested.emit(ns))
         self._layout.addWidget(badge)
         self._layout.addWidget(del_btn)
-        self._layout.setSpacing(0)   # badge and × are flush; space injected via margin
+        self._layout.setSpacing(0)   # badge and x are flush; space injected via margin
         self._pills.append((badge, del_btn))
 
     # ------------------------------------------------------------------
@@ -7528,7 +7528,7 @@ class _CursorBarWidget(QWidget):
         sorted_pairs = sorted(enumerate(times), key=lambda x: x[1])
 
         if len(sorted_pairs) != len(self._pills):
-            # Cursor count changed — full rebuild.
+            # Cursor count changed - full rebuild.
             self._clear_layout()
             for i, (orig_idx, t) in enumerate(sorted_pairs):
                 color = colors[orig_idx % len(colors)]
@@ -7564,7 +7564,7 @@ class _CursorBarWidget(QWidget):
                 self._layout.addWidget(dlbl)
                 self._delta_label = dlbl
         else:
-            # Same count — update text in-place (no widget churn).
+            # Same count - update text in-place (no widget churn).
             for order, (orig_idx, t) in enumerate(sorted_pairs):
                 badge, del_btn = self._pills[order]
                 badge.setText(f"C{orig_idx + 1}: {_format_time(t, ts, decimals=3)}")
@@ -7668,10 +7668,10 @@ class _LegendTaskRow(QWidget):
         event.accept()   # prevent bubbling up to _LegendWidget.mousePressEvent
 
 class _LegendWidget(QWidget):
-    """Compact scrollable colour legend with click → timeline highlight."""
+    """Compact scrollable colour legend with click -> timeline highlight."""
 
     task_clicked     = pyqtSignal(str)   # click: task merge key
-    cancel_highlight = pyqtSignal()      # click on background → cancel highlight
+    cancel_highlight = pyqtSignal()      # click on background -> cancel highlight
     filter_changed   = pyqtSignal(str)   # search text changed
 
     def __init__(self, parent=None):
@@ -7687,10 +7687,10 @@ class _LegendWidget(QWidget):
         palette = self.palette()
         palette.setColor(QPalette.Window, QColor("#1E1E1E"))
         self.setPalette(palette)
-        self._task_rows: Dict[str, _LegendTaskRow] = {}   # raw name → row widget
+        self._task_rows: Dict[str, _LegendTaskRow] = {}   # raw name -> row widget
         self._sti_rows: List[tuple] = []  # [(channel_or_note_lc, row_widget)]
         self._search = QLineEdit()
-        self._search.setPlaceholderText("Filter tasks…")
+        self._search.setPlaceholderText("Filter tasks...")
         self._search.setStyleSheet(
             "QLineEdit { background:#2D2D2D; color:#D4D4D4; border:1px solid #555; "
             "border-radius:3px; padding:2px 4px; }"
@@ -8157,9 +8157,9 @@ class _HistogramWidget(QWidget):
 class _MetricsPlotDialog(QDialog):
     """Modeless popup: scatter plot + histogram for one task metric.
 
-    ``points``  – List of (x_ns, y_value, payload) where payload is
+    ``points``  - List of (x_ns, y_value, payload) where payload is
                   a TaskSegment (exec) or int (inter-arrival start ns).
-    ``on_point_click`` – called with the trace-ns when a scatter point is clicked.
+    ``on_point_click`` - called with the trace-ns when a scatter point is clicked.
     """
 
     def __init__(self, title: str,
@@ -8181,7 +8181,7 @@ class _MetricsPlotDialog(QDialog):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(4)
 
-        # Content area (scatter + histogram) — grabbed for PNG/SVG export
+        # Content area (scatter + histogram) - grabbed for PNG/SVG export
         self._content = QWidget()
         cl = QVBoxLayout(self._content)
         cl.setContentsMargins(0, 0, 0, 0)
@@ -8236,7 +8236,7 @@ class _MetricsPlotDialog(QDialog):
     def _export_svg(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self, "Export SVG",
-            self._title.replace(" ", "_").replace("—", "-") + ".svg",
+            self._title.replace(" ", "_").replace("-", "-") + ".svg",
             "SVG files (*.svg);;All files (*)",
         )
         if not path:
@@ -8266,8 +8266,8 @@ class _StatsPanel(QWidget):
     """Dock panel showing trace statistics (span, core utilisation, top tasks)."""
 
     task_clicked = pyqtSignal(str)   # merge key of the clicked task row
-    segment_jump   = pyqtSignal(int)    # ns — scroll timeline to this timestamp
-    segment_select = pyqtSignal(object) # TaskSegment — highlight that exact slice
+    segment_jump   = pyqtSignal(int)    # ns - scroll timeline to this timestamp
+    segment_select = pyqtSignal(object) # TaskSegment - highlight that exact slice
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -8341,16 +8341,16 @@ class _StatsPanel(QWidget):
         if kind == "exec":
             pts   = [(s.start, s.end - s.start, s)
                      for s in segs if s.end > s.start]
-            title = f"{name} — Execution Time"
+            title = f"{name} - Execution Time"
         else:
             starts = sorted(s.start for s in segs)
-            # Map start → segment so we can highlight the arriving slice
+            # Map start -> segment so we can highlight the arriving slice
             start_to_seg = {s.start: s for s in segs}
             pts    = [(starts[i], starts[i] - starts[i - 1],
                        start_to_seg.get(starts[i]))
                       for i in range(1, len(starts))
                       if starts[i] > starts[i - 1]]
-            title  = f"{name} — Inter-Arrival Time"
+            title  = f"{name} - Inter-Arrival Time"
         if not pts:
             return
         # Both exec and inter-arrival highlight the slice at the plotted time
@@ -9019,7 +9019,7 @@ class _JumpToTimeDialog(QDialog):
     Accepted input formats (case-insensitive):
         - Raw integer nanoseconds: "123456789"
         - With unit:  "10 ns", "2.5 us",  "1.5 ms", "0.001 s",
-                       "10µs", "1.5ms"  (no space between value and unit)
+                       "10us", "1.5ms"  (no space between value and unit)
     """
 
     def __init__(self, trace, parent=None):
@@ -9080,7 +9080,7 @@ def _parse_time_input(text: str) -> Optional[int]:
     """
     import re as _re
     text = text.strip()
-    m = _re.fullmatch(r"([+-]?\d+(?:\.\d*)?(?:e[+-]?\d+)?)\s*(ns?|us?|µs?|ms?|s)?",
+    m = _re.fullmatch(r"([+-]?\d+(?:\.\d*)?(?:e[+-]?\d+)?)\s*(ns?|us?|\u00b5s?|ms?|s)?",
                       text, _re.IGNORECASE)
     if not m:
         return None
@@ -9090,7 +9090,7 @@ def _parse_time_input(text: str) -> Optional[int]:
     except ValueError:
         return None
     unit = unit.rstrip("s") if unit.endswith("s") and len(unit) > 1 else unit
-    multipliers = {"n": 1, "u": 1_000, "µ": 1_000, "m": 1_000_000, "s": 1_000_000_000}
+    multipliers = {"n": 1, "u": 1_000, "us": 1_000, "m": 1_000_000, "s": 1_000_000_000}
     prefix = unit[0] if unit else "n"
     mult = multipliers.get(prefix, 1)
     return int(round(val * mult))
@@ -9187,7 +9187,7 @@ class _RcSettings:
         """Write current state to disk immediately."""
         try:
             with open(self.RC_PATH, "w", encoding="utf-8") as fh:
-                fh.write("# btf_viewer.rc – RTOS BTF Viewer settings\n")
+                fh.write("# btf_viewer.rc - RTOS BTF Viewer settings\n")
                 fh.write("# This file is managed automatically; you may edit it by hand.\n\n")
                 self._cfg.write(fh)
             self._dirty = False
@@ -9279,7 +9279,7 @@ class _RcSettings:
 # ---------------------------------------------------------------------------
 
 class _AboutDialog(QDialog):
-    """Modern About dialog — app icon header, theme-aware, quick-reference table."""
+    """Modern About dialog - app icon header, theme-aware, quick-reference table."""
 
     def __init__(self, parent, *, is_dark: bool):
         super().__init__(parent, Qt.Dialog)
@@ -9305,7 +9305,7 @@ class _AboutDialog(QDialog):
         root.setSpacing(0)
         root.setContentsMargins(0, 0, 0, 0)
 
-        # ── Header: icon + title + tagline ───────────────────────────────
+        # -- Header: icon + title + tagline -------------------------------
         hdr = QWidget()
         hdr.setObjectName("about_hdr")
         hv = QVBoxLayout(hdr)
@@ -9325,7 +9325,7 @@ class _AboutDialog(QDialog):
         name_lbl.setObjectName("about_title")
         hv.addWidget(name_lbl)
 
-        sub_lbl = QLabel(f"RTOS context-switch timeline visualiser  ·  v{_APP_VERSION}")
+        sub_lbl = QLabel(f"RTOS context-switch timeline visualiser  *  v{_APP_VERSION}")
         sub_lbl.setAlignment(Qt.AlignHCenter)
         sub_lbl.setObjectName("about_sub")
         hv.addWidget(sub_lbl)
@@ -9340,7 +9340,7 @@ class _AboutDialog(QDialog):
 
         root.addWidget(_hsep())
 
-        # ── Info body ─────────────────────────────────────────────────────
+        # -- Info body -----------------------------------------------------
         info_w = QWidget()
         iv = QVBoxLayout(info_w)
         iv.setContentsMargins(24, 16, 24, 16)
@@ -9390,7 +9390,7 @@ class _AboutDialog(QDialog):
         iv.addWidget(_block("Application", [
             ("Product",   "RTOS BTF Viewer"),
             ("Purpose",   "Interactive viewer for Best Trace Format (.btf) RTOS scheduling traces"),
-            ("Runtime",   f"Python {sys.version_info.major}.{sys.version_info.minor}  ·  PyQt5 desktop application"),
+            ("Runtime",   f"Python {sys.version_info.major}.{sys.version_info.minor}  *  PyQt5 desktop application"),
         ]))
         iv.addWidget(_block("License", [
             ("License",   "MIT License"),
@@ -9399,7 +9399,7 @@ class _AboutDialog(QDialog):
 
         root.addWidget(_hsep())
 
-        # ── Footer ────────────────────────────────────────────────────────
+        # -- Footer --------------------------------------------------------
         foot = QWidget()
         fh = QHBoxLayout(foot)
         fh.setContentsMargins(16, 10, 16, 14)
@@ -9412,7 +9412,7 @@ class _AboutDialog(QDialog):
         fh.addWidget(btn)
         root.addWidget(foot)
 
-        # ── Scoped stylesheet ─────────────────────────────────────────────
+        # -- Scoped stylesheet ---------------------------------------------
         self.setStyleSheet(f"""
             QDialog                     {{ background:{bg}; }}
             QWidget#about_hdr           {{ background:{hdr_bg}; }}
@@ -9439,7 +9439,7 @@ class _AboutDialog(QDialog):
         self.adjustSize()
 
         # Match the web app's visual proportion: slightly wider, less tall.
-        # Target ratio is width / height ≈ 1.28.
+        # Target ratio is width / height ~= 1.28.
         _target_ratio = 1.28
         _w = max(520, min(640, self.sizeHint().width()))
         _h_need = self.sizeHint().height()
@@ -9456,7 +9456,7 @@ class _AboutDialog(QDialog):
 # ---------------------------------------------------------------------------
 
 class _SettingsDialog(QDialog):
-    """Modal settings dialog — sidebar navigation: Appearance | Display | Layout."""
+    """Modal settings dialog - sidebar navigation: Appearance | Display | Layout."""
 
     _INPUT_W = 110   # fixed pixel width for all spin / combo inputs
 
@@ -9650,7 +9650,7 @@ class _SettingsDialog(QDialog):
         # Sidebar
         self._sidebar = QListWidget()
         self._sidebar.setFixedWidth(140)
-        self._sidebar.setFont(_dlg_font)   # explicit – CSS font-size is ignored by macOS native item delegate
+        self._sidebar.setFont(_dlg_font)   # explicit - CSS font-size is ignored by macOS native item delegate
         self._sidebar.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._sidebar.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         _item_h = max(36, int(ui_font_size * 2.6))   # scale row height with font
@@ -9860,7 +9860,7 @@ class _SettingsDialog(QDialog):
 
         self._content_stack.addWidget(p3)
 
-        # -- Sidebar ↔ stack sync ---------------------------------------------
+        # -- Sidebar <-> stack sync ---------------------------------------------
         self._sidebar.currentRowChanged.connect(self._content_stack.setCurrentIndex)
 
         # -- Footer separator -------------------------------------------------
@@ -10016,7 +10016,7 @@ class _SettingsDialog(QDialog):
 def _point_to_seg_dist(px: float, py: float,
                        x1: float, y1: float,
                        x2: float, y2: float) -> float:
-    """Shortest distance from point (px,py) to segment (x1,y1)–(x2,y2)."""
+    """Shortest distance from point (px,py) to segment (x1,y1)-(x2,y2)."""
     dx, dy = x2 - x1, y2 - y1
     length_sq = dx * dx + dy * dy
     if length_sq < 1e-6:
@@ -10030,16 +10030,16 @@ _SNAP_THRESH = 2 * math.pi / 180
 
 
 def _snap_line_end(x1: float, y1: float, x2: float, y2: float, force: bool = False):
-    """Return (x2, y2) snapped to the nearest 45° axis.
+    """Return (x2, y2) snapped to the nearest 45deg axis.
 
     force=True  (Shift held): always snap to nearest axis.
-    force=False : snap only when within 2° threshold.
+    force=False : snap only when within 2deg threshold.
     """
     dx, dy = x2 - x1, y2 - y1
     dist = math.hypot(dx, dy)
     if dist < 2:
         return x2, y2
-    angle = math.atan2(dy, dx)   # range [-π, π]
+    angle = math.atan2(dy, dx)   # range [-pi, pi]
     best      = None
     best_diff = math.inf if force else _SNAP_THRESH
     for snap in _SNAP_ANGLES:
@@ -10249,10 +10249,10 @@ class _AnnotationCanvas(QWidget):
         menu = QMenu(self)
         act_delete    = menu.addAction("Delete")
         menu.addSeparator()
-        act_color     = menu.addAction("Change Color…")
-        act_size      = None if is_text else menu.addAction("Change Size…")
-        act_edit_text = menu.addAction("Edit Text…")     if is_text else None
-        act_font_size = menu.addAction("Change Font Size…") if is_text else None
+        act_color     = menu.addAction("Change Color...")
+        act_size      = None if is_text else menu.addAction("Change Size...")
+        act_edit_text = menu.addAction("Edit Text...")     if is_text else None
+        act_font_size = menu.addAction("Change Font Size...") if is_text else None
 
         chosen = menu.exec_(event.globalPos())
 
@@ -10270,7 +10270,7 @@ class _AnnotationCanvas(QWidget):
             return
 
         # For actions that open a secondary dialog: hold the guard inside the
-        # dialog via try/finally — it is released only after the dialog closes.
+        # dialog via try/finally - it is released only after the dialog closes.
         def _open_dialog():
             try:
                 if chosen == act_color:
@@ -10477,7 +10477,7 @@ class SnapshotEditorDialog(QDialog):
         bot.setSpacing(6)
         copy_btn = QPushButton("Copy to Clipboard")
         copy_btn.clicked.connect(self._on_copy)
-        save_btn = QPushButton("Save PNG…")
+        save_btn = QPushButton("Save PNG...")
         save_btn.clicked.connect(self._on_save)
         close_btn = QPushButton("Close")
         close_btn.clicked.connect(self.close)
@@ -10793,7 +10793,7 @@ class SnapshotEditorDialog(QDialog):
         path = QPainterPath()
         path.addText(shape['x'], shape['y'], font, shape['text'])
         if override_color is not None:
-            # Outline pass: stroke path with a wider pen (4 px → 2 px halo each side)
+            # Outline pass: stroke path with a wider pen (4 px -> 2 px halo each side)
             stroke_w = 4 + extra_width * 2
             painter.strokePath(path,
                                QPen(col, stroke_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
@@ -10961,10 +10961,10 @@ class _CpuLoadGraph(QWidget):
 
     View modes
     ----------
-    Task view + no selection  → 1 row: total CPU usage across all cores
-    Task view + task selected → 1 row: selected task's CPU usage
-    Core view + no selection  → 1 row per core at full row height
-    Core view + task selected → 1 row per core showing that task's usage on each core
+    Task view + no selection  -> 1 row: total CPU usage across all cores
+    Task view + task selected -> 1 row: selected task's CPU usage
+    Core view + no selection  -> 1 row per core at full row height
+    Core view + task selected -> 1 row per core showing that task's usage on each core
 
     Rows can be collapsed (core view only): collapsed height = CPU_LOAD_COLLAPSED_H px,
     label still visible. Click label to toggle. Expand/Collapse All button syncs via
@@ -10993,7 +10993,7 @@ class _CpuLoadGraph(QWidget):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.setMouseTracking(True)
         self.setToolTip(
-            "CPU load over time — synchronised with timeline\n"
+            "CPU load over time - synchronised with timeline\n"
             "Core view: click a label to collapse/expand that core row"
         )
 
@@ -11055,7 +11055,7 @@ class _CpuLoadGraph(QWidget):
         self.update()
 
     # ------------------------------------------------------------------
-    # Size hint — drives QScrollArea scrollbar
+    # Size hint - drives QScrollArea scrollbar
     # ------------------------------------------------------------------
 
     def sizeHint(self) -> "QSize":
@@ -11069,7 +11069,7 @@ class _CpuLoadGraph(QWidget):
         return QSize(200, max(40, total_h))
 
     # ------------------------------------------------------------------
-    # Pre-computation  (difference-array trick — O(n_segs + n_bins))
+    # Pre-computation  (difference-array trick - O(n_segs + n_bins))
     # ------------------------------------------------------------------
 
     def _compute_bins(self, trace) -> None:
@@ -11159,7 +11159,7 @@ class _CpuLoadGraph(QWidget):
                     run += tcd2[i]; tc2[i] += run
                 self._task_core_bins[mk][core] = [min(1.0, max(0.0, v * inv)) for v in tc2]
 
-        # Total bins — average non-IDLE load across all cores
+        # Total bins - average non-IDLE load across all cores
         nc = max(1, len(cores))
         self._total_bins = [
             min(1.0, sum(self._core_bins[c][i] for c in cores) / nc)
@@ -11193,7 +11193,7 @@ class _CpuLoadGraph(QWidget):
                 return [("task", task, _task_display_name(raw), _task_color(raw))]
             return [("total", "total", "CPU Load", QColor("#4CAF50"))]
 
-        # Core view — one row per core
+        # Core view - one row per core
         return [("core", c, c, QColor(_core_color(c))) for c in cores]
 
     def _row_effective_h(self, kind: str, key: str) -> int:
@@ -11207,7 +11207,7 @@ class _CpuLoadGraph(QWidget):
             return self._total_bins or None
         if kind == "task":
             return self._task_bins.get(key)
-        # "core" — show task's load on this core if a task is selected
+        # "core" - show task's load on this core if a task is selected
         if task:
             return self._task_core_bins.get(task, {}).get(key)
         return self._core_bins.get(key)
@@ -11263,7 +11263,7 @@ class _CpuLoadGraph(QWidget):
             painter.drawLine(x, title_h, x, self.height())
 
     # ------------------------------------------------------------------
-    # Mouse — click label strip (core view) to collapse / expand
+    # Mouse - click label strip (core view) to collapse / expand
     # ------------------------------------------------------------------
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
@@ -11376,7 +11376,7 @@ class _CpuLoadGraph(QWidget):
         vis_ns_lo, vis_ns_hi = self._visible_time_ns_range(scene)
         vis_span = max(1, vis_ns_hi - vis_ns_lo)
 
-        # Pre-compute pixel→bin mapping once (reused for every row)
+        # Pre-compute pixel->bin mapping once (reused for every row)
         sx_to_bi: Dict[int, int] = {}
         for sx in range(lw, w):
             frac = (sx - lw) / max(1, w - lw - 1)
@@ -11393,7 +11393,7 @@ class _CpuLoadGraph(QWidget):
         white_col = QColor("#FFFFFF") if dark else QColor("#111111")
         green_col = QColor("#4CAF50")
 
-        # ── Title bar (same bg as rows) ────────────────────────────────
+        # -- Title bar (same bg as rows) --------------------------------
         p.setFont(sf_title)
         p.setPen(txtc)
         p.drawText(QRect(4, 0, lw - 6, _TITLE_H), Qt.AlignVCenter | Qt.AlignLeft, "CPU LOAD")
@@ -11412,7 +11412,7 @@ class _CpuLoadGraph(QWidget):
             pct_text = f"{avg_pct * 100:.0f}%"
             indicator   = "▶" if collapsed else "▼"
 
-            # ── Label: white triangle → coloured circle → white name → green % ─
+            # -- Label: white triangle -> coloured circle -> white name -> green % -
             dot_r  = min(5, effective_h // 4)
             dot_cy = ry + effective_h // 2
 
@@ -11449,7 +11449,7 @@ class _CpuLoadGraph(QWidget):
                     gy = ry + effective_h - 1 - int(pct * effective_h)
                     p.setPen(QPen(grdc, 1, Qt.DotLine))
                     p.drawLine(lw + 1, gy, w, gy)
-                    if pct < 1.0:   # skip "100" — would overflow into row above
+                    if pct < 1.0:   # skip "100" - would overflow into row above
                         p.setPen(pct_muted)
                         p.drawText(QRect(lw + 3, gy - 12, 28, 12),
                                    Qt.AlignLeft | Qt.AlignBottom, str(int(pct * 100)))
@@ -11472,7 +11472,7 @@ class _CpuLoadGraph(QWidget):
 
             ry += rh + CPU_LOAD_ROW_GAP
 
-        # ── Overlay: bookmarks & annotations ─────────────────────────
+        # -- Overlay: bookmarks & annotations -------------------------
         if hasattr(scene, '_mark_data') and tpp > 0:
             for m_ns, _m_lbl, m_color_hex, m_kind, _m_id in scene._mark_data:
                 sx = self._time_overlay_x(m_ns, scene, vis_ns_lo, vis_ns_hi)
@@ -11483,7 +11483,7 @@ class _CpuLoadGraph(QWidget):
                     width=1.2 if m_kind == "bookmark" else 1.0,
                 )
 
-        # ── Overlay: placed cursors ────────────────────────────────────
+        # -- Overlay: placed cursors ------------------------------------
         if hasattr(scene, '_cursor_times') and tpp > 0:
             for c_idx, c_ns in enumerate(scene._cursor_times):
                 sx = self._time_overlay_x(c_ns, scene, vis_ns_lo, vis_ns_hi)
@@ -11493,7 +11493,7 @@ class _CpuLoadGraph(QWidget):
                     dashed=True, width=1.2,
                 )
 
-        # ── Overlay: hover cursor ──────────────────────────────────────
+        # -- Overlay: hover cursor --------------------------------------
         hover_ns = getattr(scene, '_hover_ns', None)
         if hover_ns is not None and tpp > 0:
             sx = self._time_overlay_x(hover_ns, scene, vis_ns_lo, vis_ns_hi)
@@ -11593,7 +11593,7 @@ class MainWindow(QMainWindow):
         self._apply_theme(self._is_dark)
         self._view_mode = "task"
 
-        # Restore all persisted settings (geometry, zoom, orientation, …).
+        # Restore all persisted settings (geometry, zoom, orientation, ...).
         self._restore_settings()
 
     # ------------------------------------------------------------------
@@ -11604,7 +11604,7 @@ class MainWindow(QMainWindow):
         """Apply startup dock dimensions.
 
         Called via QTimer.singleShot(0) so the window is already visible and
-        the dock layout engine has completed its first pass — resizeDocks() is
+        the dock layout engine has completed its first pass - resizeDocks() is
         a no-op when called before the window is shown.
 
                 Default structure:
@@ -11811,7 +11811,7 @@ class MainWindow(QMainWindow):
         # fall back to per-size profile values when window keys are empty.
         # Special case: if user explicitly provides window.dock_metrics but
         # clears window.dock_state, do NOT resurrect stale per-size profile
-        # dock state — apply metrics-driven sizing instead.
+        # dock state - apply metrics-driven sizing instead.
         _saved_dock = _window_dock or ("" if (_window_metrics and not _window_dock) else _profile_dock)
         _saved_ver  = s.get("window", "dock_layout_version", "0")
         if _saved_dock and _saved_ver == _DOCK_LAYOUT_VERSION:
@@ -11834,7 +11834,7 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(0, lambda m=_saved_metrics: self._restore_dock_metrics(m))
             s.flush()
         else:
-            # Stale / absent saved state – clear it so it gets rewritten on exit.
+            # Stale / absent saved state - clear it so it gets rewritten on exit.
             s.set_many("window", {"dock_state": "", "dock_layout_version": _DOCK_LAYOUT_VERSION})
             _saved_metrics = s.get("window", "dock_metrics", "")
             if _saved_metrics:
@@ -11905,7 +11905,7 @@ class MainWindow(QMainWindow):
         _MAX_DOCK_PROFILES = 12
         # Capture the live scene value so drag-resized label width is persisted.
         self._label_width_val = int(self._view._scene._label_width)
-        # Window geometry – only save non-maximised size/position so we can
+        # Window geometry - only save non-maximised size/position so we can
         # restore the proper normal-state geometry if the user un-maximises.
         if self.isMaximized():
             s.set("window", "maximized", "true", flush=False)
@@ -11939,7 +11939,7 @@ class MainWindow(QMainWindow):
             "hover_highlight":   str(self._hover_highlight_val).lower(),
         }, flush=False)
 
-        # Dock layout – serialise the full QMainWindow state (all dock sizes,
+        # Dock layout - serialise the full QMainWindow state (all dock sizes,
         # positions, tabbing) as a base64 string so it survives restarts.
         _DOCK_LAYOUT_VERSION = DEFAULT_DOCK_LAYOUT_VERSION
         _dock_bytes: QByteArray = self.saveState()
@@ -11961,14 +11961,14 @@ class MainWindow(QMainWindow):
         s.align_section_keys("dock_profile_label_width", _keys)
         s.align_section_keys("dock_profile_metrics", _keys)
 
-        # Zoom – save current ns/px so we can re-apply it the next time the
+        # Zoom - save current ns/px so we can re-apply it the next time the
         # same file is opened.  -1 means "use fit-to-width" (no saved zoom).
         if self._view._scene._trace is not None and not self._view._fit_mode:
             s.set("zoom", "timescale_per_px", str(self._view._scene.timescale_per_px), flush=False)
         else:
             s.set("zoom", "timescale_per_px", "-1", flush=False)
 
-        # Cursor positions – saved as space-separated ns timestamps so they are
+        # Cursor positions - saved as space-separated ns timestamps so they are
         # restored the next time the same file is opened.
         _cursor_times = self._view._scene.cursor_times()
         s.set("cursors", "positions",
@@ -11999,7 +11999,7 @@ class MainWindow(QMainWindow):
         # ---- 4. Clear the scene explicitly ------------------------------------
         # Break all Python-side references held by scene items BEFORE calling
         # scene.clear().  Each _BatchRowItem stores _seg_data / _xs / _coarse_data
-        # — lists that can contain thousands of (QRectF, QBrush, QPen, TaskSegment)
+        # - lists that can contain thousands of (QRectF, QBrush, QPen, TaskSegment)
         # tuples for a large trace.  Keeping those alive until Qt's widget
         # destructor eventually frees the TimelineScene Python wrapper causes a
         # main-thread GC cascade of 100K-400K object deallocations, producing the
@@ -12043,7 +12043,7 @@ class MainWindow(QMainWindow):
         self._trace = None
         if _trace_to_free is not None:
             def _drop(_t=_trace_to_free):
-                del _t          # ref count → 0 here, GC runs on this thread
+                del _t          # ref count -> 0 here, GC runs on this thread
             threading.Thread(target=_drop, daemon=False).start()
             del _trace_to_free
 
@@ -12426,7 +12426,7 @@ class MainWindow(QMainWindow):
         cur_v.setContentsMargins(0, 0, 0, 0)
         cur_v.setSpacing(2)
         self._cursor_table = QTableWidget(0, 4)
-        self._cursor_table.setHorizontalHeaderLabels(["#", "Time", "Task at cursor", "Δ to C1"])
+        self._cursor_table.setHorizontalHeaderLabels(["#", "Time", "Task at cursor", "Delta to C1"])
         self._cursor_table.horizontalHeader().setStretchLastSection(True)
         self._cursor_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._cursor_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -12503,7 +12503,7 @@ class MainWindow(QMainWindow):
         self._range_stats_label.setWordWrap(True)
         marks_v.addWidget(self._range_stats_label)
         marks_io_row = QHBoxLayout()
-        marks_import_btn = QPushButton("↓ Import Marks")
+        marks_import_btn = QPushButton("v Import Marks")
         marks_import_btn.setToolTip("Load bookmarks and annotations from a CSV file")
         marks_import_btn.clicked.connect(self._import_marks_csv)
         marks_io_row.addWidget(marks_import_btn)
@@ -12580,8 +12580,8 @@ class MainWindow(QMainWindow):
         self._view.horizontalScrollBar().valueChanged.connect(lambda _: self._on_view_scrolled())
         self._view.verticalScrollBar().valueChanged.connect(lambda _: self._on_view_scrolled())
 
-        # --- Signal wiring: legend ↔ scene highlight sync ---
-        # Legend click → toggle locked highlight
+        # --- Signal wiring: legend <-> scene highlight sync ---
+        # Legend click -> toggle locked highlight
         sc = self._view._scene
         self._legend.task_clicked.connect(self._on_legend_task_clicked)
         self._legend.cancel_highlight.connect(
@@ -12771,7 +12771,7 @@ class MainWindow(QMainWindow):
         # Zoom-preset quick-pick combo (labels/values rebuilt per trace unit)
         self._zoom_presets: list = []   # populated by _rebuild_zoom_presets()
         self._zoom_preset_combo = QComboBox()
-        # Use a QListView popup instead of macOS native NSMenu — the native
+        # Use a QListView popup instead of macOS native NSMenu - the native
         # popup ignores stylesheets and looks inconsistent with the themed UI.
         self._zoom_preset_combo.setView(QListView())
         _combo_font = self._zoom_preset_combo.font()
@@ -12794,7 +12794,7 @@ class MainWindow(QMainWindow):
         self._tb_task_btn.setCheckable(True)
         self._tb_core_btn.setCheckable(True)
         self._tb_task_btn.setChecked(True)
-        # Task/Core are mode toggles — show short text beside icon so the active
+        # Task/Core are mode toggles - show short text beside icon so the active
         # state is readable at a glance without hovering.
         for _mode_act in (self._tb_task_btn, self._tb_core_btn):
             _mw = tb.widgetForAction(_mode_act)
@@ -12857,14 +12857,14 @@ class MainWindow(QMainWindow):
         self._cursor_bar.jump_requested.connect(self._view.scroll_to_ns)
         self._cursor_bar.cursor_delete_requested.connect(self._on_cursor_delete)
 
-        # --- Cursor range stats (compact; shown only when ≥2 cursors active) ---
+        # --- Cursor range stats (compact; shown only when >=2 cursors active) ---
         self._status_range = QLabel("")
         self._status_range.setContentsMargins(6, 0, 6, 0)
         self._status_range.setVisible(False)
 
         # --- RIGHT permanent zone ---
 
-        # Quick view toggles — compact pill-style checkboxes
+        # Quick view toggles - compact pill-style checkboxes
         self._sti_toggle_cb = QCheckBox("STI")
         self._sti_toggle_cb.setChecked(self._show_sti)
         self._sti_toggle_cb.setToolTip("Show or hide STI event markers")
@@ -12875,13 +12875,13 @@ class MainWindow(QMainWindow):
         self._grid_toggle_cb.setToolTip("Show or hide the time grid")
         self._grid_toggle_cb.toggled.connect(self._set_show_grid)
 
-        # Zoom scale — e.g. "2.5 µs/px"; brighter text via #zoomScaleLabel CSS rule
+        # Zoom scale - e.g. "2.5 us/px"; brighter text via #zoomScaleLabel CSS rule
         self._zoom_scale_label = QLabel("—")
         self._zoom_scale_label.setObjectName("zoomScaleLabel")
         self._zoom_scale_label.setContentsMargins(8, 0, 2, 0)
         self._zoom_scale_label.setMinimumWidth(80)   # prevents layout jitter on unit change
 
-        # Visible span — e.g. "·  125.4 µs visible"; dimmer sub_text colour
+        # Visible span - e.g. "*  125.4 us visible"; dimmer sub_text colour
         self._zoom_visible_label = QLabel("")
         self._zoom_visible_label.setContentsMargins(0, 0, 8, 0)
 
@@ -12939,7 +12939,7 @@ class MainWindow(QMainWindow):
             self._settings.set("view", "show_grid", str(self._show_grid).lower())
 
     def _toggle_sti_log_scale(self) -> None:
-        """Toggle the STI waveform y-axis between linear and log₂ scale."""
+        """Toggle the STI waveform y-axis between linear and log2 scale."""
         enabled = self._tb_log2_btn.isChecked()
         self._view.set_sti_log_scale(enabled)
 
@@ -12948,7 +12948,7 @@ class MainWindow(QMainWindow):
         self._vert_label_pixmap_val = bool(enabled)
         _set_vertical_label_pixmap_mode(self._vert_label_pixmap_val)
         # Rebuild so the new label strategy takes effect immediately.
-        # Skip the rebuild if the scene is in horizontal mode — the vertical-
+        # Skip the rebuild if the scene is in horizontal mode - the vertical-
         # label pixmap setting has no effect there, so the rebuild is wasted.
         if not self._view._scene._horizontal:
             self._view._scene.rebuild()
@@ -13225,7 +13225,7 @@ class MainWindow(QMainWindow):
         if self._trace is None:
             return
         self._push_undo_snapshot()
-        # Priority: hover position → first placed cursor → viewport centre
+        # Priority: hover position -> first placed cursor -> viewport centre
         hover_ns   = self._view._scene._hover_ns
         cursor_times = self._view._scene.cursor_times()
         ns = (hover_ns if hover_ns is not None
@@ -13284,7 +13284,7 @@ class MainWindow(QMainWindow):
         new_label = item.text().strip()
         for b in self._bookmarks:
             if b.id == bid:
-                # Empty label → revert to the default timestamp label so the
+                # Empty label -> revert to the default timestamp label so the
                 # bookmark keeps useful identity information.
                 b.label = new_label or f"Bookmark @{_format_time(b.ns, self._current_time_unit(), decimals=3)}"
                 break
@@ -13492,7 +13492,7 @@ class MainWindow(QMainWindow):
             return
         n = len(self._find_hits)
         if self._find_hit_idx < 0:
-            # No previous jump — seed from viewport position.
+            # No previous jump - seed from viewport position.
             now = self._view.view_center_ns()
             if forward:
                 idx = bisect_right(self._find_hits, now) % n
@@ -13602,7 +13602,7 @@ class MainWindow(QMainWindow):
         _reset_render_state_for_new_trace()
         _process_ui_events_safely()
 
-        # Progress dialog – created before closures so progress_dialog is defined.
+        # Progress dialog - created before closures so progress_dialog is defined.
         progress_dialog = _LoadProgressDialog(
             f"Loading {os.path.basename(path)}…", self)
         progress_dialog.show_centered(self.geometry())
@@ -13626,7 +13626,7 @@ class MainWindow(QMainWindow):
             # QObject::removePostedEvents() call purges any still-queued progress/
             # errored events from the main-thread event queue.  Without this, a
             # queued progress event whose proxy was freed by _parse_thread=None
-            # would be dispatched by sendPostedEvents → SIGBUS crash.
+            # would be dispatched by sendPostedEvents -> SIGBUS crash.
             self._disconnect_parse_signals()
             progress_dialog.update_progress(100, "Building scene…")
             _process_ui_events_safely()   # let the dialog repaint before heavy build
@@ -13690,7 +13690,7 @@ class MainWindow(QMainWindow):
         }, flush=False)
 
         self._stack.setCurrentIndex(1)
-        _process_ui_events_safely()   # force layout pass → viewport settles
+        _process_ui_events_safely()   # force layout pass -> viewport settles
         self._view.load_trace(trace)
         self._timescale_per_px_default_val = self._view._scene._timescale_per_px_default
         self._refresh_zoom_ui_unit()
@@ -13724,7 +13724,7 @@ class MainWindow(QMainWindow):
         self._cpu_load_graph.set_trace(trace)
         self._cpu_load_graph.set_font_size(self._font_size_val)
         # Re-fit the CPU load panel height now that trace data (and all cores)
-        # is available — especially important when core view was restored from
+        # is available - especially important when core view was restored from
         # settings before any file was loaded (sizeHint was 40px at that point).
         self._autofit_cpu_load_height()
 
@@ -14201,7 +14201,7 @@ class MainWindow(QMainWindow):
                     a.ns = new_ns
                     break
             self._rebuild_annotation_list()
-        # No _save_current_trace_state — only persist on final drop
+        # No _save_current_trace_state - only persist on final drop
 
     def _on_mark_moved(self, kind: str, mark_id: int, new_ns: int) -> None:
         """Finalise a mark drag: persist state (data already updated by _on_mark_dragging)."""
@@ -14342,7 +14342,7 @@ class MainWindow(QMainWindow):
         """Toggle click-locked highlight for *task* from the Legend panel."""
         sc = self._view._scene
         if sc._locked_task == task:
-            sc.set_highlighted_task(None)          # second click on same → cancel
+            sc.set_highlighted_task(None)          # second click on same -> cancel
         else:
             sc.set_highlighted_task(task, locked=True)
             self._scroll_view_to_task(task)
@@ -14371,14 +14371,14 @@ class MainWindow(QMainWindow):
             vp_lo = self._view.mapToScene(vp.topLeft()).y()
             vp_hi = self._view.mapToScene(vp.bottomLeft()).y()
             if row_lo >= vp_lo and row_hi <= vp_hi:
-                return                              # row fully visible — nothing to do
+                return                              # row fully visible - nothing to do
             cur = self._view.mapToScene(vp.center())
             self._view.centerOn(cur.x(), orth)
         else:
             vp_lo = self._view.mapToScene(vp.topLeft()).x()
             vp_hi = self._view.mapToScene(vp.topRight()).x()
             if row_lo >= vp_lo and row_hi <= vp_hi:
-                return                              # column fully visible — nothing to do
+                return                              # column fully visible - nothing to do
             cur = self._view.mapToScene(vp.center())
             self._view.centerOn(orth, cur.y())
 
@@ -14404,7 +14404,7 @@ class MainWindow(QMainWindow):
 
         # Position so C1 aligns with the right edge of the frozen label column
         # and C2 aligns with the right edge of the viewport.
-        #   avail = vp_px - label_w  →  ns_hi_scene - ns_lo_scene == avail
+        #   avail = vp_px - label_w  ->  ns_hi_scene - ns_lo_scene == avail
         #   centerOn(x) puts scene-x at viewport pixel-centre, so:
         #     center_scene = ns_lo_scene - label_w + vp_px / 2
         ns_lo_scene = self._view._scene.ns_to_scene_coord(ns_lo)
@@ -14445,7 +14445,7 @@ class MainWindow(QMainWindow):
         """Prompt for a note then add annotation at the first cursor (or viewport centre)."""
         if self._trace is None:
             return
-        # Priority: hover position → first placed cursor → viewport centre
+        # Priority: hover position -> first placed cursor -> viewport centre
         hover_ns     = self._view._scene._hover_ns
         cursor_times = self._view._scene.cursor_times()
         ns = (hover_ns if hover_ns is not None
