@@ -36,6 +36,11 @@
         :y="stiHoverPos.y"
         :time-scale="trace?.timeScale || 'ns'"
       />
+      <SegmentTooltip
+        :lines="segmentTooltipLines"
+        :x="segmentHoverPos.x"
+        :y="segmentHoverPos.y"
+      />
       <!-- Right-click context menu -->
       <div
         v-if="contextMenu.visible"
@@ -156,10 +161,12 @@ import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } 
 import { toBlob as domToBlob } from 'html-to-image'
 import LabelColumn from './LabelColumn.vue'
 import StiTooltip  from './StiTooltip.vue'
+import SegmentTooltip from './SegmentTooltip.vue'
 import { render as renderTimeline, renderVertical, buildRowLayout, buildColumnLayout, drawHoverLine, drawHoverLineVertical, drawCursors, drawCursorsVertical, drawMarksHorizontal, drawMarksVertical, RULER_H, ROW_H, STI_ROW_H, STI_WAVEFORM_H, ROW_GAP, isStiTagChannel, RULER_W, COL_W, HEADER_H, formatTime } from '../renderer/TimelineRenderer.js'
 import { renderToSvg } from '../renderer/SvgExporter.js'
 import { InteractionHandler } from '../renderer/InteractionHandler.js'
-import { taskMergeKey, taskColor, coreColor, coreTint, stiNoteColor, parseTaskName, stiChannelColor } from '../utils/colors.js'
+import { taskMergeKey, taskColor, coreColor, coreTint, stiNoteColor, parseTaskName, stiChannelColor, taskDisplayName } from '../utils/colors.js'
+import { segmentTooltipLines as buildSegmentTooltipLines } from '../utils/statsAnalysis.js'
 
 // ---- Props & emits -------------------------------------------------------
 const props = defineProps({
@@ -284,6 +291,12 @@ const viewport = reactive({
 
 const stiHover    = ref(null)
 const stiHoverPos = reactive({ x: 0, y: 0 })
+const segmentHover = ref(null)
+const segmentHoverPos = reactive({ x: 0, y: 0 })
+const segmentTooltipLines = computed(() => {
+  if (!segmentHover.value || !props.trace) return []
+  return buildSegmentTooltipLines(props.trace, segmentHover.value, formatTime, taskDisplayName)
+})
 const hoverTime   = ref(null)
 
 // Right-click context menu
@@ -463,6 +476,9 @@ function setupHandler() {
     },
     onStiHover(ev) {
       stiHover.value = ev
+    },
+    onSegmentHover(seg) {
+      segmentHover.value = seg
     },
     onHoverTimeChange(t) {
       hoverTime.value = t
@@ -949,6 +965,44 @@ watch(stiHover, (ev) => {
     )
     const row = rows.find(r => r.type === 'sti' && r.key === ev.target)
     stiHoverPos.y = row ? (row.y + STI_ROW_H / 2) : (canvasEl.value.clientHeight / 2)
+  }
+})
+
+watch(segmentHover, (seg) => {
+  if (!seg || !canvasEl.value || !props.trace) return
+  if (orientation.value === 'v') {
+    const bodyH = viewport.canvasH - HEADER_H
+    const pxPerNs = bodyH / (viewport.timeEnd - viewport.timeStart)
+    segmentHoverPos.y = HEADER_H + (seg.start - viewport.timeStart) * pxPerNs
+    const { cols } = buildColumnLayout(
+      props.trace, props.options.viewMode, expanded, viewport.scrollX,
+      props.options.showSti !== false, stiExpanded,
+    )
+    let col = null
+    for (const c of cols) {
+      if (c.type !== 'task' && c.type !== 'core-task') continue
+      const match = c.type === 'task'
+        ? taskMergeKey(seg.task) === c.key
+        : (c.coreKey === seg.core && c.taskKey === seg.task)
+      if (match) { col = c; break }
+    }
+    segmentHoverPos.x = col ? (col.x + COL_W / 2) : (canvasEl.value.clientWidth / 2)
+  } else {
+    const pxPerNs = viewport.canvasW / (viewport.timeEnd - viewport.timeStart)
+    segmentHoverPos.x = (seg.start - viewport.timeStart) * pxPerNs
+    const { rows } = buildRowLayout(
+      props.trace, props.options.viewMode, expanded,
+      RULER_H - viewport.scrollY, props.options.showSti !== false, stiExpanded,
+    )
+    let row = null
+    for (const r of rows) {
+      if (r.type !== 'task' && r.type !== 'core-task') continue
+      const match = r.type === 'task'
+        ? taskMergeKey(seg.task) === r.key
+        : (r.coreKey === seg.core && r.taskKey === seg.task)
+      if (match) { row = r; break }
+    }
+    segmentHoverPos.y = row ? (row.y + ROW_H / 2) : (canvasEl.value.clientHeight / 2)
   }
 })
 

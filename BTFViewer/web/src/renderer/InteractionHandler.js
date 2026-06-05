@@ -470,11 +470,15 @@ export class InteractionHandler {
         this._opts.onStiHover?.(stiEv || null)
         const col = hitTestColumn(trace, vp, ropts, cx, cy)
         this._opts.onRowHover?.(col || null)
+        const segV = hitTestSegmentVertical(trace, vp, ropts, cx, cy)
+        this._opts.onSegmentHover?.(segV || null)
       } else {
         const stiEv = hitTestSti(trace, vp, ropts, cx, cy)
         this._opts.onStiHover?.(stiEv || null)
         const row = hitTestRow(trace, vp, ropts, cx, cy)
         this._opts.onRowHover?.(row || null)
+        const seg = hitTestSegment(trace, vp, ropts, cx, cy)
+        this._opts.onSegmentHover?.(seg || null)
       }
     }
   }
@@ -494,6 +498,7 @@ export class InteractionHandler {
     this._opts.onHoverTimeChange?.(null)
     this._opts.onStiHover?.(null)
     this._opts.onRowHover?.(null)
+    this._opts.onSegmentHover?.(null)
   }
 
   _onDblClick(e) {

@@ -187,14 +187,17 @@ A bar chart below the timeline shows per-core (or total) CPU utilisation over th
 
 ### Statistics panel — cursor-scoped metrics
 
-When **2 or more cursors** are placed, check **Limit to cursor range (C1–Cn)** at the top of the Statistics panel (enabled by default). All summary counts, CPU tables, execution/inter-arrival metrics, CSV/HTML export, and distribution charts then use only data inside the cursor window:
+When **2 or more cursors** are placed, check **Limit to cursor range (C1–Cn)** at the top of the Statistics panel (enabled by default). All summary counts, CPU tables, execution/blocking/inter-arrival metrics, CSV/HTML export, and distribution charts then use only data inside the cursor window:
 
 | Metric | Scoping rule |
 |--------|----------------|
 | Span / summary counts | Range width; tasks/segments/STI with any overlap |
 | Core & task CPU % | Overlapping active time ÷ range width |
 | Execution time per slice | Only slices **fully inside** the range |
+| Blocking time | Off-CPU gap between consecutive slices; only pairs where **both** slices are fully inside the range |
 | Inter-arrival | Activations whose start time falls inside the range |
+
+<img src="../images/statistics.png" alt="<Metric>">
 
 Uncheck the box to return to full-trace statistics.
 

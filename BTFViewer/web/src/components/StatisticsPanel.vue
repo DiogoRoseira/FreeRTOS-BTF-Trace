@@ -34,6 +34,20 @@
         <span class="summary-key">STI Events</span>
         <span class="summary-val">{{ summaryStiCount.toLocaleString() }}</span>
       </div>
+      <template v-if="schedulingSummary">
+        <div class="summary-row">
+          <span class="summary-key">Context switches{{ scopeSuffixStr }}</span>
+          <span class="summary-val">{{ schedulingSummary.contextSwitches.toLocaleString() }}</span>
+        </div>
+        <div class="summary-row">
+          <span class="summary-key">Core gap avg{{ scopeSuffixStr }}</span>
+          <span class="summary-val">{{ schedulingSummary.gapAvg }}</span>
+        </div>
+        <div class="summary-row">
+          <span class="summary-key">Core gap max{{ scopeSuffixStr }}</span>
+          <span class="summary-val">{{ schedulingSummary.gapMax }}</span>
+        </div>
+      </template>
     </div>
 
     <!-- Core utilization -->
@@ -194,6 +208,81 @@
               <td class="task-col">{{ row.name }}</td>
               <td>{{ row.runs }}</td>
               <td>{{ row.cpuPct.toFixed(1) }}%</td>
+              <td>{{ row.min }}</td>
+              <td>{{ row.avg }}</td>
+              <td
+                class="wcet-col"
+                :title="`Jump to longest slice for ${row.name}`"
+                @click.stop="jumpToWcet(row.mk)"
+              >
+                {{ row.max }}
+              </td>
+              <td>{{ row.p95 }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </template>
+
+    <!-- Blocking time -->
+    <div class="stats-sep" />
+    <div
+      class="stats-section-title collapsible"
+      @click="blockingCollapsed = !blockingCollapsed"
+    >
+      <svg
+        class="chevron"
+        :class="{ collapsed: blockingCollapsed }"
+        viewBox="0 0 10 10"
+        width="10"
+        height="10"
+      >
+        <polyline
+          points="2,3 5,7 8,3"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
+      Blocking Time (off-CPU gap){{ scopeSuffixStr }}
+    </div>
+    <template v-if="!blockingCollapsed">
+      <div
+        v-if="blockingStats.length === 0"
+        class="range-hint"
+      >
+        {{ statsRange ? 'No off-CPU gaps fully inside cursor range' : 'Need at least 2 activations per task' }}
+      </div>
+      <div
+        v-else
+        class="stats-table-wrap"
+      >
+        <table class="stats-table">
+          <thead>
+            <tr>
+              <th>Task</th>
+              <th>Gaps</th>
+              <th>Min</th>
+              <th>Avg</th>
+              <th>Max</th>
+              <th>p95</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="row in blockingStats"
+              :key="row.mk"
+              class="stats-table-row clickable"
+              :title="`Open blocking-time plot for ${row.name}`"
+              tabindex="0"
+              @click="openPlot(row.mk, 'block')"
+              @keydown.enter.prevent="openPlot(row.mk, 'block')"
+              @keydown.space.prevent="openPlot(row.mk, 'block')"
+            >
+              <td class="task-col">{{ row.name }}</td>
+              <td>{{ row.gaps }}</td>
               <td>{{ row.min }}</td>
               <td>{{ row.avg }}</td>
               <td>{{ row.max }}</td>
@@ -561,6 +650,12 @@ import {
   scopeSuffix,
   plotScopeBanner,
 } from '../utils/statsRange.js'
+import {
+  blockingTimeSamples,
+  blockingTimePlotPoints,
+  schedulingStats,
+  findWcetSegment,
+} from '../utils/statsAnalysis.js'
 
 const props = defineProps({
   trace:   { type: Object, required: true },
@@ -572,6 +667,7 @@ const emit = defineEmits(['highlightTask', 'selectSegment'])
 const coresCollapsed = ref(false)
 const tasksCollapsed = ref(false)
 const execSliceCollapsed = ref(false)
+const blockingCollapsed = ref(false)
 const interArrivalCollapsed = ref(false)
 const scopeToCursors = ref(true)
 const openPlotRef = ref(null)   // { mk, kind } when plot dialog is open
@@ -595,6 +691,10 @@ const scopeRangeLabel = computed(() => {
   }
   const scale = props.trace.timeScale
   return `C1–C${r.nCursors}: ${formatTime(r.lo, scale)} … ${formatTime(r.hi, scale)} (${formatTime(r.hi - r.lo, scale)})`
+})
+
+watch(placedCursorCount, (n) => {
+  if (n < 2) scopeToCursors.value = false
 })
 
 const spanStr = computed(() => {
@@ -631,6 +731,23 @@ const summaryStiCount = computed(() => {
   return tr.stiEvents.filter(
     ev => !isStiTagChannel(ev.target) && ev.time >= r.lo && ev.time <= r.hi,
   ).length
+})
+
+const schedulingSummary = computed(() => {
+  const tr = props.trace
+  if (!tr) return null
+  const r = statsRange.value
+  const lo = r?.lo ?? null
+  const hi = r?.hi ?? null
+  const { contextSwitches, coreGaps } = schedulingStats(tr, lo, hi)
+  if (contextSwitches <= 0) return null
+  const scale = tr.timeScale
+  const avg = Math.round(coreGaps.reduce((a, b) => a + b, 0) / coreGaps.length)
+  return {
+    contextSwitches,
+    gapAvg: formatTime(avg, scale),
+    gapMax: formatTime(Math.max(...coreGaps), scale),
+  }
 })
 
 // ---- Core utilisation (excl. IDLE/TICK) — only computed when visible ----
@@ -736,6 +853,46 @@ const execSliceStats = computed(() => {
 
   return rows.sort((a, b) => b.runs - a.runs || a.name.localeCompare(b.name))
 })
+
+const blockingStats = computed(() => {
+  if (blockingCollapsed.value) return []
+  const tr = props.trace
+  if (!tr || !tr.segByMergeKey) return []
+  const scale = tr.timeScale
+  const r = statsRange.value
+  const lo = r?.lo ?? null
+  const hi = r?.hi ?? null
+  const rows = []
+
+  for (const [mk, segs] of tr.segByMergeKey) {
+    if (!segs || segs.length < 2) continue
+    const repr = tr.taskRepr.get(mk) || mk
+    const { name } = parseTaskName(repr)
+    if (isIdleTaskName(name) || name === 'TICK') continue
+    const samples = blockingTimeSamples(segs, lo, hi)
+    const summary = _summarizeSamples(samples, scale)
+    if (!summary) continue
+    rows.push({
+      mk,
+      name: taskDisplayName(repr),
+      gaps: samples.length,
+      ...summary,
+    })
+  }
+
+  return rows.sort((a, b) => b.gaps - a.gaps || a.name.localeCompare(b.name))
+})
+
+function jumpToWcet(mk) {
+  const tr = props.trace
+  if (!tr) return
+  const r = statsRange.value
+  const lo = r?.lo ?? null
+  const hi = r?.hi ?? null
+  const segs = tr.segByMergeKey?.get(mk) || []
+  const seg = findWcetSegment(segs, lo, hi)
+  if (seg) emit('selectSegment', seg)
+}
 
 const interArrivalStats = computed(() => {
   if (interArrivalCollapsed.value) return []
@@ -866,13 +1023,37 @@ function _buildInterPlot(trace, mk, range) {
   }
 }
 
+function _buildBlockPlot(trace, mk, range) {
+  const segs = trace?.segByMergeKey?.get(mk) || []
+  if (segs.length < 2) return null
+  const repr = trace.taskRepr.get(mk) || mk
+  const suffix = scopeSuffix(range)
+  const lo = range?.lo ?? null
+  const hi = range?.hi ?? null
+  const rawPoints = blockingTimePlotPoints(segs, lo, hi)
+  const points = rawPoints.map((pt, index) => ({
+    index,
+    xNs: pt.xNs,
+    yValue: pt.yValue,
+    payload: pt.payload,
+    label: `${taskDisplayName(repr)}: ${formatTime(pt.yValue, trace.timeScale)} blocked before ${formatTime(pt.xNs, trace.timeScale)}`,
+  }))
+  return {
+    kind: 'block',
+    mk,
+    title: `${taskDisplayName(repr)} - Blocking Time${suffix}`,
+    color: taskColor(mk, repr),
+    points,
+  }
+}
+
 const plotData = computed(() => {
   const open = openPlotRef.value
   if (!open) return null
   const range = statsRange.value
-  return open.kind === 'exec'
-    ? _buildExecPlot(props.trace, open.mk, range)
-    : _buildInterPlot(props.trace, open.mk, range)
+  if (open.kind === 'exec') return _buildExecPlot(props.trace, open.mk, range)
+  if (open.kind === 'block') return _buildBlockPlot(props.trace, open.mk, range)
+  return _buildInterPlot(props.trace, open.mk, range)
 })
 
 const plotScopeInfo = computed(() => {
@@ -882,9 +1063,10 @@ const plotScopeInfo = computed(() => {
 
 function openPlot(mk, kind) {
   const range = statsRange.value
-  const plot = kind === 'exec'
-    ? _buildExecPlot(props.trace, mk, range)
-    : _buildInterPlot(props.trace, mk, range)
+  let plot
+  if (kind === 'exec') plot = _buildExecPlot(props.trace, mk, range)
+  else if (kind === 'block') plot = _buildBlockPlot(props.trace, mk, range)
+  else plot = _buildInterPlot(props.trace, mk, range)
   if (!plot || plot.points.length === 0) return
   openPlotRef.value = { mk, kind }
   selectedPlotPoint.value = -1
@@ -1047,8 +1229,12 @@ function exportCsv() {
   const suffix = scopeSuffixStr.value
   const execReportRows = _execSliceRowsForReport(tr, r)
   const interReportRows = _interArrivalRowsForReport(tr, r)
+  const blockReportRows = _blockingRowsForReport(tr, r)
   const coreRows = _coreUtilRows(tr, r)
   const taskRows = _taskCpuRows(tr, r)
+  const lo = r?.lo ?? null
+  const hi = r?.hi ?? null
+  const { contextSwitches, coreGaps } = schedulingStats(tr, lo, hi)
   const lines = []
 
   lines.push('Summary')
@@ -1060,6 +1246,12 @@ function exportCsv() {
   lines.push(`Tasks,${_csvCell(summaryTaskCount.value)}`)
   lines.push(`Segments,${_csvCell(summarySegCount.value)}`)
   lines.push(`STI Events,${_csvCell(summaryStiCount.value)}`)
+  lines.push(`Context switches${suffix},${_csvCell(contextSwitches)}`)
+  if (coreGaps.length > 0) {
+    const gapAvg = Math.round(coreGaps.reduce((a, b) => a + b, 0) / coreGaps.length)
+    lines.push(`Core gap avg${suffix},${_csvCell(formatTime(gapAvg, tr.timeScale))}`)
+    lines.push(`Core gap max${suffix},${_csvCell(formatTime(Math.max(...coreGaps), tr.timeScale))}`)
+  }
 
   if (rangeStats.value && !r) {
     lines.push('')
@@ -1103,6 +1295,22 @@ function exportCsv() {
       _csvCell(r.name),
       _csvCell(r.runs),
       _csvCell(`${r.cpuPct.toFixed(1)}%`),
+      _csvCell(r.min),
+      _csvCell(r.avg),
+      _csvCell(r.trimMean),
+      _csvCell(r.max),
+      _csvCell(r.p50),
+      _csvCell(r.p95),
+    ].join(','))
+  }
+
+  lines.push('')
+  lines.push(`Blocking Time (off-CPU gap)${suffix}`)
+  lines.push('Task,Gaps,Min,Avg,TrimMean(5%),Max,p50,p95')
+  for (const r of blockReportRows) {
+    lines.push([
+      _csvCell(r.name),
+      _csvCell(r.runs),
       _csvCell(r.min),
       _csvCell(r.avg),
       _csvCell(r.trimMean),
@@ -1232,6 +1440,37 @@ function _interArrivalRowsForReport(tr, range) {
   return rows.sort((a, b) => b.runs - a.runs || a.name.localeCompare(b.name))
 }
 
+function _blockingRowsForReport(tr, range) {
+  if (!tr || !tr.segByMergeKey) return []
+  const scale = tr.timeScale
+  const lo = range?.lo ?? null
+  const hi = range?.hi ?? null
+  const rows = []
+
+  for (const [mk, segs] of tr.segByMergeKey) {
+    if (!segs || segs.length < 2) continue
+    const repr = tr.taskRepr.get(mk) || mk
+    const { name } = parseTaskName(repr)
+    if (isIdleTaskName(name) || name === 'TICK') continue
+    const samples = blockingTimeSamples(segs, lo, hi)
+    const summary = _summarizeSamplesReport(samples, scale)
+    if (!summary) continue
+    rows.push({
+      mk,
+      name: taskDisplayName(repr),
+      runs: samples.length,
+      min: summary.min,
+      avg: summary.avg,
+      trimMean: summary.trimMean,
+      max: summary.max,
+      p50: summary.p50,
+      p95: summary.p95,
+    })
+  }
+
+  return rows.sort((a, b) => b.runs - a.runs || a.name.localeCompare(b.name))
+}
+
 function _renderHtmlTable(title, rows, includeCpu = false) {
   const head = includeCpu
     ? '<tr><th>Task</th><th>Runs</th><th>CPU%</th><th>Min</th><th>Avg</th><th>Max</th><th>p95</th></tr>'
@@ -1307,8 +1546,13 @@ function exportHtml() {
   const suffix = scopeSuffixStr.value
   const execReportRows = _execSliceRowsForReport(tr, r)
   const interReportRows = _interArrivalRowsForReport(tr, r)
+  const blockReportRows = _blockingRowsForReport(tr, r)
   const coreRows = _coreUtilRows(tr, r)
   const taskRows = _taskCpuRows(tr, r)
+  const lo = r?.lo ?? null
+  const hi = r?.hi ?? null
+  const { contextSwitches, coreGaps } = schedulingStats(tr, lo, hi)
+  const schedKpi = schedulingSummary.value
   const range = !r ? rangeStats.value : null
   const rangeHtml = range
     ? `<section class="report-card"><h2>Cursor Range</h2><table><tbody>
@@ -1421,6 +1665,9 @@ function exportHtml() {
       <article class="kpi"><div class="k">Tasks</div><div class="v">${_htmlCell(summaryTaskCount.value.toLocaleString())}</div></article>
       <article class="kpi"><div class="k">Segments</div><div class="v">${_htmlCell(summarySegCount.value.toLocaleString())}</div></article>
       <article class="kpi"><div class="k">STI Events</div><div class="v">${_htmlCell(summaryStiCount.value.toLocaleString())}</div></article>
+      ${schedKpi ? `<article class="kpi"><div class="k">Context switches${_htmlCell(suffix)}</div><div class="v">${_htmlCell(schedKpi.contextSwitches.toLocaleString())}</div></article>` : ''}
+      ${schedKpi?.gapAvg ? `<article class="kpi"><div class="k">Core gap avg${_htmlCell(suffix)}</div><div class="v">${_htmlCell(schedKpi.gapAvg)}</div></article>` : ''}
+      ${schedKpi?.gapMax ? `<article class="kpi"><div class="k">Core gap max${_htmlCell(suffix)}</div><div class="v">${_htmlCell(schedKpi.gapMax)}</div></article>` : ''}
     </section>
     <section class="report-card notes">
     <h2>Statistics Notes</h2>
@@ -1428,6 +1675,8 @@ function exportHtml() {
       ${scopeNote}
       <li><strong>Execution Time Per Slice:</strong> Duration of each continuous task run between two context switches. Lower and tighter values indicate more predictable execution.</li>
       <li><strong>Inter-Arrival Time:</strong> Time between consecutive activations of the same task (slice start to next slice start). It reflects activation cadence and jitter.</li>
+      <li><strong>Blocking Time:</strong> Off-CPU gap between the end of one slice and the start of the next for the same task.</li>
+      <li><strong>Context switches:</strong> Count of segment boundaries on all cores whose start time falls inside the statistics scope.</li>
       <li><strong>Min (Minimum):</strong> The fastest execution time recorded. It represents the best-case scenario under zero system load.</li>
       <li><strong>Max (Maximum):</strong> The slowest execution time recorded. It identifies worst-case bottlenecks, spikes, or resource contention.</li>
       <li><strong>Average (Mean):</strong> Total execution time divided by the number of slices. It shows general performance but is heavily skewed by extreme outliers.</li>
@@ -1440,6 +1689,7 @@ function exportHtml() {
     ${coreHtml}
     ${taskHtml}
     ${_renderHtmlTableReport(`Execution Time Per Slice${suffix}`, execReportRows, true)}
+    ${_renderHtmlTableReport(`Blocking Time (off-CPU gap)${suffix}`, blockReportRows)}
     ${_renderHtmlTableReport(`Inter-Arrival Time${suffix}`, interReportRows)}
     <div class="report-foot">Generated by BTF Viewer</div>
   </div>
@@ -1762,6 +2012,18 @@ watch(plotData, () => {
 
 .stats-table-row.clickable:focus-visible {
   outline: none;
+}
+
+.stats-table td.wcet-col {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+
+.stats-table td.wcet-col:hover {
+  color: var(--fg);
 }
 
 .stats-export-row {

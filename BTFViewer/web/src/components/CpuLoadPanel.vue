@@ -31,7 +31,10 @@
             :style="{ backgroundColor: row.color }"
           />
           <span class="cpu-load-name">{{ row.label }}</span>
-          <span class="cpu-load-pct">{{ row.avgPct }}%</span>
+          <span
+            class="cpu-load-pct"
+            :title="row.pctTitle"
+          >{{ row.pctLabel }}</span>
         </button>
 
         <div
@@ -61,6 +64,14 @@
             >
               {{ grid.label }}
             </text>
+            <rect
+              v-if="row.cursorRangeShade"
+              :x="row.cursorRangeShade.x"
+              y="0"
+              :width="row.cursorRangeShade.width"
+              :height="row.height"
+              class="cpu-load-range-shade"
+            />
             <rect
               v-for="rect in row.rects"
               :key="`${row.key}-${rect.index}`"
@@ -177,6 +188,12 @@
 import { computed, ref, watch } from 'vue'
 import { formatTime } from '../renderer/TimelineRenderer.js'
 import { coreColor, isIdleTaskName, parseTaskName, taskColor, taskDisplayName, taskMergeKey } from '../utils/colors.js'
+import {
+  avgBinsForNsRange,
+  cursorRangeShade,
+  getPlacedCursorRange,
+  loadAtNs,
+} from '../utils/cpuLoadHelpers.js'
 
 const NUM_BINS = 1024
 const ROW_H = 60
@@ -375,9 +392,8 @@ const rowModels = computed(() => {
   const binW = binsState.value.binWNs
   const startBin = Math.max(0, Math.floor((visibleStart - trace.timeMin) / binW))
   const endBin = Math.min(NUM_BINS - 1, Math.ceil((visibleEnd - trace.timeMin) / binW))
-  const hoverCursor = buildHoverCursor(visibleStart, visibleEnd, visibleSpan, trace.timeScale)
-  const visibleCursors = buildCursorOverlays(visibleStart, visibleEnd, visibleSpan, trace.timeScale)
-  const visibleMarks = buildMarkOverlays(visibleStart, visibleEnd, visibleSpan)
+  const cursorRange = getPlacedCursorRange(props.cursors)
+  const rangeShade = cursorRangeShade(cursorRange, visibleStart, visibleEnd, visibleSpan, PLOT_W)
 
   return rows.value.map(row => {
     const collapsed = row.kind === 'core' && collapsedCores.value.has(row.key)
@@ -405,15 +421,35 @@ const rowModels = computed(() => {
       }
     }
 
+    const visAvg = bins
+      ? avgBinsForNsRange(bins, trace, binW, visibleStart, visibleEnd, NUM_BINS)
+      : 0
+    let pctLabel = `${Math.round(visAvg * 100)}%`
+    let pctTitle = `Visible-window average: ${(visAvg * 100).toFixed(1)}%`
+    if (cursorRange) {
+      const crAvg = avgBinsForNsRange(
+        bins, trace, binW, cursorRange.lo, cursorRange.hi, NUM_BINS)
+      pctLabel += ` · C:${Math.round(crAvg * 100)}%`
+      pctTitle += `\nCursor-range average (C1–C${cursorRange.nCursors}): ${(crAvg * 100).toFixed(1)}%`
+    }
+
+    const hoverLoad = (props.hoverTime != null && bins)
+      ? loadAtNs(bins, trace, binW, props.hoverTime, NUM_BINS)
+      : null
+
     return {
       ...row,
       collapsed,
       height,
       rects,
-      hoverCursor: collapsed ? null : hoverCursor,
-      cursors: collapsed ? [] : visibleCursors,
-      marks: collapsed ? [] : visibleMarks,
-      avgPct: ((binsState.value.avgLoad[row.key] ?? 0) * 100).toFixed(0),
+      cursorRangeShade: collapsed ? null : rangeShade,
+      hoverCursor: collapsed
+        ? null
+        : buildHoverCursor(visibleStart, visibleEnd, visibleSpan, trace.timeScale, hoverLoad),
+      cursors: collapsed ? [] : buildCursorOverlays(visibleStart, visibleEnd, visibleSpan, trace.timeScale),
+      marks: collapsed ? [] : buildMarkOverlays(visibleStart, visibleEnd, visibleSpan),
+      pctLabel,
+      pctTitle,
       gridLines: collapsed ? [] : [0.25, 0.5, 0.75, 1].map(pct => ({ pct, y: height - pct * height })),
       gridLabels: collapsed ? [] : [0, 25, 50, 75].map(pct => ({ pct, label: `${pct}`, y: height - (pct / 100) * height })),
     }
@@ -460,11 +496,12 @@ function buildCursorOverlays(visibleStart, visibleEnd, visibleSpan, timeScale) {
   })
 }
 
-function buildHoverCursor(visibleStart, visibleEnd, visibleSpan, timeScale) {
+function buildHoverCursor(visibleStart, visibleEnd, visibleSpan, timeScale, load) {
   if (props.hoverTime == null) return null
   const x = timeToPlotX(props.hoverTime, visibleStart, visibleEnd, visibleSpan)
   if (x == null) return null
-  const label = formatTime(props.hoverTime, timeScale)
+  const loadStr = load != null ? `${Math.round(load * 100)}% · ` : ''
+  const label = `${loadStr}${formatTime(props.hoverTime, timeScale)}`
   const badgeW = Math.max(26, label.length * 6 + 8)
   return {
     x,
@@ -625,7 +662,19 @@ watch(() => props.trace, () => {
 .cpu-load-pct {
   color: #4CAF50;
   font-size: 10px;
+  min-width: 52px;
+  text-align: right;
+  flex-shrink: 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.cpu-load-range-shade {
+  fill: rgba(68, 153, 255, 0.16);
+  pointer-events: none;
+}
+
+:global(.app:not(.dark)) .cpu-load-range-shade {
+  fill: rgba(42, 111, 178, 0.14);
 }
 
 .cpu-load-plot {

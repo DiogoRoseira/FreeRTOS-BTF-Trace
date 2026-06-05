@@ -342,6 +342,8 @@ _IC_SAVE_SVG = ("M7.5 1a.5.5 0 0 1 .5.5v8.793l2.146-2.147a.5.5 0 0 1 .708.708l-3
                 "a.5.5 0 0 1-.708 0l-3-3a.5.5 0 0 1 .708-.708L7 10.293V1.5a.5.5 0 0 1 .5-.5z"
                 "M2.5 13a.5.5 0 0 1 .5-.5h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5z")
 _IC_COPY   = "M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1zM5 0h6a1 1 0 0 1 1 1v3H4V1a1 1 0 0 1 1-1z"
+_IC_SHOT   = ("M3 3.5A1.5 1.5 0 0 1 4.5 2h7A1.5 1.5 0 0 1 13 3.5V5h1a1 1 0 0 1 1 1v6.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 12.5V6a1 1 0 0 1 1-1h1V3.5zm1 0V5h8V3.5a.5.5 0 0 0-.5-.5h-7a.5.5 0 0 0-.5.5z"
+                "M8 7a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z")
 _IC_HORIZ  = "M1 4h14v2H1zm0 4h14v2H1zm0 4h14v2H1z"
 _IC_VERT   = "M3 1h2v14H3zm4 0h2v14H7zm4 0h2v14h-2z"
 _IC_ZIN    = "M6.5 1a5.5 5.5 0 1 0 3.89 9.4l3.4 3.4.7-.7-3.4-3.4A5.5 5.5 0 0 0 6.5 1zm0 1a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9zM6 5v1.5H4.5v1H6V9h1V7.5h1.5v-1H7V5H6z"
@@ -662,6 +664,76 @@ def _seg_fully_in_range(seg: TaskSegment, lo: int, hi: int) -> bool:
 
 def _seg_overlaps_range(seg: TaskSegment, lo: int, hi: int) -> bool:
     return seg.end > lo and seg.start < hi
+
+def _seg_core_neighbors(trace: "BtfTrace", seg: TaskSegment
+                        ) -> Tuple[Optional[TaskSegment], Optional[TaskSegment], int, int]:
+    """Return (prev_on_core, next_on_core, 1-based_index, total_on_core) for *seg*."""
+    segs = trace.core_segs.get(seg.core, [])
+    n = len(segs)
+    if not n:
+        return None, None, 0, 0
+    idx = -1
+    for i, s in enumerate(segs):
+        if s.start == seg.start and s.end == seg.end and s.task == seg.task:
+            idx = i
+            break
+    if idx < 0:
+        return None, None, 0, n
+    prev = segs[idx - 1] if idx > 0 else None
+    nxt = segs[idx + 1] if idx + 1 < n else None
+    return prev, nxt, idx + 1, n
+
+def _blocking_time_samples(segs: list,
+                           lo: Optional[int] = None, hi: Optional[int] = None) -> List[int]:
+    """Off-CPU gaps between consecutive slices of the same task."""
+    if len(segs) < 2:
+        return []
+    ordered = sorted(segs, key=lambda s: s.start)
+    samples: List[int] = []
+    for i in range(1, len(ordered)):
+        prev, nxt = ordered[i - 1], ordered[i]
+        if lo is not None and hi is not None:
+            if not (_seg_fully_in_range(prev, lo, hi) and _seg_fully_in_range(nxt, lo, hi)):
+                continue
+        gap = nxt.start - prev.end
+        if gap > 0:
+            samples.append(gap)
+    return samples
+
+def _scheduling_stats(trace: "BtfTrace",
+                      lo: Optional[int] = None, hi: Optional[int] = None
+                      ) -> Tuple[int, List[int]]:
+    """Context-switch count and inter-slice core gaps (ns) within optional scope."""
+    ctx_switches = 0
+    gaps: List[int] = []
+    for core in trace.core_names:
+        segs = trace.core_segs.get(core, [])
+        for i in range(1, len(segs)):
+            prev, curr = segs[i - 1], segs[i]
+            if lo is not None and hi is not None:
+                if not (lo <= curr.start <= hi):
+                    continue
+            ctx_switches += 1
+            gap = curr.start - prev.end
+            gaps.append(gap if gap > 0 else 0)
+    return ctx_switches, gaps
+
+def _find_wcet_segment(segs: list,
+                       lo: Optional[int] = None, hi: Optional[int] = None
+                       ) -> Optional[TaskSegment]:
+    """Return the longest-duration slice in *segs* (respecting cursor scope)."""
+    best: Optional[TaskSegment] = None
+    best_d = 0
+    for s in segs:
+        d = s.end - s.start
+        if d <= 0:
+            continue
+        if lo is not None and hi is not None and not _seg_fully_in_range(s, lo, hi):
+            continue
+        if d > best_d:
+            best_d = d
+            best = s
+    return best
 
 class _ParseCancelledError(Exception):
     """Internal control-flow exception used to abort _parse_btf cleanly."""
@@ -3162,6 +3234,7 @@ class TimelineScene(QGraphicsScene):
                 QRectF(lw, y_top, timeline_w, self._row_height),
                 seg_data, trace.time_scale,
                 label_font=font_inline, label_fm=fm_inline, label_text=disp,
+                trace=trace,
                 xs=xs, time_min=trace.time_min, timescale_per_px=self._timescale_per_px)
             batch.setZValue(1)
             self.addItem(batch)
@@ -3433,6 +3506,7 @@ class TimelineScene(QGraphicsScene):
                 QRectF(x_left, label_row_h, col_w, timeline_h),
                 seg_data, trace.time_scale,
                 label_font=font_inline, label_fm=fm_inline, label_text=disp,
+                trace=trace,
                 xs=xs, time_min=trace.time_min, timescale_per_px=self._timescale_per_px)
             batch.setZValue(1)
             self.addItem(batch)
@@ -3734,6 +3808,7 @@ class TimelineScene(QGraphicsScene):
                 batch = _BatchRowItem(
                     QRectF(lw, y_top, timeline_w, self._row_height),
                     seg_data, trace.time_scale,
+                    trace=trace,
                     xs=xs, time_min=trace.time_min)
                 batch.setZValue(1)
                 self.addItem(batch)
@@ -3828,6 +3903,7 @@ class TimelineScene(QGraphicsScene):
                     QRectF(lw, y_top2, timeline_w, self._row_height),
                     seg_data, trace.time_scale,
                     label_font=font_sm, label_fm=fm_sm, label_text=disp,
+                    trace=trace,
                     xs=xs, time_min=trace.time_min, timescale_per_px=self._timescale_per_px)
                 batch.setZValue(1)
                 self.addItem(batch)
@@ -4074,6 +4150,7 @@ class TimelineScene(QGraphicsScene):
                 batch = _BatchRowItem(
                     QRectF(x_left, label_row_h, col_w, timeline_h),
                     seg_data, trace.time_scale,
+                    trace=trace,
                     xs=xs, time_min=trace.time_min)
                 batch.setZValue(1)
                 self.addItem(batch)
@@ -4160,6 +4237,7 @@ class TimelineScene(QGraphicsScene):
                     QRectF(x_left2, label_row_h, col_w, timeline_h),
                     seg_data, trace.time_scale,
                     label_font=font_sm, label_fm=fm_sm, label_text=disp,
+                    trace=trace,
                     xs=xs, time_min=trace.time_min, timescale_per_px=self._timescale_per_px)
                 batch.setZValue(1)
                 self.addItem(batch)
@@ -4456,13 +4534,15 @@ class _BatchRowItem(QGraphicsItem):
     def __init__(self, bounding_rect: QRectF, seg_data: list, time_scale: str,
                  label_font=None, label_fm=None, label_text: str = "",
                  presorted: bool = False, xs: Optional[list] = None,
-                 time_min: int = 0, timescale_per_px: float = 0.0):
+                 time_min: int = 0, timescale_per_px: float = 0.0,
+                 trace: Optional["BtfTrace"] = None):
         super().__init__()
         self._bounding_rect = bounding_rect
         self._seg_data      = seg_data      # [(QRectF, QBrush, QPen, seg|None)]
         self._time_scale    = time_scale
         self._time_min      = time_min
         self._timescale_per_px     = timescale_per_px
+        self._trace         = trace
         self._label_font    = label_font
         self._label_fm      = label_fm
         self._label_text    = label_text
@@ -4778,13 +4858,27 @@ class _BatchRowItem(QGraphicsItem):
                 seg = self._seg_data[idx][3]
                 if seg is not None:
                     dur = seg.end - seg.start
-                    total_segs = len(self._seg_data)
                     tip = (f"<b>{seg.task}</b><br>"
                            f"Core: {seg.core}<br>"
-                           f"Segment: #{idx + 1}/{total_segs}<br>"
                            f"Start: {_format_time(seg.start, self._time_scale)}<br>"
                            f"End:   {_format_time(seg.end,   self._time_scale)}<br>"
-                           f"Duration: {_format_time(dur,                     self._time_scale)}")
+                           f"Duration: {_format_time(dur, self._time_scale)}")
+                    tr = self._trace
+                    if tr is not None:
+                        prev, nxt, seg_idx, total = _seg_core_neighbors(tr, seg)
+                        if seg_idx > 0:
+                            tip += f"<br>Slice: #{seg_idx}/{total} on {seg.core}"
+                        if prev is not None:
+                            _, _, pnm = _parse_task_name(prev.task)
+                            tip += (f"<br>← Prev on core: {_task_display_name(prev.task)} "
+                                    f"({_format_time(prev.end, self._time_scale)})")
+                        if nxt is not None:
+                            tip += (f"<br>→ Next on core: {_task_display_name(nxt.task)} "
+                                    f"({_format_time(nxt.start, self._time_scale)})")
+                        if prev is not None:
+                            gap = seg.start - prev.end
+                            if gap > 0:
+                                tip += f"<br>Gap before: {_format_time(gap, self._time_scale)}"
                     _get_popup().show_at(event.screenPos(), tip)
                     super().hoverMoveEvent(event)
                     return
@@ -8433,10 +8527,17 @@ class _StatsPanel(QWidget):
         self._is_dark: bool = True
         self._plot_dlg = None   # keep reference to prevent GC
         self._plot_mk: Optional[str] = None
-        self._plot_kind: Optional[str] = None   # "exec" or "inter"
+        self._plot_kind: Optional[str] = None   # "exec", "block", or "inter"
         self._trace: Optional["BtfTrace"] = None
         self._cursor_times: List[int] = []
         self._scope_to_cursors: bool = True
+        self._section_collapsed: Dict[str, bool] = {
+            "cores": False,
+            "tasks": False,
+            "exec": False,
+            "block": False,
+            "inter": False,
+        }
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         scope_row = QHBoxLayout()
@@ -8514,15 +8615,16 @@ class _StatsPanel(QWidget):
         self._scope_cb.blockSignals(True)
         self._scope_cb.setEnabled(can_scope)
         if not can_scope:
+            self._scope_to_cursors = False
             self._scope_cb.setChecked(False)
         else:
             self._scope_cb.setChecked(self._scope_to_cursors)
         self._scope_cb.blockSignals(False)
         self._update_scope_header()
         scoped = self._stats_range() is not None
-        if refresh_stats and self._trace is not None and scoped:
+        if refresh_stats and self._trace is not None and (scoped or not can_scope):
             self.rebuild(self._trace)
-        if scoped:
+        if self._plot_dlg is not None and self._plot_dlg.isVisible():
             self._refresh_open_plot()
 
     def _on_scope_toggled(self, checked: bool) -> None:
@@ -8590,7 +8692,20 @@ class _StatsPanel(QWidget):
             pts = [(s.start, s.end - s.start, s)
                    for s in segs if s.end > s.start]
             title = f"{name} — Execution Time{scope}"
-        else:
+        elif kind == "block":
+            ordered = sorted(segs, key=lambda s: s.start)
+            pts = []
+            for i in range(1, len(ordered)):
+                prev, nxt = ordered[i - 1], ordered[i]
+                if lo is not None and hi is not None:
+                    if not (_seg_fully_in_range(prev, lo, hi)
+                            and _seg_fully_in_range(nxt, lo, hi)):
+                        continue
+                gap = nxt.start - prev.end
+                if gap > 0:
+                    pts.append((nxt.start, gap, nxt))
+            title = f"{name} — Blocking Time{scope}"
+        elif kind == "inter":
             starts = sorted(s.start for s in segs)
             start_to_seg = {s.start: s for s in segs}
             pts = []
@@ -8602,6 +8717,8 @@ class _StatsPanel(QWidget):
                 pts.append((starts[i], starts[i] - starts[i - 1],
                             start_to_seg.get(starts[i])))
             title = f"{name} — Inter-Arrival Time{scope}"
+        else:
+            return None
         return title, pts, color
 
     def _on_plot_dialog_closed(self) -> None:
@@ -8684,6 +8801,37 @@ class _StatsPanel(QWidget):
         f = QFrame()
         f.setFrameShape(QFrame.HLine)
         return f
+
+    def _toggle_section(self, section_id: str) -> None:
+        self._section_collapsed[section_id] = not self._section_collapsed.get(
+            section_id, False)
+        if self._trace is not None:
+            self.rebuild(self._trace)
+
+    def _add_collapsible_section(self, section_id: str, title: str, ui_fs: str,
+                               populate) -> None:
+        """Add a collapsible statistics section (parity with web StatisticsPanel)."""
+        self._ilay.addWidget(self._sep())
+        collapsed = self._section_collapsed.get(section_id, False)
+        chevron = "\u25b6" if collapsed else "\u25bc"
+        hdr = QPushButton(f"  {chevron}  {title}")
+        hdr.setFlat(True)
+        hdr.setCursor(Qt.PointingHandCursor)
+        hdr.setStyleSheet(
+            f"text-align:left; padding:2px 0; border:none; background:transparent;"
+            f" font-weight:bold; font-size:{ui_fs};"
+        )
+        hdr.clicked.connect(
+            lambda _checked=False, sid=section_id: self._toggle_section(sid))
+        self._ilay.addWidget(hdr)
+        if collapsed:
+            return
+        body = QWidget()
+        blay = QVBoxLayout(body)
+        blay.setContentsMargins(0, 0, 0, 0)
+        blay.setSpacing(2)
+        populate(blay)
+        self._ilay.addWidget(body)
 
     def _core_util_rows(self, trace: "BtfTrace",
                         lo: Optional[int] = None, hi: Optional[int] = None) -> List[Tuple[str, float]]:
@@ -8841,6 +8989,53 @@ class _StatsPanel(QWidget):
         rows.sort(key=lambda r: (-r[2], r[1].lower()))
         return rows
 
+    def _blocking_time_rows(self, trace: "BtfTrace",
+                            lo: Optional[int] = None, hi: Optional[int] = None
+                            ) -> List[Tuple[str, int, str, str, str, str]]:
+        rows: List[Tuple[str, int, str, str, str, str]] = []
+        for mk, segs in trace.seg_map_by_merge_key.items():
+            if len(segs) < 2:
+                continue
+            raw = trace.task_repr.get(mk, mk)
+            _, _, tname = _parse_task_name(raw)
+            if _is_idle_task_name(tname) or tname == "TICK":
+                continue
+            samples = _blocking_time_samples(segs, lo, hi)
+            summary = self._summarize_samples(samples, trace.time_scale)
+            if summary is None:
+                continue
+            mn, avg, mx, p95 = summary
+            rows.append((mk, _task_display_name(raw), len(samples), mn, avg, mx, p95))
+        rows.sort(key=lambda r: (-r[2], r[1].lower()))
+        return rows
+
+    def _blocking_time_rows_export(self, trace: "BtfTrace",
+                                   lo: Optional[int] = None, hi: Optional[int] = None
+                                   ) -> List[Tuple[str, int, str, str, str, str, str, str]]:
+        rows: List[Tuple[str, int, str, str, str, str, str, str]] = []
+        for mk, segs in trace.seg_map_by_merge_key.items():
+            if len(segs) < 2:
+                continue
+            raw = trace.task_repr.get(mk, mk)
+            _, _, tname = _parse_task_name(raw)
+            if _is_idle_task_name(tname) or tname == "TICK":
+                continue
+            samples = _blocking_time_samples(segs, lo, hi)
+            summary = self._summarize_samples_export(samples, trace.time_scale)
+            if summary is None:
+                continue
+            mn, avg, tmean, mx, p50, p95 = summary
+            rows.append((mk, _task_display_name(raw), len(samples), mn, avg, tmean, mx, p50, p95))
+        rows.sort(key=lambda r: (-r[2], r[1].lower()))
+        return rows
+
+    def _on_wcet_click(self, trace: "BtfTrace", mk: str,
+                       lo: Optional[int], hi: Optional[int]) -> None:
+        segs = trace.seg_map_by_merge_key.get(mk, [])
+        seg = _find_wcet_segment(segs, lo, hi)
+        if seg is not None:
+            self.segment_select.emit(seg)
+
     def _exec_slice_rows_export(self, trace: "BtfTrace",
                                 lo: Optional[int] = None, hi: Optional[int] = None) -> List[Tuple[str, int, float, str, str, str, str, str, str]]:
         rows: List[Tuple[str, int, float, str, str, str, str, str, str]] = []
@@ -8892,7 +9087,7 @@ class _StatsPanel(QWidget):
 
     def _build_stats_table(self, rows: List[tuple], ui_fs: str, empty_hint: str,
                            include_cpu: bool = False,
-                           on_row_click=None) -> QWidget:
+                           on_row_click=None, on_max_click=None) -> QWidget:
         host = QWidget()
         lay = QVBoxLayout(host)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -8939,12 +9134,15 @@ class _StatsPanel(QWidget):
                     item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 else:
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                if on_max_click is not None and c == (5 if include_cpu else 4):
+                    item.setToolTip("Click to jump to longest slice (WCET)")
+                    item.setForeground(QBrush(QColor("#88AAFF")))
                 table.setItem(r, c, item)
 
-            if on_row_click is not None:
+            if on_row_click is not None or on_max_click is not None:
                 for c in range(cols):
                     item = table.item(r, c)
-                    if item:
+                    if item and on_row_click is not None and on_max_click is None:
                         item.setToolTip("Click to view distribution chart")
 
         table.resizeColumnsToContents()
@@ -8956,9 +9154,15 @@ class _StatsPanel(QWidget):
         table.setAlternatingRowColors(False)
         table.setShowGrid(False)
         table.setSortingEnabled(False)
-        if on_row_click is not None:
-            table.cellClicked.connect(
-                lambda r, c, _rows=rows: on_row_click(_rows[r][0]))
+        _max_col = 5 if include_cpu else 4
+        if on_row_click is not None or on_max_click is not None:
+            def _cell_clicked(r: int, c: int, _rows=rows) -> None:
+                mk = _rows[r][0]
+                if on_max_click is not None and c == _max_col:
+                    on_max_click(mk)
+                elif on_row_click is not None:
+                    on_row_click(mk)
+            table.cellClicked.connect(_cell_clicked)
             table.setCursor(Qt.PointingHandCursor)
         table.setMinimumHeight(min(180, 20 + (len(rows) * 16)))
         table.setMaximumHeight(220)
@@ -9007,9 +9211,27 @@ class _StatsPanel(QWidget):
         task_rows = self._task_cpu_rows(trace, lo=lo, hi=hi)
         exec_rows = self._exec_slice_rows_export(trace, lo, hi)
         inter_rows = self._inter_arrival_rows_export(trace, lo, hi)
+        block_rows = self._blocking_time_rows_export(trace, lo, hi)
+        ctx_count, core_gaps = _scheduling_stats(trace, lo, hi)
 
         def _esc(v: object) -> str:
             return html.escape(str(v), quote=True)
+
+        sched_kpi = ""
+        if ctx_count > 0 or core_gaps:
+            gap_avg = int(round(sum(core_gaps) / len(core_gaps))) if core_gaps else 0
+            gap_max = max(core_gaps) if core_gaps else 0
+            sched_kpi = (
+                f"<article class=\"kpi\"><div class=\"k\">Context switches{_esc(scope_title)}</div>"
+                f"<div class=\"v\">{ctx_count:,}</div></article>"
+            )
+            if core_gaps:
+                sched_kpi += (
+                    f"<article class=\"kpi\"><div class=\"k\">Core gap avg{_esc(scope_title)}</div>"
+                    f"<div class=\"v\">{_esc(_format_time(gap_avg, trace.time_scale))}</div></article>"
+                    f"<article class=\"kpi\"><div class=\"k\">Core gap max{_esc(scope_title)}</div>"
+                    f"<div class=\"v\">{_esc(_format_time(gap_max, trace.time_scale))}</div></article>"
+                )
 
         def _render_stats_table(title: str,
                                 rows: List[Tuple[str, int, str, str, str, str, str, str]]) -> str:
@@ -9151,6 +9373,7 @@ class _StatsPanel(QWidget):
             <article class=\"kpi\"><div class=\"k\">Tasks</div><div class=\"v\">{task_count:,}</div></article>
             <article class=\"kpi\"><div class=\"k\">Segments</div><div class=\"v\">{seg_count:,}</div></article>
             <article class=\"kpi\"><div class=\"k\">STI Events</div><div class=\"v\">{sti_count:,}</div></article>
+            {sched_kpi}
         </section>
 
         <section class=\"report-card notes\">
@@ -9159,6 +9382,8 @@ class _StatsPanel(QWidget):
             {range_note}
             <li><strong>Execution Time Per Slice:</strong> Duration of each continuous task run between two context switches. Lower and tighter values indicate more predictable execution.</li>
             <li><strong>Inter-Arrival Time:</strong> Time between consecutive activations of the same task (slice start to next slice start). It reflects activation cadence and jitter.</li>
+            <li><strong>Blocking Time:</strong> Off-CPU gap between the end of one slice and the start of the next for the same task. High values may indicate preemption, blocking on a resource, or long scheduling delays.</li>
+            <li><strong>Context switches:</strong> Count of segment boundaries on all cores whose start time falls inside the statistics scope.</li>
             <li><strong>Min (Minimum):</strong> The fastest execution time recorded. It represents the best-case scenario under zero system load.</li>
             <li><strong>Max (Maximum):</strong> The slowest execution time recorded. It identifies worst-case bottlenecks, spikes, or resource contention.</li>
             <li><strong>Average (Mean):</strong> Total execution time divided by the number of slices. It shows general performance but is heavily skewed by extreme outliers.</li>
@@ -9184,6 +9409,7 @@ class _StatsPanel(QWidget):
     </table>
   </section>
     {_render_exec_table(exec_rows)}
+    {_render_stats_table(f'Blocking Time (off-CPU gap){scope_title}', block_rows)}
     {_render_stats_table(f'Inter-Arrival Time{scope_title}', inter_rows)}
         <div class=\"report-foot\">Generated by BTF Viewer</div>
     </div>
@@ -9248,6 +9474,8 @@ class _StatsPanel(QWidget):
         task_rows = self._task_cpu_rows(trace, lo=lo, hi=hi)
         exec_rows = self._exec_slice_rows_export(trace, lo, hi)
         inter_rows = self._inter_arrival_rows_export(trace, lo, hi)
+        block_rows = self._blocking_time_rows_export(trace, lo, hi)
+        ctx_count, core_gaps = _scheduling_stats(trace, lo, hi)
 
         def _us(v: object) -> str:
             return str(v).replace("µs", "us").replace("μs", "us")
@@ -9264,6 +9492,11 @@ class _StatsPanel(QWidget):
                 writer.writerow(["Tasks", task_count])
                 writer.writerow(["Segments", seg_count])
                 writer.writerow(["STI Events", sti_count])
+                writer.writerow([f"Context switches{scope_suffix}", ctx_count])
+                if core_gaps:
+                    gap_avg = int(round(sum(core_gaps) / len(core_gaps)))
+                    writer.writerow([f"Core gap avg{scope_suffix}", _us(_format_time(gap_avg, trace.time_scale))])
+                    writer.writerow([f"Core gap max{scope_suffix}", _us(_format_time(max(core_gaps), trace.time_scale))])
 
                 writer.writerow([])
                 writer.writerow([f"Core Utilisation (excl. IDLE/TICK){scope_suffix}"])
@@ -9291,6 +9524,15 @@ class _StatsPanel(QWidget):
                         writer.writerow([name, runs, f"{cpu:.1f}%", _us(mn), _us(avg), _us(tmean), _us(mx), _us(p50), _us(p95)])
                 else:
                     writer.writerow(["No data", "", "", "", "", "", "", "", ""])
+
+                writer.writerow([])
+                writer.writerow([f"Blocking Time (off-CPU gap){scope_suffix}"])
+                writer.writerow(["Task", "Gaps", "Min", "Avg", "TrimMean(5%)", "Max", "p50", "p95"])
+                if block_rows:
+                    for mk_r, name, runs, mn, avg, tmean, mx, p50, p95 in block_rows:
+                        writer.writerow([name, runs, _us(mn), _us(avg), _us(tmean), _us(mx), _us(p50), _us(p95)])
+                else:
+                    writer.writerow(["No data", "", "", "", "", "", "", ""])
 
                 writer.writerow([])
                 writer.writerow([f"Inter-Arrival Time{scope_suffix}"])
@@ -9346,20 +9588,93 @@ class _StatsPanel(QWidget):
             ui_fs=_fs,
         ))
 
+        ctx_count, core_gaps = _scheduling_stats(trace, lo, hi)
+        if ctx_count > 0:
+            sched_parts = [f"Context switches: {ctx_count:,}{scope}"]
+            if core_gaps:
+                gap_avg = int(round(sum(core_gaps) / len(core_gaps)))
+                sched_parts.append(
+                    f"Core gap avg: {_format_time(gap_avg, trace.time_scale)}")
+                sched_parts.append(
+                    f"max: {_format_time(max(core_gaps), trace.time_scale)}")
+            self._ilay.addWidget(self._lbl(
+                "  |  ".join(sched_parts),
+                color="#888888",
+                ui_fs=_fs,
+            ))
+
         # -- Core utilisation (excl. IDLE) ---------------------------------
         if trace.core_names:
-            self._ilay.addWidget(self._sep())
-            self._ilay.addWidget(self._lbl(
-                f"Core Utilisation (excl. IDLE/TICK){scope}:", bold=True, ui_fs=_fs))
-            for core, pct in self._core_util_rows(trace, lo, hi):
+            def _populate_cores(blay: QVBoxLayout) -> None:
+                for core, pct in self._core_util_rows(trace, lo, hi):
+                    row = QWidget()
+                    hlay = QHBoxLayout(row)
+                    hlay.setContentsMargins(0, 0, 0, 0)
+                    hlay.setSpacing(8)
+
+                    core_lbl = self._lbl(f"  {core}:", ui_fs=_fs)
+                    core_lbl.setMinimumWidth(72)
+                    hlay.addWidget(core_lbl)
+
+                    pbar = QProgressBar()
+                    pbar.setRange(0, 1000)
+                    pbar.setValue(int(round(max(0.0, min(100.0, pct)) * 10.0)))
+                    pbar.setTextVisible(False)
+                    pbar.setFixedHeight(14)
+                    pbar.setStyleSheet("""
+                        QProgressBar {
+                            border: 1px solid #888888;
+                            border-radius: 4px;
+                            background: palette(alternateBase);
+                        }
+                        QProgressBar::chunk {
+                            background-color: #5FCF6F;
+                            border-radius: 3px;
+                        }
+                    """)
+                    hlay.addWidget(pbar, 1)
+
+                    pct_lbl = self._lbl(f"{pct:.1f}%", color="#77BB77", ui_fs=_fs)
+                    pct_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                    hlay.addWidget(pct_lbl)
+                    hlay.addStretch(1)
+
+                    blay.addWidget(row)
+
+            self._add_collapsible_section(
+                "cores",
+                f"Core Utilisation (excl. IDLE/TICK){scope}",
+                _fs,
+                _populate_cores,
+            )
+
+        # -- Top tasks by CPU time (excl. IDLE, top 10) -------------------
+        def _populate_tasks(blay: QVBoxLayout) -> None:
+            task_rows = self._task_cpu_rows(trace, lo=lo, hi=hi)
+            if not task_rows:
+                blay.addWidget(self._lbl("No user tasks found", color="#888888", ui_fs=_fs))
+                return
+            for mk, disp, pct in task_rows:
                 row = QWidget()
                 hlay = QHBoxLayout(row)
                 hlay.setContentsMargins(0, 0, 0, 0)
                 hlay.setSpacing(8)
 
-                core_lbl = self._lbl(f"  {core}:", ui_fs=_fs)
-                core_lbl.setMinimumWidth(72)
-                hlay.addWidget(core_lbl)
+                name_btn = QPushButton(f"  {disp}")
+                name_btn.setFlat(True)
+                name_btn.setCursor(Qt.PointingHandCursor)
+                name_btn.setMinimumWidth(100)
+                name_btn.setMaximumWidth(160)
+                name_btn.setToolTip(f"Click to highlight \u2018{disp}\u2019 in the timeline")
+                name_btn.setStyleSheet(
+                    f"text-align:left; padding:0 2px; background:transparent;"
+                    f" border:none; font-size:{_fs};"
+                )
+                _fm = name_btn.fontMetrics()
+                elided = _fm.elidedText(f"  {disp}", Qt.ElideRight, 160)
+                name_btn.setText(elided)
+                name_btn.clicked.connect(lambda checked=False, key=mk: self.task_clicked.emit(key))
+                hlay.addWidget(name_btn)
 
                 pbar = QProgressBar()
                 pbar.setRange(0, 1000)
@@ -9373,97 +9688,85 @@ class _StatsPanel(QWidget):
                         background: palette(alternateBase);
                     }
                     QProgressBar::chunk {
-                        background-color: #5FCF6F;
+                        background-color: #5B9BD5;
                         border-radius: 3px;
                     }
                 """)
                 hlay.addWidget(pbar, 1)
 
-                pct_lbl = self._lbl(f"{pct:.1f}%", color="#77BB77", ui_fs=_fs)
+                pct_lbl = self._lbl(f"{pct:.1f}%", color="#6AAADD", ui_fs=_fs)
                 pct_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 hlay.addWidget(pct_lbl)
                 hlay.addStretch(1)
 
-                self._ilay.addWidget(row)
+                blay.addWidget(row)
 
-        # -- Top tasks by CPU time (excl. IDLE, top 10) -------------------
-        self._ilay.addWidget(self._sep())
-        self._ilay.addWidget(self._lbl(
-            f"Top Tasks by CPU (excl. IDLE/TICK){scope}:", bold=True, ui_fs=_fs))
-        for mk, disp, pct in self._task_cpu_rows(trace, lo=lo, hi=hi):
-
-            row = QWidget()
-            hlay = QHBoxLayout(row)
-            hlay.setContentsMargins(0, 0, 0, 0)
-            hlay.setSpacing(8)
-
-            name_btn = QPushButton(f"  {disp}")
-            name_btn.setFlat(True)
-            name_btn.setCursor(Qt.PointingHandCursor)
-            name_btn.setMinimumWidth(100)
-            name_btn.setMaximumWidth(160)
-            name_btn.setToolTip(f"Click to highlight \u2018{disp}\u2019 in the timeline")
-            name_btn.setStyleSheet(
-                f"text-align:left; padding:0 2px; background:transparent;"
-                f" border:none; font-size:{_fs};"
-            )
-            _fm = name_btn.fontMetrics()
-            elided = _fm.elidedText(f"  {disp}", Qt.ElideRight, 160)
-            name_btn.setText(elided)
-            name_btn.clicked.connect(lambda checked=False, key=mk: self.task_clicked.emit(key))
-            hlay.addWidget(name_btn)
-
-            pbar = QProgressBar()
-            pbar.setRange(0, 1000)
-            pbar.setValue(int(round(max(0.0, min(100.0, pct)) * 10.0)))
-            pbar.setTextVisible(False)
-            pbar.setFixedHeight(14)
-            pbar.setStyleSheet("""
-                QProgressBar {
-                    border: 1px solid #888888;
-                    border-radius: 4px;
-                    background: palette(alternateBase);
-                }
-                QProgressBar::chunk {
-                    background-color: #5B9BD5;
-                    border-radius: 3px;
-                }
-            """)
-            hlay.addWidget(pbar, 1)
-
-            pct_lbl = self._lbl(f"{pct:.1f}%", color="#6AAADD", ui_fs=_fs)
-            pct_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            hlay.addWidget(pct_lbl)
-            hlay.addStretch(1)
-
-            self._ilay.addWidget(row)
+        self._add_collapsible_section(
+            "tasks",
+            f"Top Tasks by CPU (excl. IDLE/TICK){scope}",
+            _fs,
+            _populate_tasks,
+        )
 
         # -- Execution time per slice -------------------------------------
-        self._ilay.addWidget(self._sep())
-        self._ilay.addWidget(self._lbl(
-            f"Execution Time Per Slice{scope}:", bold=True, ui_fs=_fs))
         _exec_rows = self._exec_slice_rows(trace, lo, hi)
         empty_exec = ("No slices fully inside cursor range" if scope
                       else "No user-task slices found")
-        self._ilay.addWidget(self._build_stats_table(
-            _exec_rows,
+
+        def _populate_exec(blay: QVBoxLayout) -> None:
+            blay.addWidget(self._build_stats_table(
+                _exec_rows,
+                _fs,
+                empty_exec,
+                include_cpu=True,
+                on_row_click=lambda mk: self._open_plot(trace, mk, "exec"),
+                on_max_click=lambda mk: self._on_wcet_click(trace, mk, lo, hi),
+            ))
+
+        self._add_collapsible_section(
+            "exec",
+            f"Execution Time Per Slice{scope}",
             _fs,
-            empty_exec,
-            include_cpu=True,
-            on_row_click=lambda mk: self._open_plot(trace, mk, "exec"),
-        ))
+            _populate_exec,
+        )
+
+        # -- Blocking time (off-CPU between activations) --------------------
+        _block_rows = self._blocking_time_rows(trace, lo, hi)
+        empty_block = ("No off-CPU gaps fully inside cursor range" if scope
+                       else "Need at least 2 activations per task")
+
+        def _populate_block(blay: QVBoxLayout) -> None:
+            blay.addWidget(self._build_stats_table(
+                _block_rows,
+                _fs,
+                empty_block,
+                on_row_click=lambda mk: self._open_plot(trace, mk, "block"),
+            ))
+
+        self._add_collapsible_section(
+            "block",
+            f"Blocking Time (off-CPU gap){scope}",
+            _fs,
+            _populate_block,
+        )
 
         # -- Inter-arrival time -------------------------------------------
-        self._ilay.addWidget(self._sep())
-        self._ilay.addWidget(self._lbl(
-            f"Inter-Arrival Time{scope}:", bold=True, ui_fs=_fs))
         _inter_rows = self._inter_arrival_rows(trace, lo, hi)
-        self._ilay.addWidget(self._build_stats_table(
-            _inter_rows,
+
+        def _populate_inter(blay: QVBoxLayout) -> None:
+            blay.addWidget(self._build_stats_table(
+                _inter_rows,
+                _fs,
+                "Need at least 2 activations per task",
+                on_row_click=lambda mk: self._open_plot(trace, mk, "inter"),
+            ))
+
+        self._add_collapsible_section(
+            "inter",
+            f"Inter-Arrival Time{scope}",
             _fs,
-            "Need at least 2 activations per task",
-            on_row_click=lambda mk: self._open_plot(trace, mk, "inter"),
-        ))
+            _populate_inter,
+        )
         self._ilay.addStretch()
 
 # ---------------------------------------------------------------------------
@@ -11363,6 +11666,7 @@ class _CpuLoadGraph(QWidget):
         self._avg_load:       Dict[str, float]              = {}
         self._bin_w_ns: float                               = 1.0
         self._font_size: int                                = 8
+        self._hover_y: int                                  = -1
         self.setMinimumSize(40, 40)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.setMouseTracking(True)
@@ -11587,6 +11891,69 @@ class _CpuLoadGraph(QWidget):
             return self._task_core_bins.get(task, {}).get(key)
         return self._core_bins.get(key)
 
+    def _bin_indices_for_ns_range(self, ns_lo: int, ns_hi: int) -> Tuple[int, int]:
+        n = self._NUM_BINS
+        t_min = self._trace.time_min
+        b0 = max(0, min(n - 1, int((ns_lo - t_min) / self._bin_w_ns)))
+        b1 = max(0, min(n - 1, int((ns_hi - t_min) / self._bin_w_ns)))
+        if b1 < b0:
+            b0, b1 = b1, b0
+        return b0, b1
+
+    def _avg_bins_in_ns_range(self, bins: Optional[List[float]],
+                              ns_lo: int, ns_hi: int) -> float:
+        if not bins:
+            return 0.0
+        b0, b1 = self._bin_indices_for_ns_range(ns_lo, ns_hi)
+        sl = bins[b0:b1 + 1]
+        return sum(sl) / len(sl) if sl else 0.0
+
+    def _load_at_ns(self, bins: Optional[List[float]], ns: int) -> float:
+        if not bins:
+            return 0.0
+        b0, _ = self._bin_indices_for_ns_range(ns, ns)
+        return bins[b0]
+
+    def _cursor_range_ns(self, scene) -> Optional[Tuple[int, int]]:
+        times = getattr(scene, '_cursor_times', None) or []
+        if len(times) < 2:
+            return None
+        s = sorted(times)
+        lo, hi = s[0], s[-1]
+        if hi <= lo:
+            return None
+        return lo, hi
+
+    def _row_at_y(self, y: int) -> Optional[Tuple[str, str, int, int]]:
+        """Return (kind, key, row_y, row_h) for plot row at widget *y*, or None."""
+        _TITLE_H = 22
+        ry = _TITLE_H
+        for kind, key, _, _ in self._get_rows():
+            rh = self._row_effective_h(kind, key)
+            if ry <= y < ry + rh:
+                return kind, key, ry, rh
+            ry += rh + CPU_LOAD_ROW_GAP
+        return None
+
+    def _draw_load_badge(self, painter: QPainter, x: int, row_y: int,
+                         text: str, dark: bool, *, full: bool = False) -> None:
+        """Draw a small load/time badge anchored near *x* on a CPU load row."""
+        fm = painter.fontMetrics()
+        tw = fm.horizontalAdvance(text) + 8
+        bx = max(self._view._scene._label_width + 2,
+                 min(self.width() - tw - 2, x - tw // 2))
+        by = row_y + 2
+        bg = QColor(40, 40, 40, 210) if dark else QColor(255, 255, 255, 230)
+        fg = QColor("#FFFFFF") if dark else QColor("#111111")
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(bg)
+        painter.drawRoundedRect(bx, by, tw, 12, 2, 2)
+        painter.setPen(fg)
+        sf = QFont(painter.font())
+        sf.setPointSize(max(5, self._font_size - (1 if full else 2)))
+        painter.setFont(sf)
+        painter.drawText(QRect(bx + 4, by, tw - 8, 12), Qt.AlignVCenter | Qt.AlignLeft, text)
+
     def _visible_time_ns_range(self, scene) -> Tuple[int, int]:
         if self._trace is None:
             return 0, 1
@@ -11666,8 +12033,10 @@ class _CpuLoadGraph(QWidget):
             return
         hover_ns = self._time_ns_at_pos(event.pos())
         if hover_ns is None:
+            self._hover_y = -1
             scene.clear_hover_line()
         else:
+            self._hover_y = event.y()
             scene._hover_ns = hover_ns
             scene._draw_hover_line()
             self.update()
@@ -11676,6 +12045,7 @@ class _CpuLoadGraph(QWidget):
     def leaveEvent(self, event) -> None:  # noqa: N802
         scene = self._view._scene
         if scene is not None:
+            self._hover_y = -1
             scene.clear_hover_line()
         super().leaveEvent(event)
 
@@ -11750,6 +12120,8 @@ class _CpuLoadGraph(QWidget):
 
         vis_ns_lo, vis_ns_hi = self._visible_time_ns_range(scene)
         vis_span = max(1, vis_ns_hi - vis_ns_lo)
+        cursor_rng = self._cursor_range_ns(scene)
+        scale = self._trace.time_scale
 
         # Pre-compute pixel->bin mapping once (reused for every row)
         sx_to_bi: Dict[int, int] = {}
@@ -11783,8 +12155,12 @@ class _CpuLoadGraph(QWidget):
             effective_h = min(rh, h - ry)
             collapsed   = (kind == "core" and key in self._collapsed_cores)
             bins_for_pct = self._bins_for_row(kind, key)
-            avg_pct = (sum(bins_for_pct) / len(bins_for_pct)) if bins_for_pct else 0.0
-            pct_text = f"{avg_pct * 100:.0f}%"
+            vis_avg = self._avg_bins_in_ns_range(bins_for_pct, vis_ns_lo, vis_ns_hi)
+            pct_text = f"{vis_avg * 100:.0f}%"
+            if cursor_rng is not None:
+                cr_avg = self._avg_bins_in_ns_range(
+                    bins_for_pct, cursor_rng[0], cursor_rng[1])
+                pct_text = f"{pct_text} · C:{cr_avg * 100:.0f}%"
             indicator   = "▶" if collapsed else "▼"
 
             # -- Label: white triangle -> coloured circle -> white name -> green % -
@@ -11807,13 +12183,25 @@ class _CpuLoadGraph(QWidget):
             # 3. Core name (white)
             name_x = dot_cx + dot_r + 4
             p.setPen(white_col)
-            p.drawText(QRect(name_x, ry, lw - name_x - 44, effective_h), Qt.AlignVCenter | Qt.AlignLeft, lbl_text)
+            p.drawText(QRect(name_x, ry, lw - name_x - 72, effective_h), Qt.AlignVCenter | Qt.AlignLeft, lbl_text)
 
-            # 4. Percentage (green)
+            # 4. Percentage (green) — visible-window avg; · C:… when 2+ cursors
             p.setPen(green_col)
-            p.drawText(QRect(lw - 42, ry, 38, effective_h), Qt.AlignVCenter | Qt.AlignRight, pct_text)
+            p.drawText(QRect(lw - 72, ry, 68, effective_h), Qt.AlignVCenter | Qt.AlignRight, pct_text)
 
             if not collapsed:
+                # Cursor-range shading (behind bars)
+                if cursor_rng is not None:
+                    cr_lo, cr_hi = cursor_rng
+                    shade_lo = max(vis_ns_lo, cr_lo)
+                    shade_hi = min(vis_ns_hi, cr_hi)
+                    if shade_hi > shade_lo:
+                        sx0 = self._time_overlay_x(shade_lo, scene, vis_ns_lo, vis_ns_hi)
+                        sx1 = self._time_overlay_x(shade_hi, scene, vis_ns_lo, vis_ns_hi)
+                        if sx1 > sx0:
+                            shade = QColor(68, 153, 255, 38) if dark else QColor(42, 111, 178, 42)
+                            p.fillRect(sx0, ry + 1, sx1 - sx0, effective_h - 2, shade)
+
                 # Grid lines at 25 / 50 / 75 / 100 % with labels
                 # "0" at bottom; "100" omitted (would overflow above the row)
                 p.setFont(sf_pct)
@@ -11868,8 +12256,9 @@ class _CpuLoadGraph(QWidget):
                     dashed=True, width=1.2,
                 )
 
-        # -- Overlay: hover cursor --------------------------------------
+        # -- Overlay: hover cursor + per-row load badges -------------------
         hover_ns = getattr(scene, '_hover_ns', None)
+        hover_row = self._row_at_y(self._hover_y) if self._hover_y >= 0 else None
         if hover_ns is not None and tpp > 0:
             sx = self._time_overlay_x(hover_ns, scene, vis_ns_lo, vis_ns_hi)
             hov_col = QColor(255, 255, 255, 80) if dark else QColor(0, 0, 0, 80)
@@ -11877,6 +12266,23 @@ class _CpuLoadGraph(QWidget):
                 p, scene, sx, _TITLE_H, w, hov_col,
                 dashed=True, width=1.0,
             )
+            ry_h = _TITLE_H
+            for kind, key, _lbl_text, _color in rows:
+                rh = self._row_effective_h(kind, key)
+                collapsed = (kind == "core" and key in self._collapsed_cores)
+                if not collapsed and lw <= sx < w:
+                    bins_h = self._bins_for_row(kind, key)
+                    load = self._load_at_ns(bins_h, hover_ns)
+                    load_pct = f"{load * 100:.0f}%"
+                    is_primary = (hover_row is not None
+                                  and hover_row[0] == kind and hover_row[1] == key)
+                    if is_primary:
+                        badge = (f"{load_pct} · "
+                                 f"{_format_time(hover_ns, scale)}")
+                    else:
+                        badge = load_pct
+                    self._draw_load_badge(p, sx, ry_h, badge, dark, full=is_primary)
+                ry_h += rh + CPU_LOAD_ROW_GAP
 
         # Label column separator (full height)
         p.setPen(QPen(sepc, 1))
@@ -13558,9 +13964,10 @@ class MainWindow(QMainWindow):
 
         # --- File actions ---
         _ia("Open",     self._on_open,         _IC_OPEN,     "Open BTF trace file  (Ctrl+O)")
-        _ia("Save PNG", self._on_save_image,   _IC_SAVE,     "Save viewport as PNG  (Ctrl+S)")
+        _ia("Save PNG", self._on_save_image,   _IC_SAVE,     "Open snapshot editor  (Ctrl+S)")
         _ia("Save SVG", self._on_save_svg,     _IC_SAVE_SVG, "Save viewport as SVG  (Ctrl+Shift+S)")
-        _ia("Copy",     self._on_copy_image,   _IC_COPY,     "Copy viewport to clipboard  (Ctrl+Shift+C)")
+        _ia("Shot",     self._open_snapshot_editor, _IC_SHOT,
+            "Capture viewport snapshot for annotation  (Ctrl+S)")
         tb.addSeparator()
 
         # --- Layout and zoom ---
@@ -14557,11 +14964,19 @@ class MainWindow(QMainWindow):
         return tl_pix
 
     @_dialog_guard
-    def _on_save_image(self) -> None:
+    def _open_snapshot_editor(self) -> None:
+        """Capture the viewport and open the annotation editor (web Shot parity)."""
         if self._trace is None:
             return
-        dlg = SnapshotEditorDialog(self._capture_viewport_pixmap(), self)
+        pixmap = self._capture_viewport_pixmap()
+        if pixmap.isNull():
+            QMessageBox.warning(self, "Snapshot", "Unable to capture the viewport.")
+            return
+        dlg = SnapshotEditorDialog(pixmap, self)
         _exec_centred(dlg, self)
+
+    def _on_save_image(self) -> None:
+        self._open_snapshot_editor()
 
     @_dialog_guard
     def _on_save_svg(self) -> None:
@@ -15361,7 +15776,7 @@ class MainWindow(QMainWindow):
         sections = [
             ("File", [
                 ("Ctrl+O",       "Open .btf trace file"),
-                ("Ctrl+S",       "Save viewport as PNG"),
+                ("Ctrl+S",       "Open snapshot editor"),
                 ("Ctrl+Shift+C", "Copy viewport to clipboard"),
                 ("Ctrl+Q",       "Quit  (Alt+F4 also works on Windows)"),
             ]),
