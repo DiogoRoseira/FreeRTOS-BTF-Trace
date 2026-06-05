@@ -1,22 +1,38 @@
 <template>
   <div class="stats-panel">
+    <!-- Cursor range scope -->
+    <div class="stats-scope-row">
+      <label
+        class="stats-scope-check"
+        :title="'When two or more cursors are placed, restrict all statistics to the time window from C1 through the last cursor.'"
+      >
+        <input
+          v-model="scopeToCursors"
+          type="checkbox"
+          :disabled="placedCursorCount < 2"
+        >
+        Limit to cursor range (C1–Cn)
+      </label>
+      <span class="stats-scope-label">{{ scopeRangeLabel }}</span>
+    </div>
+
     <!-- Summary -->
     <div class="stats-summary">
       <div class="summary-row">
-        <span class="summary-key">Span</span>
+        <span class="summary-key">Span{{ scopeSuffixStr }}</span>
         <span class="summary-val">{{ spanStr }}</span>
       </div>
       <div class="summary-row">
         <span class="summary-key">Tasks</span>
-        <span class="summary-val">{{ trace.tasks.length }}</span>
+        <span class="summary-val">{{ summaryTaskCount.toLocaleString() }}</span>
       </div>
       <div class="summary-row">
         <span class="summary-key">Segments</span>
-        <span class="summary-val">{{ trace.segments.length.toLocaleString() }}</span>
+        <span class="summary-val">{{ summarySegCount.toLocaleString() }}</span>
       </div>
       <div class="summary-row">
         <span class="summary-key">STI Events</span>
-        <span class="summary-val">{{ trace.stiEvents.length.toLocaleString() }}</span>
+        <span class="summary-val">{{ summaryStiCount.toLocaleString() }}</span>
       </div>
     </div>
 
@@ -43,7 +59,7 @@
             stroke-linejoin="round"
           />
         </svg>
-        Core Utilisation (excl. IDLE/TICK)
+        Core Utilisation (excl. IDLE/TICK){{ scopeSuffixStr }}
       </div>
       <template v-if="!coresCollapsed">
         <div
@@ -85,7 +101,7 @@
           stroke-linejoin="round"
         />
       </svg>
-      Top Tasks by CPU (excl. IDLE/TICK)
+      Top Tasks by CPU (excl. IDLE/TICK){{ scopeSuffixStr }}
     </div>
     <template v-if="!tasksCollapsed">
       <div
@@ -139,14 +155,14 @@
           stroke-linejoin="round"
         />
       </svg>
-      Execution Time Per Slice
+      Execution Time Per Slice{{ scopeSuffixStr }}
     </div>
     <template v-if="!execSliceCollapsed">
       <div
         v-if="execSliceStats.length === 0"
         class="range-hint"
       >
-        No user-task slices found
+        {{ statsRange ? 'No slices fully inside cursor range' : 'No user-task slices found' }}
       </div>
       <div
         v-else
@@ -210,7 +226,7 @@
           stroke-linejoin="round"
         />
       </svg>
-      Inter-Arrival Time
+      Inter-Arrival Time{{ scopeSuffixStr }}
     </div>
     <template v-if="!interArrivalCollapsed">
       <div
@@ -275,7 +291,7 @@
   </div>
 
   <div
-    v-if="plotDialog"
+    v-if="openPlotRef"
     class="plot-dialog-overlay"
     @click.self="closePlot"
   >
@@ -283,10 +299,10 @@
       class="plot-dialog"
       role="dialog"
       aria-modal="true"
-      :aria-label="plotDialog.title"
+      :aria-label="plotData?.title || 'Metrics plot'"
     >
       <div class="plot-dialog-header">
-        <div class="plot-dialog-title">{{ plotDialog.title }}</div>
+        <div class="plot-dialog-title">{{ plotData?.title }}</div>
         <button
           type="button"
           class="plot-close-btn"
@@ -301,8 +317,14 @@
         class="plot-dialog-body"
       >
         <div class="plot-card plot-card-scatter">
+          <div
+            v-if="plotData && plotData.points.length === 0"
+            class="plot-empty"
+          >
+            No data in selected range
+          </div>
           <svg
-            v-if="scatterModel"
+            v-else-if="scatterModel"
             class="plot-svg"
             :viewBox="`0 0 ${scatterModel.width} ${scatterModel.height}`"
           >
@@ -411,8 +433,14 @@
         </div>
 
         <div class="plot-card plot-card-histogram">
+          <div
+            v-if="plotData && plotData.points.length === 0"
+            class="plot-empty"
+          >
+            No data in selected range
+          </div>
           <svg
-            v-if="histogramModel"
+            v-else-if="histogramModel"
             class="plot-svg"
             :viewBox="`0 0 ${histogramModel.width} ${histogramModel.height}`"
           >
@@ -513,8 +541,16 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { toBlob as domToBlob, toSvg as domToSvg } from 'html-to-image'
-import { formatTime } from '../renderer/TimelineRenderer.js'
+import { formatTime, isStiTagChannel } from '../renderer/TimelineRenderer.js'
 import { taskDisplayName, parseTaskName, taskMergeKey, isIdleTaskName, taskColor } from '../utils/colors.js'
+import {
+  getPlacedCursors,
+  getStatsRange,
+  segOverlapNs,
+  segFullyInRange,
+  segOverlapsRange,
+  scopeSuffix,
+} from '../utils/statsRange.js'
 
 const props = defineProps({
   trace:   { type: Object, required: true },
@@ -527,20 +563,73 @@ const coresCollapsed = ref(false)
 const tasksCollapsed = ref(false)
 const execSliceCollapsed = ref(false)
 const interArrivalCollapsed = ref(false)
-const plotDialog = ref(null)
+const scopeToCursors = ref(true)
+const openPlotRef = ref(null)   // { mk, kind } when plot dialog is open
 const plotContentRef = ref(null)
 const selectedPlotPoint = ref(-1)
 
 function clampPct(v) { return Math.max(0, Math.min(100, v)).toFixed(1) }
 
-const spanStr = computed(() => formatTime(props.trace.timeMax - props.trace.timeMin, props.trace.timeScale))
+const placedCursorCount = computed(() => getPlacedCursors(props.cursors).length)
+
+const statsRange = computed(() => getStatsRange(props.cursors, scopeToCursors.value))
+
+const scopeSuffixStr = computed(() => scopeSuffix(statsRange.value))
+
+const scopeRangeLabel = computed(() => {
+  const r = statsRange.value
+  if (!r) {
+    return placedCursorCount.value < 2
+      ? 'Place 2+ cursors to measure a time window'
+      : ''
+  }
+  const scale = props.trace.timeScale
+  return `C1–C${r.nCursors}: ${formatTime(r.lo, scale)} … ${formatTime(r.hi, scale)} (${formatTime(r.hi - r.lo, scale)})`
+})
+
+const spanStr = computed(() => {
+  const tr = props.trace
+  const r = statsRange.value
+  const ns = r ? (r.hi - r.lo) : (tr.timeMax - tr.timeMin)
+  return formatTime(ns, tr.timeScale)
+})
+
+const summaryTaskCount = computed(() => {
+  const tr = props.trace
+  const r = statsRange.value
+  if (!r) return tr.tasks.length
+  let n = 0
+  for (const segs of tr.segByMergeKey.values()) {
+    if (segs.some(s => segOverlapsRange(s, r.lo, r.hi))) n++
+  }
+  return n
+})
+
+const summarySegCount = computed(() => {
+  const tr = props.trace
+  const r = statsRange.value
+  if (!r) return tr.segments.length
+  return tr.segments.filter(s => segOverlapsRange(s, r.lo, r.hi)).length
+})
+
+const summaryStiCount = computed(() => {
+  const tr = props.trace
+  const r = statsRange.value
+  if (!r) {
+    return tr.stiEvents.filter(ev => !isStiTagChannel(ev.target)).length
+  }
+  return tr.stiEvents.filter(
+    ev => !isStiTagChannel(ev.target) && ev.time >= r.lo && ev.time <= r.hi,
+  ).length
+})
 
 // ---- Core utilisation (excl. IDLE/TICK) — only computed when visible ----
 const coreStats = computed(() => {
   if (coresCollapsed.value) return []
-  const tr = props.trace  // explicit dep on the trace object
+  const tr = props.trace
   if (!tr || !tr.coreNames || tr.coreNames.length === 0) return []
-  const total = tr.timeMax - tr.timeMin
+  const r = statsRange.value
+  const total = r ? (r.hi - r.lo) : (tr.timeMax - tr.timeMin)
   if (total <= 0) return []
   return tr.coreNames.map(core => {
     const segs = tr.coreSegs.get(core) || []
@@ -548,7 +637,7 @@ const coreStats = computed(() => {
     for (const s of segs) {
       const { name } = parseTaskName(s.task)
       if (name === 'TICK' || isIdleTaskName(name)) continue
-      active += s.end - s.start
+      active += r ? segOverlapNs(s, r.lo, r.hi) : (s.end - s.start)
     }
     return { core, pct: 100.0 * active / total }
   })
@@ -557,9 +646,10 @@ const coreStats = computed(() => {
 // ---- Top 10 tasks by CPU — only computed when visible ------------------
 const topTasks = computed(() => {
   if (tasksCollapsed.value) return []
-  const tr = props.trace  // explicit dep on the trace object
+  const tr = props.trace
   if (!tr || !tr.segByMergeKey) return []
-  const total = tr.timeMax - tr.timeMin
+  const r = statsRange.value
+  const total = r ? (r.hi - r.lo) : (tr.timeMax - tr.timeMin)
   if (total <= 0) return []
   const accum = new Map()
   for (const [mk, segs] of tr.segByMergeKey) {
@@ -567,7 +657,9 @@ const topTasks = computed(() => {
     const { name } = parseTaskName(repr)
     if (isIdleTaskName(name) || name === 'TICK') continue
     let t = 0
-    for (const s of segs) t += s.end - s.start
+    for (const s of segs) {
+      t += r ? segOverlapNs(s, r.lo, r.hi) : (s.end - s.start)
+    }
     if (t > 0) accum.set(mk, t)
   }
   return [...accum.entries()]
@@ -599,7 +691,8 @@ const execSliceStats = computed(() => {
   const tr = props.trace
   if (!tr || !tr.segByMergeKey) return []
   const scale = tr.timeScale
-  const total = tr.timeMax - tr.timeMin
+  const r = statsRange.value
+  const total = r ? (r.hi - r.lo) : (tr.timeMax - tr.timeMin)
   const rows = []
 
   for (const [mk, segs] of tr.segByMergeKey) {
@@ -611,7 +704,9 @@ const execSliceStats = computed(() => {
     const samples = []
     for (const s of segs) {
       const d = s.end - s.start
-      if (d > 0) samples.push(d)
+      if (d <= 0) continue
+      if (r && !segFullyInRange(s, r.lo, r.hi)) continue
+      samples.push(d)
     }
     const summary = _summarizeSamples(samples, scale)
     if (!summary) continue
@@ -637,6 +732,7 @@ const interArrivalStats = computed(() => {
   const tr = props.trace
   if (!tr || !tr.segByMergeKey) return []
   const scale = tr.timeScale
+  const r = statsRange.value
   const rows = []
 
   for (const [mk, segs] of tr.segByMergeKey) {
@@ -648,16 +744,21 @@ const interArrivalStats = computed(() => {
     const starts = [...segs].map(s => s.start).sort((a, b) => a - b)
     const samples = []
     for (let i = 1; i < starts.length; i++) {
+      if (r && (starts[i] < r.lo || starts[i] > r.hi)) continue
       const d = starts[i] - starts[i - 1]
       if (d > 0) samples.push(d)
     }
     const summary = _summarizeSamples(samples, scale)
     if (!summary) continue
 
+    const runs = r
+      ? segs.filter(s => s.start >= r.lo && s.start <= r.hi).length
+      : starts.length
+
     rows.push({
       mk,
       name: taskDisplayName(repr),
-      runs: starts.length,
+      runs,
       min: summary.min,
       avg: summary.avg,
       max: summary.max,
@@ -701,10 +802,14 @@ function _safeFileName(title) {
   return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'metrics-plot'
 }
 
-function _buildExecPlot(trace, mk) {
-  const segs = trace?.segByMergeKey?.get(mk) || []
+function _buildExecPlot(trace, mk, range) {
+  let segs = trace?.segByMergeKey?.get(mk) || []
   if (segs.length === 0) return null
   const repr = trace.taskRepr.get(mk) || mk
+  const suffix = scopeSuffix(range)
+  if (range) {
+    segs = segs.filter(s => segFullyInRange(s, range.lo, range.hi))
+  }
   const points = segs
     .filter(seg => seg.end > seg.start)
     .map((seg, index) => ({
@@ -714,23 +819,24 @@ function _buildExecPlot(trace, mk) {
       payload: seg,
       label: `${taskDisplayName(repr)}: ${formatTime(seg.end - seg.start, trace.timeScale)} at ${formatTime(seg.start, trace.timeScale)}`,
     }))
-  if (points.length === 0) return null
   return {
     kind: 'exec',
     mk,
-    title: `${taskDisplayName(repr)} - Execution Time`,
+    title: `${taskDisplayName(repr)} - Execution Time${suffix}`,
     color: taskColor(mk, repr),
     points,
   }
 }
 
-function _buildInterPlot(trace, mk) {
+function _buildInterPlot(trace, mk, range) {
   const segs = trace?.segByMergeKey?.get(mk) || []
   if (segs.length < 2) return null
   const repr = trace.taskRepr.get(mk) || mk
+  const suffix = scopeSuffix(range)
   const sorted = [...segs].sort((a, b) => a.start - b.start)
   const points = []
   for (let i = 1; i < sorted.length; i++) {
+    if (range && (sorted[i].start < range.lo || sorted[i].start > range.hi)) continue
     const delta = sorted[i].start - sorted[i - 1].start
     if (delta <= 0) continue
     points.push({
@@ -741,27 +847,36 @@ function _buildInterPlot(trace, mk) {
       label: `${taskDisplayName(repr)}: ${formatTime(delta, trace.timeScale)} from ${formatTime(sorted[i - 1].start, trace.timeScale)}`,
     })
   }
-  if (points.length === 0) return null
   return {
     kind: 'inter',
     mk,
-    title: `${taskDisplayName(repr)} - Inter-Arrival Time`,
+    title: `${taskDisplayName(repr)} - Inter-Arrival Time${suffix}`,
     color: taskColor(mk, repr),
     points,
   }
 }
 
+const plotData = computed(() => {
+  const open = openPlotRef.value
+  if (!open) return null
+  const range = statsRange.value
+  return open.kind === 'exec'
+    ? _buildExecPlot(props.trace, open.mk, range)
+    : _buildInterPlot(props.trace, open.mk, range)
+})
+
 function openPlot(mk, kind) {
+  const range = statsRange.value
   const plot = kind === 'exec'
-    ? _buildExecPlot(props.trace, mk)
-    : _buildInterPlot(props.trace, mk)
-  if (!plot) return
-  plotDialog.value = plot
+    ? _buildExecPlot(props.trace, mk, range)
+    : _buildInterPlot(props.trace, mk, range)
+  if (!plot || plot.points.length === 0) return
+  openPlotRef.value = { mk, kind }
   selectedPlotPoint.value = -1
 }
 
 function closePlot() {
-  plotDialog.value = null
+  openPlotRef.value = null
   selectedPlotPoint.value = -1
 }
 
@@ -771,7 +886,7 @@ function onPlotPointClick(point) {
 }
 
 const scatterModel = computed(() => {
-  const plot = plotDialog.value
+  const plot = plotData.value
   if (!plot || plot.points.length === 0) return null
   const width = 820
   const height = 320
@@ -816,7 +931,7 @@ const scatterModel = computed(() => {
 })
 
 const histogramModel = computed(() => {
-  const plot = plotDialog.value
+  const plot = plotData.value
   if (!plot || plot.points.length === 0) return null
   const width = 820
   const height = 220
@@ -867,18 +982,18 @@ const histogramModel = computed(() => {
 })
 
 async function exportPlotPng() {
-  if (!plotContentRef.value || !plotDialog.value) return
+  if (!plotContentRef.value || !plotData.value) return
   const blob = await domToBlob(plotContentRef.value, {
     cacheBust: true,
     pixelRatio: window.devicePixelRatio || 1,
   })
-  _downloadBlob(`${_safeFileName(plotDialog.value.title)}.png`, blob)
+  _downloadBlob(`${_safeFileName(plotData.value.title)}.png`, blob)
 }
 
 async function exportPlotSvg() {
-  if (!plotContentRef.value || !plotDialog.value) return
+  if (!plotContentRef.value || !plotData.value) return
   const dataUrl = await domToSvg(plotContentRef.value, { cacheBust: true })
-  _downloadDataUrl(`${_safeFileName(plotDialog.value.title)}.svg`, dataUrl)
+  _downloadDataUrl(`${_safeFileName(plotData.value.title)}.svg`, dataUrl)
 }
 
 function _htmlCell(v) {
@@ -913,20 +1028,25 @@ function _stamp() {
 
 function exportCsv() {
   const tr = props.trace
-  const execReportRows = _execSliceRowsForReport(tr)
-  const interReportRows = _interArrivalRowsForReport(tr)
-  const coreRows = _coreUtilRows(tr)
-  const taskRows = _taskCpuRows(tr)
+  const r = statsRange.value
+  const suffix = scopeSuffixStr.value
+  const execReportRows = _execSliceRowsForReport(tr, r)
+  const interReportRows = _interArrivalRowsForReport(tr, r)
+  const coreRows = _coreUtilRows(tr, r)
+  const taskRows = _taskCpuRows(tr, r)
   const lines = []
 
   lines.push('Summary')
   lines.push('Metric,Value')
-  lines.push(`Span,${_csvCell(spanStr.value)}`)
-  lines.push(`Tasks,${_csvCell(tr.tasks.length)}`)
-  lines.push(`Segments,${_csvCell(tr.segments.length)}`)
-  lines.push(`STI Events,${_csvCell(tr.stiEvents.length)}`)
+  lines.push(`Span${suffix},${_csvCell(spanStr.value)}`)
+  if (suffix) {
+    lines.push(`Cursor range,${_csvCell(scopeRangeLabel.value)}`)
+  }
+  lines.push(`Tasks,${_csvCell(summaryTaskCount.value)}`)
+  lines.push(`Segments,${_csvCell(summarySegCount.value)}`)
+  lines.push(`STI Events,${_csvCell(summaryStiCount.value)}`)
 
-  if (rangeStats.value) {
+  if (rangeStats.value && !r) {
     lines.push('')
     lines.push('Cursor Range')
     lines.push('Metric,Value')
@@ -939,7 +1059,7 @@ function exportCsv() {
   }
 
   lines.push('')
-  lines.push('Core Utilisation (excl. IDLE/TICK)')
+  lines.push(`Core Utilisation (excl. IDLE/TICK)${suffix}`)
   lines.push('Core,CPU %')
   if (coreRows.length > 0) {
     for (const r of coreRows) {
@@ -950,7 +1070,7 @@ function exportCsv() {
   }
 
   lines.push('')
-  lines.push('Top Tasks by CPU (excl. IDLE/TICK)')
+  lines.push(`Top Tasks by CPU (excl. IDLE/TICK)${suffix}`)
   lines.push('Task,CPU %')
   if (taskRows.length > 0) {
     for (const r of taskRows) {
@@ -961,7 +1081,7 @@ function exportCsv() {
   }
 
   lines.push('')
-  lines.push('Execution Time Per Slice')
+  lines.push(`Execution Time Per Slice${suffix}`)
   lines.push('Task,Runs,CPU%,Min,Avg,TrimMean(5%),Max,p50,p95')
   for (const r of execReportRows) {
     lines.push([
@@ -978,7 +1098,7 @@ function exportCsv() {
   }
 
   lines.push('')
-  lines.push('Inter-Arrival Time')
+  lines.push(`Inter-Arrival Time${suffix}`)
   lines.push('Task,Runs,Min,Avg,TrimMean(5%),Max,p50,p95')
   for (const r of interReportRows) {
     lines.push([
@@ -1016,10 +1136,10 @@ function _summarizeSamplesReport(samples, scale) {
   }
 }
 
-function _execSliceRowsForReport(tr) {
+function _execSliceRowsForReport(tr, range) {
   if (!tr || !tr.segByMergeKey) return []
   const scale = tr.timeScale
-  const total = tr.timeMax - tr.timeMin
+  const total = range ? (range.hi - range.lo) : (tr.timeMax - tr.timeMin)
   const rows = []
 
   for (const [mk, segs] of tr.segByMergeKey) {
@@ -1031,7 +1151,9 @@ function _execSliceRowsForReport(tr) {
     const samples = []
     for (const s of segs) {
       const d = s.end - s.start
-      if (d > 0) samples.push(d)
+      if (d <= 0) continue
+      if (range && !segFullyInRange(s, range.lo, range.hi)) continue
+      samples.push(d)
     }
     const summary = _summarizeSamplesReport(samples, scale)
     if (!summary) continue
@@ -1054,7 +1176,7 @@ function _execSliceRowsForReport(tr) {
   return rows.sort((a, b) => b.runs - a.runs || a.name.localeCompare(b.name))
 }
 
-function _interArrivalRowsForReport(tr) {
+function _interArrivalRowsForReport(tr, range) {
   if (!tr || !tr.segByMergeKey) return []
   const scale = tr.timeScale
   const rows = []
@@ -1068,16 +1190,21 @@ function _interArrivalRowsForReport(tr) {
     const starts = [...segs].map(s => s.start).sort((a, b) => a - b)
     const samples = []
     for (let i = 1; i < starts.length; i++) {
+      if (range && (starts[i] < range.lo || starts[i] > range.hi)) continue
       const d = starts[i] - starts[i - 1]
       if (d > 0) samples.push(d)
     }
     const summary = _summarizeSamplesReport(samples, scale)
     if (!summary) continue
 
+    const runs = range
+      ? segs.filter(s => s.start >= range.lo && s.start <= range.hi).length
+      : starts.length
+
     rows.push({
       mk,
       name: taskDisplayName(repr),
-      runs: starts.length,
+      runs,
       min: summary.min,
       avg: summary.avg,
       trimMean: summary.trimMean,
@@ -1116,9 +1243,9 @@ function _renderHtmlTableReport(title, rows, includeCpu = false) {
   return `<section class="report-card"><h2>${_htmlCell(title)}</h2><table><thead>${head}</thead><tbody>${body}</tbody></table></section>`
 }
 
-function _coreUtilRows(tr) {
+function _coreUtilRows(tr, range) {
   if (!tr || !tr.coreNames || tr.coreNames.length === 0) return []
-  const total = tr.timeMax - tr.timeMin
+  const total = range ? (range.hi - range.lo) : (tr.timeMax - tr.timeMin)
   if (total <= 0) return []
   return tr.coreNames.map(core => {
     const segs = tr.coreSegs.get(core) || []
@@ -1126,7 +1253,7 @@ function _coreUtilRows(tr) {
     for (const s of segs) {
       const { name } = parseTaskName(s.task)
       if (name === 'TICK' || isIdleTaskName(name)) continue
-      active += s.end - s.start
+      active += range ? segOverlapNs(s, range.lo, range.hi) : (s.end - s.start)
     }
     return {
       core,
@@ -1135,9 +1262,9 @@ function _coreUtilRows(tr) {
   })
 }
 
-function _taskCpuRows(tr) {
+function _taskCpuRows(tr, range) {
   if (!tr || !tr.segByMergeKey) return []
-  const total = tr.timeMax - tr.timeMin
+  const total = range ? (range.hi - range.lo) : (tr.timeMax - tr.timeMin)
   if (total <= 0) return []
   const accum = new Map()
   for (const [mk, segs] of tr.segByMergeKey) {
@@ -1145,7 +1272,9 @@ function _taskCpuRows(tr) {
     const { name } = parseTaskName(repr)
     if (isIdleTaskName(name) || name === 'TICK') continue
     let t = 0
-    for (const s of segs) t += s.end - s.start
+    for (const s of segs) {
+      t += range ? segOverlapNs(s, range.lo, range.hi) : (s.end - s.start)
+    }
     if (t > 0) accum.set(mk, t)
   }
   return [...accum.entries()]
@@ -1159,11 +1288,13 @@ function _taskCpuRows(tr) {
 
 function exportHtml() {
   const tr = props.trace
-  const range = rangeStats.value
-  const execReportRows = _execSliceRowsForReport(tr)
-  const interReportRows = _interArrivalRowsForReport(tr)
-  const coreRows = _coreUtilRows(tr)
-  const taskRows = _taskCpuRows(tr)
+  const r = statsRange.value
+  const suffix = scopeSuffixStr.value
+  const execReportRows = _execSliceRowsForReport(tr, r)
+  const interReportRows = _interArrivalRowsForReport(tr, r)
+  const coreRows = _coreUtilRows(tr, r)
+  const taskRows = _taskCpuRows(tr, r)
+  const range = !r ? rangeStats.value : null
   const rangeHtml = range
     ? `<section class="report-card"><h2>Cursor Range</h2><table><tbody>
         <tr><th>Span</th><td>${_htmlCell(range.span)}</td></tr>
@@ -1174,11 +1305,14 @@ function exportHtml() {
         ${range.dMax ? `<tr><th>Seg max</th><td>${_htmlCell(range.dMax)}</td></tr>` : ''}
       </tbody></table></section>`
     : ''
-  const coreHtml = `<section class="report-card"><h2>Core Utilisation (excl. IDLE/TICK)</h2><table><thead><tr><th>Core</th><th>CPU %</th></tr></thead><tbody>${coreRows.length
+  const scopeNote = r
+    ? `<li><strong>Cursor range:</strong> ${_htmlCell(scopeRangeLabel.value)}. CPU% uses overlapping active time; slice metrics use segments fully inside the range.</li>`
+    : ''
+  const coreHtml = `<section class="report-card"><h2>Core Utilisation (excl. IDLE/TICK)${_htmlCell(suffix)}</h2><table><thead><tr><th>Core</th><th>CPU %</th></tr></thead><tbody>${coreRows.length
     ? coreRows.map(r => `<tr><td>${_htmlCell(r.core)}</td><td>${_htmlCell(r.pct)}%</td></tr>`).join('')
     : '<tr><td colspan="2" class="empty">No data</td></tr>'
   }</tbody></table></section>`
-  const taskHtml = `<section class="report-card"><h2>Top Tasks by CPU (excl. IDLE/TICK)</h2><table><thead><tr><th>Task</th><th>CPU %</th></tr></thead><tbody>${taskRows.length
+  const taskHtml = `<section class="report-card"><h2>Top Tasks by CPU (excl. IDLE/TICK)${_htmlCell(suffix)}</h2><table><thead><tr><th>Task</th><th>CPU %</th></tr></thead><tbody>${taskRows.length
     ? taskRows.map(r => `<tr><td>${_htmlCell(r.name)}</td><td>${_htmlCell(r.pct)}%</td></tr>`).join('')
     : '<tr><td colspan="2" class="empty">No data</td></tr>'
   }</tbody></table></section>`
@@ -1268,14 +1402,15 @@ function exportHtml() {
       <div class="sub">Generated: ${_htmlCell(new Date().toLocaleString())}</div>
     </header>
     <section class="kpi-grid">
-      <article class="kpi"><div class="k">Span</div><div class="v">${_htmlCell(spanStr.value)}</div></article>
-      <article class="kpi"><div class="k">Tasks</div><div class="v">${_htmlCell(tr.tasks.length.toLocaleString())}</div></article>
-      <article class="kpi"><div class="k">Segments</div><div class="v">${_htmlCell(tr.segments.length.toLocaleString())}</div></article>
-      <article class="kpi"><div class="k">STI Events</div><div class="v">${_htmlCell(tr.stiEvents.length.toLocaleString())}</div></article>
+      <article class="kpi"><div class="k">Span${_htmlCell(suffix)}</div><div class="v">${_htmlCell(spanStr.value)}</div></article>
+      <article class="kpi"><div class="k">Tasks</div><div class="v">${_htmlCell(summaryTaskCount.value.toLocaleString())}</div></article>
+      <article class="kpi"><div class="k">Segments</div><div class="v">${_htmlCell(summarySegCount.value.toLocaleString())}</div></article>
+      <article class="kpi"><div class="k">STI Events</div><div class="v">${_htmlCell(summaryStiCount.value.toLocaleString())}</div></article>
     </section>
     <section class="report-card notes">
     <h2>Statistics Notes</h2>
     <ul>
+      ${scopeNote}
       <li><strong>Execution Time Per Slice:</strong> Duration of each continuous task run between two context switches. Lower and tighter values indicate more predictable execution.</li>
       <li><strong>Inter-Arrival Time:</strong> Time between consecutive activations of the same task (slice start to next slice start). It reflects activation cadence and jitter.</li>
       <li><strong>Min (Minimum):</strong> The fastest execution time recorded. It represents the best-case scenario under zero system load.</li>
@@ -1289,8 +1424,8 @@ function exportHtml() {
     ${rangeHtml}
     ${coreHtml}
     ${taskHtml}
-    ${_renderHtmlTableReport('Execution Time Per Slice', execReportRows, true)}
-    ${_renderHtmlTableReport('Inter-Arrival Time', interReportRows)}
+    ${_renderHtmlTableReport(`Execution Time Per Slice${suffix}`, execReportRows, true)}
+    ${_renderHtmlTableReport(`Inter-Arrival Time${suffix}`, interReportRows)}
     <div class="report-foot">Generated by BTF Viewer</div>
   </div>
 </body>
@@ -1369,6 +1504,10 @@ watch(() => props.cursors, (cursors) => {
 watch(() => props.trace, () => {
   closePlot()
 })
+
+watch(plotData, () => {
+  selectedPlotPoint.value = -1
+})
 </script>
 
 <style scoped>
@@ -1381,6 +1520,37 @@ watch(() => props.trace, () => {
   overflow-y: auto;
   flex: 1;
   gap: 0;
+}
+
+.stats-scope-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+.stats-scope-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg);
+  font-size: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.stats-scope-check input:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.stats-scope-label {
+  color: var(--fg-dim);
+  font-size: 10px;
+  line-height: 1.35;
+  word-break: break-word;
 }
 
 .stats-summary {
@@ -1666,6 +1836,22 @@ watch(() => props.trace, () => {
   border-radius: 10px;
   background: color-mix(in srgb, var(--panel-bg) 70%, var(--bg));
   overflow: hidden;
+}
+
+.plot-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+  padding: 24px 16px;
+  color: var(--fg-dim);
+  font-size: 12px;
+  font-style: italic;
+  text-align: center;
+}
+
+.plot-card-histogram .plot-empty {
+  min-height: 120px;
 }
 
 .plot-svg {
