@@ -366,6 +366,17 @@ _IC_CPU_LOAD = ("M1 11a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H2a1 1 0 0 1
                 "M5 7a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7z"
                 "M9 3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1V3z"
                 "M13 1a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1V1z")
+_IC_THEME_DARK = ("M8 1.2a.5.5 0 0 1 .47.66A5.8 5.8 0 1 0 14.14 9a.5.5 0 0 1 .66.47"
+                  "A6.8 6.8 0 1 1 8 1.2z")
+_IC_THEME_LIGHT = ("M8 1.5a.5.5 0 0 1 .5.5V3a.5.5 0 0 1-1 0V2a.5.5 0 0 1 .5-.5z"
+                   "M8 13a.5.5 0 0 1 .5.5V14a.5.5 0 0 1-1 0v-.5A.5.5 0 0 1 8 13z"
+                   "M14.5 7.5a.5.5 0 0 1 0 1H14a.5.5 0 0 1 0-1h.5z"
+                   "M2.5 7.5a.5.5 0 0 1 0 1H2a.5.5 0 0 1 0-1h.5z"
+                   "M12.6 3.4a.5.5 0 0 1 .7 0l.35.35a.5.5 0 1 1-.7.7l-.35-.35a.5.5 0 0 1 0-.7z"
+                   "M2.35 13.65a.5.5 0 0 1 .7 0l.35.35a.5.5 0 0 1-.7.7l-.35-.35a.5.5 0 0 1 0-.7z"
+                   "M12.95 12.95a.5.5 0 0 1 .7 0l.35.35a.5.5 0 0 1-.7.7l-.35-.35a.5.5 0 0 1 0-.7z"
+                   "M2.7 2.7a.5.5 0 0 1 .7 0l.35.35a.5.5 0 1 1-.7.7L2.7 3.4a.5.5 0 0 1 0-.7z"
+                   "M8 4a4 4 0 1 1 0 8 4 4 0 0 1 0-8z")
 _IC_SETTINGS = ("M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17"
                 "c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1"
                 "c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31"
@@ -1118,8 +1129,14 @@ class _InfoPopup(QLabel):
                 f"font-size:7pt; font-family:'{fam}'; }}"
             )
 
-    def show_at(self, screen_pos: QPoint, html: str, is_dark: bool = True) -> None:
-        self._apply_stylesheet(is_dark)
+    def show_at(self, screen_pos: QPoint, html: str, is_dark: Optional[bool] = None) -> None:
+        if is_dark is None:
+            app = QApplication.instance()
+            if app is not None:
+                is_dark = app.palette().color(QPalette.Window).lightness() < 128
+            else:
+                is_dark = True
+        self._apply_stylesheet(bool(is_dark))
         self.setText(html)
         self.adjustSize()
         # offset so the cursor does not cover the box
@@ -1565,6 +1582,7 @@ class TimelineScene(QGraphicsScene):
     scene_rebuilt    = pyqtSignal()          # emitted after every rebuild()
     highlight_changed = pyqtSignal(object, bool) # (task_name_or_None, locked)
     hover_changed    = pyqtSignal()          # emitted when hover cursor position changes
+    marks_changed    = pyqtSignal()          # emitted when bookmark/annotation marks change
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1662,6 +1680,54 @@ class TimelineScene(QGraphicsScene):
         # as a real cursor.  Redrawn on every mouse-move, cleared on leave.
         self._hover_ns: Optional[int] = None
         self._hover_items: list = []
+        self._is_dark_ui: bool = True
+        self.set_theme(True, rebuild=False)
+
+    def set_theme(self, is_dark: bool, rebuild: bool = True) -> None:
+        """Update scene palette used by row/header background builders."""
+        self._is_dark_ui = bool(is_dark)
+        if is_dark:
+            self._c_ruler_bg = QColor("#2B2B2B")
+            self._c_label_bg = QColor("#1E1E1E")
+            self._c_row_even = QColor("#252526")
+            self._c_row_odd = QColor("#2D2D2D")
+            self._c_sep = QColor("#333333")
+            self._c_label_txt = QColor("#D4D4D4")
+            self._c_sti_bg = QColor("#1A1A2E")
+            self._c_sti_lbl = QColor("#88AABB")
+            self._c_corner_bg = QColor("#1A1A1A")
+            self._c_header_txt = QColor("#888888")
+            self._c_core_sum_bg = QColor("#2A2A3E")
+            self._c_core_sep = QColor("#444466")
+            self._c_core_hdr_bg = QColor("#2B2B45")
+            self._c_core_arrow = QColor("#9999CC")
+            self._c_core_lbl = QColor("#E0E0E0")
+            self._c_core_sub_even = QColor("#1E1E2C")
+            self._c_core_sub_odd = QColor("#232330")
+            self._c_core_sub_sep = QColor("#2E2E3A")
+            self._c_core_sub_lbl = QColor("#B0B0C0")
+        else:
+            self._c_ruler_bg = QColor("#E0E0E0")
+            self._c_label_bg = QColor("#F5F5F5")
+            self._c_row_even = QColor("#FFFFFF")
+            self._c_row_odd = QColor("#F2F2F2")
+            self._c_sep = QColor("#D0D0D0")
+            self._c_label_txt = QColor("#333333")
+            self._c_sti_bg = QColor("#EEF3F8")
+            self._c_sti_lbl = QColor("#3F688F")
+            self._c_corner_bg = QColor("#E8E8E8")
+            self._c_header_txt = QColor("#666666")
+            self._c_core_sum_bg = QColor("#E7ECF3")
+            self._c_core_sep = QColor("#C9D3E1")
+            self._c_core_hdr_bg = QColor("#DDE6F2")
+            self._c_core_arrow = QColor("#5A6E8A")
+            self._c_core_lbl = QColor("#1E1E1E")
+            self._c_core_sub_even = QColor("#F7F9FC")
+            self._c_core_sub_odd = QColor("#EEF2F7")
+            self._c_core_sub_sep = QColor("#D5DCE7")
+            self._c_core_sub_lbl = QColor("#4E5A6C")
+        if rebuild and self._trace is not None:
+            self.rebuild()
 
     # ------------------------------------------------------------------
     # Public API
@@ -1790,6 +1856,7 @@ class TimelineScene(QGraphicsScene):
         data.sort(key=lambda t: t[0])
         self._mark_data = data
         self._draw_marks()
+        self.marks_changed.emit()
 
     def _draw_marks(self) -> None:
         """Draw a dotted vertical/horizontal line + label for every mark."""
@@ -2840,11 +2907,11 @@ class TimelineScene(QGraphicsScene):
 
         # --- Background & ruler ------------------------------------------
         _ruler_bg = self.addRect(QRectF(0, 0, total_w, RULER_HEIGHT),
-                                 QPen(Qt.NoPen), QBrush(QColor("#2B2B2B")))
+                               QPen(Qt.NoPen), QBrush(self._c_ruler_bg))
         _ruler_bg.setZValue(10)   # above task rows (z=0-2) when frozen at top
         self._frozen_top_items.append((_ruler_bg, 0))
         _lbg = self.addRect(QRectF(0, 0, self._label_width, total_h),
-                            QPen(Qt.NoPen), QBrush(QColor("#1E1E1E")))
+                           QPen(Qt.NoPen), QBrush(self._c_label_bg))
         _lbg.setZValue(35)   # must be above cursor lines (z=30-32)
         self._frozen_items.append((_lbg, 0))
 
@@ -2907,10 +2974,10 @@ class TimelineScene(QGraphicsScene):
             self._frozen_top_items.append((_ht_batch, 0))
 
         # Shared colors/pens/brushes hoisted out of loops
-        _bg_even     = QBrush(QColor("#252526"))
-        _bg_odd      = QBrush(QColor("#2D2D2D"))
-        _sep_pen     = QPen(QColor("#333333"), 0.5)
-        _lbl_color   = QColor("#D4D4D4")
+        _bg_even     = QBrush(self._c_row_even)
+        _bg_odd      = QBrush(self._c_row_odd)
+        _sep_pen     = QPen(self._c_sep, 0.5)
+        _lbl_color   = self._c_label_txt
         _stripe_rows: list = []   # accumulated by task + STI loops → one _RowStripesItem
 
         # --- Task rows ---------------------------------------------------
@@ -2994,7 +3061,7 @@ class TimelineScene(QGraphicsScene):
                 _cl.setZValue(2.5)
         # One row per STI channel: collapsed shows diamond markers, expanded
         # shows a step-chart waveform.  Row heights vary per channel.
-        _sti_bg = QBrush(QColor("#1A1A2E"))
+        _sti_bg = QBrush(self._c_sti_bg)
         _sti_y  = RULER_HEIGHT + n_task * (self._row_height + self._row_gap)
         for channel in sti_rows:
             is_exp     = channel in self._sti_expanded
@@ -3015,7 +3082,7 @@ class TimelineScene(QGraphicsScene):
             self.addItem(lbl_bg)
             self._frozen_items.append((lbl_bg, 0))
             lbl = self.addSimpleText(_ltxt, font)
-            lbl.setBrush(QBrush(QColor("#88AABB")))
+            lbl.setBrush(QBrush(self._c_sti_lbl))
             lbl.setPos(4, y_ctr - fm.height() / 2)
             lbl.setZValue(37)
             self._frozen_items.append((lbl, 4))
@@ -3058,11 +3125,11 @@ class TimelineScene(QGraphicsScene):
         # Drawn last so it sits on top of all other frozen items (z=38-39).
         _has_tick_h = bool(trace.seg_map_by_merge_key.get(_tick_mk, []))
         corner = self.addRect(QRectF(0, 0, lw, RULER_HEIGHT),
-                              QPen(Qt.NoPen), QBrush(QColor("#1A1A1A")))
+                              QPen(Qt.NoPen), QBrush(self._c_corner_bg))
         corner.setZValue(38)
         _hdr_band_h = RULER_HEIGHT - (10 if _has_tick_h else 0)
         hdr = self.addSimpleText("Task / TaskID", font)
-        hdr.setBrush(QBrush(QColor("#888888")))
+        hdr.setBrush(QBrush(self._c_header_txt))
         hdr.setPos(4, _hdr_band_h / 2 - fm.height() / 2)
         hdr.setZValue(39)
         self._frozen_items.append((corner, 0))
@@ -3117,13 +3184,13 @@ class TimelineScene(QGraphicsScene):
 
         # --- Ruler column (left side): frozen to left edge on X scroll ------
         _ruler_col_bg = self.addRect(QRectF(0, 0, RULER_WIDTH, total_h),
-                                     QPen(Qt.NoPen), QBrush(QColor("#2B2B2B")))
+                                     QPen(Qt.NoPen), QBrush(self._c_ruler_bg))
         _ruler_col_bg.setZValue(35)  # above cursor lines (z=30-32)
         self._frozen_items.append((_ruler_col_bg, 0))
 
         # --- Label row (top): frozen to top edge on Y scroll ---------------
         _label_row_bg = self.addRect(QRectF(0, 0, total_w, label_row_h),
-                                     QPen(Qt.NoPen), QBrush(QColor("#1E1E1E")))
+                                     QPen(Qt.NoPen), QBrush(self._c_label_bg))
         _label_row_bg.setZValue(35)  # above cursor lines (z=30-32), same as ruler column
         self._frozen_top_items.append((_label_row_bg, 0))
 
@@ -3186,9 +3253,9 @@ class TimelineScene(QGraphicsScene):
             self._frozen_items.append((_vt_batch, 0))
 
         # --- Task columns ------------------------------------------------
-        _bg_even   = QBrush(QColor("#252526"))
-        _bg_odd    = QBrush(QColor("#2D2D2D"))
-        _lbl_color = QColor("#D4D4D4")
+        _bg_even   = QBrush(self._c_row_even)
+        _bg_odd    = QBrush(self._c_row_odd)
+        _lbl_color = self._c_label_txt
         _time_min  = vp.time_min
         _px_per_ns = vp.px_per_ns
         _vp_ns_lo  = vp.ns_lo
@@ -3274,7 +3341,7 @@ class TimelineScene(QGraphicsScene):
             x_left     = _sti_x_acc
             x_ctr      = x_left + cw_sti / 2
             self.addRect(QRectF(x_left, label_row_h, cw_sti, timeline_h),
-                         QPen(Qt.NoPen), QBrush(QColor("#1A1A2E"))).setZValue(0)
+                         QPen(Qt.NoPen), QBrush(self._c_sti_bg)).setZValue(0)
 
             # Clickable column header (expands/collapses waveform)
             lbl_bg = _StiLabelItem(QRectF(x_left, 0, cw_sti, label_row_h),
@@ -3287,7 +3354,7 @@ class TimelineScene(QGraphicsScene):
             _ind_txt  = ("▼ " if is_exp else "▶ ") if expandable else ""
             _lbl_avail_v = max(0, label_row_h - 14)
             _lbl_txt  = fm.elidedText(_ind_txt + channel, Qt.ElideRight, _lbl_avail_v)
-            lbl = _make_rotated_label(self, _lbl_txt, font, QColor("#88AABB"),
+            lbl = _make_rotated_label(self, _lbl_txt, font, self._c_sti_lbl,
                                       x_ctr,
                                       label_row_h - LABEL_BOTTOM_MARGIN, 37)
             self._frozen_top_items.append((lbl, lbl.pos().y()))
@@ -3324,7 +3391,7 @@ class TimelineScene(QGraphicsScene):
 
         # --- Corner: ruler-column × label-row intersection ---------------
         _vt_corner_rect = self.addRect(QRectF(0, 0, RULER_WIDTH, label_row_h),
-                                       QPen(Qt.NoPen), QBrush(QColor("#1A1A1A")))
+                                       QPen(Qt.NoPen), QBrush(self._c_corner_bg))
         _vt_corner_rect.setZValue(40)   # above ruler (35-37) and label row (10-37)
         self._frozen_items.append((_vt_corner_rect, 0))
         self._frozen_top_items.append((_vt_corner_rect, 0))
@@ -3396,11 +3463,11 @@ class TimelineScene(QGraphicsScene):
 
         # --- Background & ruler ------------------------------------------
         _ruler_bg = self.addRect(QRectF(0, 0, total_w, RULER_HEIGHT),
-                                 QPen(Qt.NoPen), QBrush(QColor("#2B2B2B")))
+                               QPen(Qt.NoPen), QBrush(self._c_ruler_bg))
         _ruler_bg.setZValue(10)
         self._frozen_top_items.append((_ruler_bg, 0))
         _lbg = self.addRect(QRectF(0, 0, self._label_width, total_h),
-                            QPen(Qt.NoPen), QBrush(QColor("#1E1E1E")))
+                           QPen(Qt.NoPen), QBrush(self._c_label_bg))
         _lbg.setZValue(35)   # must be above cursor lines (z=30-32)
         self._frozen_items.append((_lbg, 0))
 
@@ -3481,14 +3548,14 @@ class TimelineScene(QGraphicsScene):
                                or y_top > self._vp_scene_orth_hi)
             if _core_in_vp:
                 self.addRect(QRectF(lw, y_top, timeline_w, self._row_height),
-                             QPen(Qt.NoPen), QBrush(QColor("#2A2A3E"))).setZValue(0)
+                             QPen(Qt.NoPen), QBrush(self._c_core_sum_bg)).setZValue(0)
                 self.addLine(0, y_top + self._row_height + self._row_gap - 1,
                              total_w, y_top + self._row_height + self._row_gap - 1,
-                             QPen(QColor("#444466"), 0.8)).setZValue(0.5)
+                             QPen(self._c_core_sep, 0.8)).setZValue(0.5)
 
                 hdr_item = _CoreHeaderItem(
                     QRectF(0, y_top, lw, self._row_height), core, self)
-                hdr_item.setBrush(QBrush(QColor("#2B2B45")))
+                hdr_item.setBrush(QBrush(self._c_core_hdr_bg))
                 hdr_item.setPen(QPen(Qt.NoPen))
                 hdr_item.setZValue(36)
                 self.addItem(hdr_item)
@@ -3497,7 +3564,7 @@ class TimelineScene(QGraphicsScene):
                 arrow   = "▼" if expanded else "▶"
                 arrow_w = fm.horizontalAdvance("▼")
                 arr_txt = self.addSimpleText(arrow, font)
-                arr_txt.setBrush(QBrush(QColor("#9999CC")))
+                arr_txt.setBrush(QBrush(self._c_core_arrow))
                 arr_txt.setPos(3, y_ctr - fm.height() / 2)
                 arr_txt.setZValue(37)
                 arr_txt.setAcceptedMouseButtons(Qt.NoButton)
@@ -3518,7 +3585,7 @@ class TimelineScene(QGraphicsScene):
                 _core_lbl_avail = max(0, lw - (arrow_w + 20) - 4 - _util_w)
                 lbl_item = self.addSimpleText(
                     fm.elidedText(core, Qt.ElideRight, _core_lbl_avail), font)
-                lbl_item.setBrush(QBrush(QColor("#E0E0E0")))
+                lbl_item.setBrush(QBrush(self._c_core_lbl))
                 lbl_item.setPos(arrow_w + 20, y_ctr - fm.height() / 2)
                 lbl_item.setZValue(37)
                 lbl_item.setAcceptedMouseButtons(Qt.NoButton)
@@ -3586,7 +3653,7 @@ class TimelineScene(QGraphicsScene):
                 _tmk   = _task_merge_key(task_name)
                 is_hl  = self._is_task_lock_active(_tmk)
 
-                sub_bg = QColor("#1E1E2C") if sub_idx % 2 == 0 else QColor("#232330")
+                sub_bg = self._c_core_sub_even if sub_idx % 2 == 0 else self._c_core_sub_odd
                 self.addRect(QRectF(lw, y_top2, timeline_w, self._row_height),
                              QPen(Qt.NoPen), QBrush(sub_bg)).setZValue(0)
                 _row_color = _task_color(task_name)
@@ -3598,7 +3665,7 @@ class TimelineScene(QGraphicsScene):
                                  QPen(_row_color.lighter(160), 1.0), QBrush(hl_bg)).setZValue(0.9)
                 self.addLine(0, y_top2 + self._row_height + self._row_gap - 1,
                              total_w, y_top2 + self._row_height + self._row_gap - 1,
-                             QPen(QColor("#2E2E3A"), 0.5)).setZValue(0.5)
+                             QPen(self._c_core_sub_sep, 0.5)).setZValue(0.5)
 
                 stripe = self.addRect(QRectF(26, y_top2 + 3, 3, self._row_height - 6),
                                       QPen(Qt.NoPen), QBrush(_row_color))
@@ -3613,7 +3680,7 @@ class TimelineScene(QGraphicsScene):
                 sub_lbl_bg.setZValue(36)
                 self.addItem(sub_lbl_bg)
                 self._frozen_items.append((sub_lbl_bg, 0))
-                lbl_color = _complementary_color(_row_color) if is_hl else QColor("#B0B0C0")
+                lbl_color = _complementary_color(_row_color) if is_hl else self._c_core_sub_lbl
                 lbl_fnt   = _monospace_font(self._font_size,
                                             QFont.Bold) if is_hl else font
                 _sub_avail  = max(0, lw - 33 - 4)   # left=33, right margin=4
@@ -3660,7 +3727,7 @@ class TimelineScene(QGraphicsScene):
             y_top  = _sti_y
             y_ctr  = y_top + row_h / 2
             self.addRect(QRectF(lw, y_top, timeline_w, row_h),
-                         QPen(Qt.NoPen), QBrush(QColor("#1A1A2E"))).setZValue(0)
+                         QPen(Qt.NoPen), QBrush(self._c_sti_bg)).setZValue(0)
             if expandable:
                 _ind  = "▼" if is_exp else "▶"
                 _ltxt = fm.elidedText(f"{_ind} {channel}", Qt.ElideRight, max(0, lw - 4 - 4))
@@ -3672,7 +3739,7 @@ class TimelineScene(QGraphicsScene):
             self.addItem(lbl_bg)
             self._frozen_items.append((lbl_bg, 0))
             lbl = self.addSimpleText(_ltxt, font)
-            lbl.setBrush(QBrush(QColor("#88AABB")))
+            lbl.setBrush(QBrush(self._c_sti_lbl))
             lbl.setPos(4, y_ctr - fm.height() / 2)
             lbl.setZValue(37)
             self._frozen_items.append((lbl, 4))
@@ -3703,11 +3770,11 @@ class TimelineScene(QGraphicsScene):
             _sti_y += row_h + self._row_gap
 
         corner = self.addRect(QRectF(0, 0, lw, RULER_HEIGHT),
-                              QPen(Qt.NoPen), QBrush(QColor("#1A1A1A")))
+                              QPen(Qt.NoPen), QBrush(self._c_corner_bg))
         corner.setZValue(38)
         _upper_h = RULER_HEIGHT - (10 if _has_tick else 0)
         hdr_lbl = self.addSimpleText("Core / Task", font)
-        hdr_lbl.setBrush(QBrush(QColor("#888888")))
+        hdr_lbl.setBrush(QBrush(self._c_header_txt))
         hdr_lbl.setPos(4, _upper_h / 2 - fm.height() / 2)
         hdr_lbl.setZValue(39)
         self._frozen_items.append((corner, 0))
@@ -3775,13 +3842,13 @@ class TimelineScene(QGraphicsScene):
 
         # --- Ruler column (left side): frozen to left edge on X scroll ------
         _ruler_col_bg_c = self.addRect(QRectF(0, 0, RULER_WIDTH, total_h),
-                                       QPen(Qt.NoPen), QBrush(QColor("#2B2B2B")))
+                                       QPen(Qt.NoPen), QBrush(self._c_ruler_bg))
         _ruler_col_bg_c.setZValue(35)
         self._frozen_items.append((_ruler_col_bg_c, 0))
 
         # --- Label row (top): frozen to top edge on Y scroll ---------------
         _label_row_bg_c = self.addRect(QRectF(0, 0, total_w, label_row_h),
-                                       QPen(Qt.NoPen), QBrush(QColor("#1E1E1E")))
+                                       QPen(Qt.NoPen), QBrush(self._c_label_bg))
         _label_row_bg_c.setZValue(10)
         self._frozen_top_items.append((_label_row_bg_c, 0))
 
@@ -3858,12 +3925,12 @@ class TimelineScene(QGraphicsScene):
                                or x_left > self._vp_scene_orth_hi)
             if _core_in_vp:
                 self.addRect(QRectF(x_left, label_row_h, col_w, timeline_h),
-                             QPen(Qt.NoPen), QBrush(QColor("#2A2A3E"))).setZValue(0)
+                             QPen(Qt.NoPen), QBrush(self._c_core_sum_bg)).setZValue(0)
 
                 # Clickable core column header (▼/▶ expand toggle)
                 hdr_item = _CoreHeaderItem(
                     QRectF(x_left, 0, col_w, label_row_h), core, self)
-                hdr_item.setBrush(QBrush(QColor("#2B2B45")))
+                hdr_item.setBrush(QBrush(self._c_core_hdr_bg))
                 hdr_item.setPen(QPen(Qt.NoPen))
                 hdr_item.setZValue(36)
                 self.addItem(hdr_item)
@@ -3874,7 +3941,7 @@ class TimelineScene(QGraphicsScene):
                 arr_label = arrow + " " + core
                 _lbl_avail_c = max(0, label_row_h - 14)
                 arr_label = QFontMetrics(font).elidedText(arr_label, Qt.ElideRight, _lbl_avail_c)
-                arr_txt = _make_rotated_label(self, arr_label, font, QColor("#9999CC"),
+                arr_txt = _make_rotated_label(self, arr_label, font, self._c_core_arrow,
                                               x_left + col_w / 2,
                                               label_row_h - LABEL_BOTTOM_MARGIN, 37)
                 self._frozen_top_items.append((arr_txt, arr_txt.pos().y()))
@@ -3919,7 +3986,7 @@ class TimelineScene(QGraphicsScene):
                 if x_left2 + col_w < self._vp_scene_orth_lo or x_left2 > self._vp_scene_orth_hi:
                     continue
 
-                sub_bg  = QColor("#1E1E2C") if sub_idx % 2 == 0 else QColor("#232330")
+                sub_bg  = self._c_core_sub_even if sub_idx % 2 == 0 else self._c_core_sub_odd
                 self.addRect(QRectF(x_left2, label_row_h, col_w, timeline_h),
                              QPen(Qt.NoPen), QBrush(sub_bg)).setZValue(0)
 
@@ -3949,7 +4016,7 @@ class TimelineScene(QGraphicsScene):
                 sub_lbl_bg.setZValue(36)
                 self.addItem(sub_lbl_bg)
                 self._frozen_top_items.append((sub_lbl_bg, 0))
-                lbl_color = _complementary_color(_row_color) if is_hl else QColor("#B0B0C0")
+                lbl_color = _complementary_color(_row_color) if is_hl else self._c_core_sub_lbl
                 lbl_fnt   = _monospace_font(self._font_size,
                                             QFont.Bold) if is_hl else font
                 t_lbl = _make_rotated_label(self, disp, lbl_fnt, lbl_color,
@@ -3992,7 +4059,7 @@ class TimelineScene(QGraphicsScene):
             x_left     = _sti_x_acc_vc
             x_ctr_vc   = x_left + cw_sti_vc / 2
             self.addRect(QRectF(x_left, label_row_h, cw_sti_vc, timeline_h),
-                         QPen(Qt.NoPen), QBrush(QColor("#1A1A2E"))).setZValue(0)
+                         QPen(Qt.NoPen), QBrush(self._c_sti_bg)).setZValue(0)
 
             # Clickable column header (expands/collapses waveform)
             lbl_bg_vc = _StiLabelItem(QRectF(x_left, 0, cw_sti_vc, label_row_h),
@@ -4006,7 +4073,7 @@ class TimelineScene(QGraphicsScene):
             _lbl_avail_vc = max(0, label_row_h - 14)
             _lbl_txt_vc  = QFontMetrics(font).elidedText(
                 _ind_txt_vc + channel, Qt.ElideRight, _lbl_avail_vc)
-            lbl = _make_rotated_label(self, _lbl_txt_vc, font, QColor("#88AABB"),
+            lbl = _make_rotated_label(self, _lbl_txt_vc, font, self._c_sti_lbl,
                                       x_ctr_vc,
                                       label_row_h - LABEL_BOTTOM_MARGIN, 37)
             self._frozen_top_items.append((lbl, lbl.pos().y()))
@@ -4044,7 +4111,7 @@ class TimelineScene(QGraphicsScene):
 
         # --- Corner: ruler-column × label-row intersection ---------------
         _vc_corner = self.addRect(QRectF(0, 0, RULER_WIDTH, label_row_h),
-                                  QPen(Qt.NoPen), QBrush(QColor("#1A1A1A")))
+                                  QPen(Qt.NoPen), QBrush(self._c_corner_bg))
         _vc_corner.setZValue(40)
         self._frozen_items.append((_vc_corner, 0))
         self._frozen_top_items.append((_vc_corner, 0))
@@ -6720,8 +6787,12 @@ class TimelineView(QGraphicsView):
         copy of this pixmap in ``_paint_nav_pixmap`` so the expensive row
         painting only happens when the trace/mode/STI state actually changes.
         """
+        is_dark_ui = getattr(sc, '_is_dark_ui', True)
+        nav_bg = QColor(30, 30, 30, 230) if is_dark_ui else QColor(245, 245, 245, 235)
+        nav_border = QColor(70, 70, 70) if is_dark_ui else QColor(170, 170, 170)
+
         pix = QPixmap(W, H)
-        pix.fill(QColor(30, 30, 30, 230))
+        pix.fill(nav_bg)
 
         if tr is None:
             return pix
@@ -6779,7 +6850,7 @@ class TimelineView(QGraphicsView):
         if not row_data and not sti_row_data:
             # Border only
             try:
-                p.setPen(QPen(QColor(70, 70, 70), 1))
+                p.setPen(QPen(nav_border, 1))
                 p.setBrush(Qt.NoBrush)
                 p.drawRect(0, 0, W - 1, H - 1)
             finally:
@@ -6896,7 +6967,7 @@ class TimelineView(QGraphicsView):
 
         # Static border
         try:
-            p.setPen(QPen(QColor(70, 70, 70), 1))
+            p.setPen(QPen(nav_border, 1))
             p.setBrush(Qt.NoBrush)
             p.drawRect(0, 0, W - 1, H - 1)
         finally:
@@ -6921,7 +6992,7 @@ class TimelineView(QGraphicsView):
         v_total = v_range + vbar.pageStep()
 
         # ---- Background cache --------------------------------------------
-        bg_key = (id(tr), sc._view_mode, sc._show_sti,
+        bg_key = (id(tr), sc._view_mode, sc._show_sti, getattr(sc, '_is_dark_ui', True),
                   vbar.pageStep(),   # rebuilds on window resize (proportions change)
                   frozenset(sc._sti_expanded),
                   frozenset(sc._core_expanded.items()))
@@ -7774,6 +7845,10 @@ class _ScatterWidget(QWidget):
         self.setMouseTracking(True)
         self.setCursor(Qt.CrossCursor)
 
+    def set_dark(self, is_dark: bool) -> None:
+        self._is_dark = is_dark
+        self.update()
+
     def _screen_coords(self, w: int, h: int, ml: int, mr: int, mt: int, mb: int):
         """Return (sx_list, sy_list) mapping each point to widget pixels."""
         if not self._points:
@@ -7981,6 +8056,10 @@ class _HistogramWidget(QWidget):
         self.setMinimumHeight(120)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
+    def set_dark(self, is_dark: bool) -> None:
+        self._is_dark = is_dark
+        self.update()
+
     def paintEvent(self, event) -> None:  # noqa: N802
         if not self._values:
             return
@@ -8138,6 +8217,13 @@ class _MetricsPlotDialog(QDialog):
         btn_row.addWidget(btn_cls)
         root.addLayout(btn_row)
 
+    def set_dark(self, is_dark: bool) -> None:
+        self._is_dark = is_dark
+        self._scatter.set_dark(is_dark)
+        self._histogram.set_dark(is_dark)
+        self._content.update()
+        self.update()
+
     def _on_scatter_click(self, payload) -> None:
         if self._on_pt_click:
             self._on_pt_click(payload)
@@ -8241,6 +8327,8 @@ class _StatsPanel(QWidget):
 
     def set_dark(self, is_dark: bool) -> None:
         self._is_dark = is_dark
+        if self._plot_dlg is not None:
+            self._plot_dlg.set_dark(is_dark)
 
     def _open_plot(self, trace, mk: str, kind: str) -> None:
         """Open a metrics distribution popup for the given task and metric kind."""
@@ -12075,6 +12163,7 @@ class MainWindow(QMainWindow):
         to edit when adjusting a color.
         """
         app = QApplication.instance()
+        self._is_dark = bool(is_dark)
 
         # Application-wide font (menus, toolbar, status bar).
         _ui_font_size = getattr(self, '_ui_font_size_val', UI_FONT_SIZE)
@@ -12207,6 +12296,9 @@ class MainWindow(QMainWindow):
                 "Drop a <b>.btf</b> file here<br>"
                 "or press <b>Ctrl+O</b> to open one</p>"
             )
+        if hasattr(self, '_view'):
+            self._view.setBackgroundBrush(QBrush(QColor(c['win_bg'])))
+            self._view._scene.set_theme(is_dark, rebuild=(self._trace is not None))
         if hasattr(self, '_legend'):
             self._legend.update_theme(is_dark)
         if hasattr(self, '_legend_dock') and self._legend_dock.widget() is not None:
@@ -12229,6 +12321,12 @@ class MainWindow(QMainWindow):
             _ic_color = "#CCCCCC" if is_dark else "#555555"
             for _act, _ic_path in self._tb_icon_actions:
                 _act.setIcon(_svg_icon(_ic_path, _ic_color))
+        if hasattr(self, '_tb_theme_btn'):
+            _theme_ic = _IC_THEME_LIGHT if is_dark else _IC_THEME_DARK
+            self._tb_theme_btn.setIcon(_svg_icon(_theme_ic, _ic_color))
+            self._tb_theme_btn.setToolTip(
+                "Switch to light theme" if is_dark else "Switch to dark theme"
+            )
         if hasattr(self, '_act_theme'):
             self._act_theme.setText(
                 "Switch to &Light Theme" if is_dark else "Switch to &Dark Theme"
@@ -12306,9 +12404,8 @@ class MainWindow(QMainWindow):
         self._view._scene.highlight_changed.connect(self._cpu_load_graph.set_task)
         # Synchronise cursor, marks, and hover overlays on the CPU load graph
         self._view._scene.hover_changed.connect(self._cpu_load_graph.update)
+        self._view._scene.marks_changed.connect(self._cpu_load_graph.update)
         self._view.cursors_changed.connect(lambda _: self._cpu_load_graph.update())
-        self._view.mark_moved.connect(lambda *_: self._cpu_load_graph.update())
-        self._view.mark_dragging.connect(lambda *_: self._cpu_load_graph.update())
 
         # --- Legend dock (right panel) ---
         self._build_legend_dock()
@@ -12735,6 +12832,14 @@ class MainWindow(QMainWindow):
         _l2w = tb.widgetForAction(self._tb_log2_btn)
         if _l2w:
             _l2w.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        tb.addSeparator()
+
+        # --- Theme and settings ---
+        self._tb_theme_btn = _ia(
+            "Theme", self._toggle_theme,
+            _IC_THEME_LIGHT if self._is_dark else _IC_THEME_DARK,
+            "Switch to light theme" if self._is_dark else "Switch to dark theme"
+        )
         tb.addSeparator()
 
         # --- Settings button ---
