@@ -30,22 +30,23 @@ Histogram of Execution Time:
 - **Viewport culling** — only visible rows/columns and segments are rendered; no slowdown on large traces
 - **Multi-tab traces** — open several `.btf` files at once (Desktop: closable tabs; Web: tab bar under the toolbar). Session tabs, active tab, and per-tab zoom/cursors are restored from `btf_viewer.rc` on launch (Desktop)
 - **Measurement cursors** — Desktop supports 2–8 cursors (default: 4); Web supports up to 4 cursors
-- **Cursor-scoped statistics** — with 2+ cursors, the Statistics panel can limit all metrics (CPU%, execution slices, inter-arrival, exports, and charts) to the window from C1 through the last cursor; toggle **Limit to cursor range (C1–Cn)** (Desktop + Web)
+- **Cursor-scoped statistics** — with 2+ cursors, the Statistics panel can limit all metrics (CPU%, execution slices, blocking time, inter-arrival, scheduling summary, exports, and charts) to the window from C1 through the last cursor; toggle **Limit to cursor range (C1–Cn)** (Desktop + Web)
 - **Cursor range summary** — with 2+ cursors, Desktop also shows a quick min/max/avg segment summary in the status bar; Web shows range stats in the **Cursors** panel
 - **Task highlight** — hover or click any task label or Legend row to highlight all its segments
 - **Dockable Legend panel** — colour swatches for every task, with a search box and the same highlight interaction
-- **Dockable Statistics panel** — per-core CPU utilisation and per-task CPU time breakdown
+- **Dockable Statistics panel** — per-core CPU utilisation, top tasks, scheduling summary (context switches, core-gap avg/max), and collapsible metric tables
 - **Tag View** — inspect tag channels/events (`tag_event`, `tag0_event` … `tag7_event`) alongside task/core activity
-- **Metrics Table under Statistics Panel** — tabular Execution Time Per Slice and Inter-Arrival metrics (runs, min/avg/max/p95, CPU%)
-- **Metrics distribution charts** — click any row in the Execution Time or Inter-Arrival table to open a scatter-plot + histogram popup for that task; charts live-update when cursors move or cursor-range scope is toggled (Desktop + Web). On Desktop, each trace tab remembers its own open chart when you switch tabs
-- **CPU Load Graph** — real-time bar chart below the timeline showing per-core CPU utilisation over the visible time range; toggle with the **Load** toolbar button
+- **Metrics tables** — Execution Time Per Slice, **Blocking Time** (off-CPU gap between activations), and Inter-Arrival (runs, min/avg/max/p95, CPU%); click **Max** in Execution Time to jump to the WCET slice
+- **Metrics distribution charts** — click any row in the Execution Time, Blocking Time, or Inter-Arrival table to open a scatter-plot + histogram popup for that task; charts live-update when cursors move or cursor-range scope is toggled (Desktop + Web). On Desktop, each trace tab remembers its own open chart when you switch tabs
+- **Segment tooltips** — hover any segment bar for duration, slice index on core, previous/next task on that core, and gap before the slice
+- **CPU Load Graph** — bar chart below the timeline showing per-core CPU utilisation; row labels show the **visible-window average** and, with 2+ cursors, a cursor-range average (`· C:xx%`); toggle with the **Load** toolbar button
 - **STI event markers** — software trace items rendered as coloured diamond markers
 - **Find & Jump** — search for any task name; `F3` / `Shift+F3` steps through all matching segments
 - **Bookmarks & Annotations** — mark important timestamps and attach free-text notes; persisted per trace file in `btf_viewer.rc`
 - **Right-click context menu** — place/remove/clear cursors, add a bookmark, or add an annotation, all from a single right-click anywhere on the timeline
 - **Recent files** — **File → Open Recent** lists the 8 most recently opened traces for one-click reopening
 - **Dark / Light theme** — switch from **View → Switch to Light/Dark Theme** or **Settings → Appearance**
-- **Export to PNG / clipboard** — save the current viewport as a PNG file or copy it to the clipboard
+- **Export to PNG / SVG / clipboard** — capture the viewport in the **Snapshot Editor** (annotate with arrows, shapes, and text, then save or copy); direct clipboard copy also available from the menu
 - **Persistent settings** — all preferences stored in `btf_viewer.rc` alongside the script
 - **Drag-and-drop** — drop a `.btf` file directly onto the window
 - **Optimised for large traces** — tested with up to **128 cores, 1 024 tasks, and 5 M+ events**
@@ -181,8 +182,9 @@ A bar chart below the timeline shows per-core (or total) CPU utilisation over th
 
 - **Toggle** — click the **Load** toolbar button to show or hide the graph.
 - **View modes** — in **Task View** a single *CPU Load* row shows aggregate utilisation; in **Core View** each core gets its own row.
+- **Row labels** — each row shows average load over the **currently visible** time window; with 2+ cursors placed, labels also show the average over the cursor range (`· C:xx%`), and the graph shades the C1–Cn window in blue.
 - **Expand / Collapse** — in Core View click a core row header to collapse it to a compact bar.
-- **Hover** — moving the pointer over the timeline projects a live cursor onto the load graph as well.
+- **Hover** — moving the pointer over the timeline projects a live cursor onto the load graph; a badge shows load % at the hover time.
 - **Cursors, bookmarks & annotations** are also mirrored in the load graph at their exact time positions.
 
 ### Statistics panel — cursor-scoped metrics
@@ -197,15 +199,25 @@ When **2 or more cursors** are placed, check **Limit to cursor range (C1–Cn)**
 | Blocking time | Off-CPU gap between consecutive slices; only pairs where **both** slices are fully inside the range |
 | Inter-arrival | Activations whose start time falls inside the range |
 
-<img src="../images/statistics.png" alt="<Metric>">
+<img src="../images/statistics.png" alt="Statistics panel with cursor-scoped metrics">
 
 Uncheck the box to return to full-trace statistics.
 
+Below the scope checkbox, a **scheduling summary** line shows context-switch count and average/max core gap (idle time between consecutive slices on each core). Metric tables (**Core Utilisation**, **Top Tasks**, **Execution Time**, **Blocking Time**, **Inter-Arrival**) are **collapsible** — click a section title to expand or collapse it.
+
+### Snapshot Editor
+
+Click the **Shot** toolbar button (or press `S` when focus is not in a text field) to capture the current timeline view and open the **Snapshot Editor**:
+
+- Annotate with arrows, lines, rectangles, circles, and text before exporting.
+- **Save PNG** or **Copy to Clipboard** from the editor footer.
+- When the **Load** graph is visible, the capture includes the CPU load panel below the timeline.
+
 ### Metrics Distribution Charts
 
-In the **Statistics** panel, the **Execution Time** and **Inter-Arrival** tables each have a small chart icon (📈) on every row. Click it to open a floating chart popup for that task:
+In the **Statistics** panel, the **Execution Time**, **Blocking Time**, and **Inter-Arrival** tables each have a small chart icon (📈) on every row. Click it to open a floating chart popup for that task:
 
-- **Scatter plot** — every individual slice duration (or inter-arrival gap) plotted in arrival order, so you can spot trends or outliers.
+- **Scatter plot** — every individual slice duration, blocking gap, or inter-arrival gap plotted in arrival order, so you can spot trends or outliers.
 - **Histogram** — a bar chart showing the distribution of durations, revealing multimodal behaviour or long tails.
 
 The popup can be dragged, resized, and closed independently of the main window.
@@ -373,9 +385,22 @@ The Legend lists every task with its colour swatch and `Name[id]` label.
 
 ## Export
 
-**File → Save as Image (PNG)** (`Ctrl+S`) saves the current viewport as a PNG file.
+### Snapshot Editor (PNG)
 
-**File → Copy Image to Clipboard** (`Ctrl+Shift+C`) copies the current viewport to the system clipboard. On Linux, `xclip`, `xsel`, or `wl-copy` is used when available (Qt clipboard is unreliable for images on X11/Wayland).
+**File → Save as Image (PNG)…** (`Ctrl+S`), the toolbar **Save PNG** / **Shot** buttons, and the plot-dialog **Export PNG** action all capture the current viewport and open the **Snapshot Editor** — they do **not** write a file immediately.
+
+In the editor you can draw annotation shapes (arrow, line, dashed line, rectangle, circle, text) and then:
+
+- **Save PNG…** — write the annotated image to disk (includes CPU load graph when **Load** is on).
+- **Copy to Clipboard** — copy the annotated image.
+
+### Direct clipboard copy
+
+**File → Copy Image to Clipboard** (`Ctrl+Shift+C`) copies the raw viewport (timeline + CPU load when visible) without opening the editor. On Linux, `xclip`, `xsel`, or `wl-copy` is used when available (Qt clipboard is unreliable for images on X11/Wayland).
+
+### SVG
+
+**File → Save as SVG…** (`Ctrl+Shift+S`) or the toolbar **Save SVG** button exports the current viewport as vector SVG (includes CPU load when visible).
 
 ---
 
@@ -442,15 +467,17 @@ Open **Settings** from the toolbar (**⚙ Settings**) or via **View → ⚙ Sett
 
 The **Statistics** dock appears at the bottom of the window. Toggle it from **Settings → Display → Statistics panel**.
 
-At the top, **Limit to cursor range (C1–Cn)** restricts all statistics to the time window from the first placed cursor through the last (requires 2+ cursors). Section titles show **(cursor range)** when scoped.
+At the top, **Limit to cursor range (C1–Cn)** restricts all statistics to the time window from the first placed cursor through the last (requires 2+ cursors). Section titles show **(cursor range)** when scoped. Clearing all cursors returns to full-trace statistics immediately.
 
 It shows:
 
 - **Summary** — span, task/segment/STI counts (scoped when the checkbox is on)
-- **Core utilisation** — percentage of active (non-IDLE, non-TICK) CPU time per core
-- **Top tasks by CPU** — ranked list of worker tasks by total CPU time consumed
-- **Execution Time Per Slice** — per-task min/avg/max/p95, run count, and CPU%; click a row for a scatter + histogram popup
-- **Inter-Arrival Time** — same statistics for gaps between task activations
+- **Scheduling summary** — context-switch count and average/max core gap between consecutive slices on each core
+- **Core utilisation** — percentage of active (non-IDLE, non-TICK) CPU time per core (collapsible)
+- **Top tasks by CPU** — ranked list of worker tasks by total CPU time consumed (collapsible)
+- **Execution Time Per Slice** — per-task min/avg/max/p95, run count, and CPU%; click a row for a scatter + histogram popup; click **Max** to jump to the WCET slice
+- **Blocking Time** — off-CPU gap between consecutive activations of the same task (min/avg/max/p95); click a row for a distribution chart (collapsible)
+- **Inter-Arrival Time** — same statistics for gaps between task activations (collapsible)
 
 **Export CSV** / **Export HTML** respect the current cursor scope. Open metrics charts update live when cursors move or scope is toggled; each trace tab remembers its own open chart when you switch tabs.
 
@@ -554,8 +581,9 @@ Settings, window layout, bookmarks, and multi-tab state are stored in `btf_viewe
 |-----|--------|
 | `Ctrl+O` | Open `.btf` file (new tab) |
 | `Ctrl+W` | Close active tab |
-| `Ctrl+S` | Save viewport as PNG |
-| `Ctrl+Shift+C` | Copy viewport to clipboard |
+| `Ctrl+S` | Open snapshot editor (capture viewport for annotation) |
+| `Ctrl+Shift+C` | Copy viewport to clipboard (no editor) |
+| `Ctrl+Shift+S` | Save viewport as SVG |
 | `Ctrl++` | Zoom in |
 | `Ctrl+-` | Zoom out |
 | `Ctrl+0` | Fit to window |
@@ -573,7 +601,7 @@ Settings, window layout, bookmarks, and multi-tab state are stored in `btf_viewe
 
 ## Other
 
-- Hover over any segment bar or STI marker for a detailed tooltip.
+- Hover over any segment bar or STI marker for a detailed tooltip (task, core, start/end/duration, slice index on core, previous/next task on that core, gap before the slice).
 - Toggle STI events, grid lines, and hover highlight from **Settings** (`Ctrl+,`).
 - Drag and drop a `.btf` file onto the window to open it in a new tab.
 - Open tabs, active tab, zoom level, and cursor positions are saved per trace in `btf_viewer.rc` and restored on the next launch.
