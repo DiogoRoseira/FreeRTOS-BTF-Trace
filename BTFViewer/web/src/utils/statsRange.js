@@ -40,3 +40,19 @@ export function getStatsRange(cursors, scopeEnabled) {
 export function scopeSuffix(range) {
   return range ? ' (cursor range)' : ''
 }
+
+/** Banner text for metrics plot dialogs. */
+export function plotScopeBanner(range, timeScale, formatTimeFn) {
+  if (range) {
+    return {
+      scoped: true,
+      badge: 'Cursor range',
+      detail: `C1–C${range.nCursors}: ${formatTimeFn(range.lo, timeScale)} … ${formatTimeFn(range.hi, timeScale)} (${formatTimeFn(range.hi - range.lo, timeScale)})`,
+    }
+  }
+  return {
+    scoped: false,
+    badge: 'Full trace',
+    detail: 'Not limited to cursors — all slices in the loaded trace',
+  }
+}

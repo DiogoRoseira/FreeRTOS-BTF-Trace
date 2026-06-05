@@ -313,6 +313,15 @@
       </div>
 
       <div
+        v-if="plotScopeInfo"
+        class="plot-scope-banner"
+        :class="plotScopeInfo.scoped ? 'plot-scope-cursor' : 'plot-scope-full'"
+      >
+        <span class="plot-scope-badge">{{ plotScopeInfo.badge }}</span>
+        <span class="plot-scope-detail">{{ plotScopeInfo.detail }}</span>
+      </div>
+
+      <div
         ref="plotContentRef"
         class="plot-dialog-body"
       >
@@ -550,6 +559,7 @@ import {
   segFullyInRange,
   segOverlapsRange,
   scopeSuffix,
+  plotScopeBanner,
 } from '../utils/statsRange.js'
 
 const props = defineProps({
@@ -863,6 +873,11 @@ const plotData = computed(() => {
   return open.kind === 'exec'
     ? _buildExecPlot(props.trace, open.mk, range)
     : _buildInterPlot(props.trace, open.mk, range)
+})
+
+const plotScopeInfo = computed(() => {
+  if (!openPlotRef.value) return null
+  return plotScopeBanner(statsRange.value, props.trace.timeScale, formatTime)
 })
 
 function openPlot(mk, kind) {
@@ -1490,6 +1505,10 @@ function _computeRangeStats(cursors) {
 
 watch(() => props.cursors, (cursors) => {
   clearTimeout(_rangeTimer)
+  if (!scopeToCursors.value) {
+    rangeStats.value = null
+    return
+  }
   const placed = cursors.filter(c => c !== null)
   if (placed.length < 2) {
     rangeStats.value = null
@@ -1821,6 +1840,55 @@ watch(plotData, () => {
 
 .plot-close-btn:hover {
   background: var(--tb-btn-hover);
+}
+
+.plot-scope-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.plot-scope-cursor {
+  background: color-mix(in srgb, #ff9800 18%, var(--panel-bg));
+  border-bottom: 1px solid color-mix(in srgb, #ff9800 45%, var(--border));
+  border-left: 4px solid #ff9800;
+}
+
+.plot-scope-full {
+  background: color-mix(in srgb, var(--fg-dim) 10%, var(--panel-bg));
+  border-bottom: 1px solid var(--border);
+  border-left: 4px solid var(--fg-dim);
+}
+
+.plot-scope-badge {
+  flex-shrink: 0;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 4px;
+}
+
+.plot-scope-cursor .plot-scope-badge {
+  background: #ff9800;
+  color: #1a1200;
+}
+
+.plot-scope-full .plot-scope-badge {
+  background: var(--border);
+  color: var(--fg);
+}
+
+.plot-scope-detail {
+  color: var(--fg);
+}
+
+.plot-scope-full .plot-scope-detail {
+  color: var(--fg-dim);
 }
 
 .plot-dialog-body {

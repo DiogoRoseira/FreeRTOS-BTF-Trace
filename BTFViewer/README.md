@@ -1,6 +1,6 @@
 # BTF Trace Viewer
 
-Current version: **1.2.1** (Desktop Python app + Web app)
+Current version: **1.3.0** (Desktop Python app + Web app)
 
 A PyQt5-based interactive visualiser for FreeRTOS context-switch traces in **Best Trace Format** (`.btf`).
 
@@ -10,7 +10,7 @@ Task view and CPU load:
 
 <img src="../images/btfviewer.png" alt="BTF Viewer screenshot" width=640>
 
-Histogram of Exectuion Time:
+Histogram of Execution Time:
 
 <img src="../images/btfviewer-2.png" alt="Histogram of Execution Time" width=640>
 
@@ -28,20 +28,22 @@ Histogram of Exectuion Time:
 - **Default zoom 2 timescale units/px** — the **1:1** toolbar button resets to 2 timescale units per pixel (for `ns` timescale, the UI shows `2 ns/px`; configurable in Settings)
 - **Zoom to cursor range** — `Ctrl+R` or the **⊡ Range** toolbar button fits the viewport exactly between cursor C1 (left/top edge) and the last cursor (right/bottom edge)
 - **Viewport culling** — only visible rows/columns and segments are rendered; no slowdown on large traces
+- **Multi-tab traces** — open several `.btf` files at once (Desktop: closable tabs; Web: tab bar under the toolbar). Session tabs, active tab, and per-tab zoom/cursors are restored from `btf_viewer.rc` on launch (Desktop)
 - **Measurement cursors** — Desktop supports 2–8 cursors (default: 4); Web supports up to 4 cursors
-- **Cursor range statistics** — with 2+ cursors, Desktop shows range stats in the status bar; Web shows them in the **Cursor / Bookmark** page
+- **Cursor-scoped statistics** — with 2+ cursors, the Statistics panel can limit all metrics (CPU%, execution slices, inter-arrival, exports, and charts) to the window from C1 through the last cursor; toggle **Limit to cursor range (C1–Cn)** (Desktop + Web)
+- **Cursor range summary** — with 2+ cursors, Desktop also shows a quick min/max/avg segment summary in the status bar; Web shows range stats in the **Cursors** panel
 - **Task highlight** — hover or click any task label or Legend row to highlight all its segments
 - **Dockable Legend panel** — colour swatches for every task, with a search box and the same highlight interaction
 - **Dockable Statistics panel** — per-core CPU utilisation and per-task CPU time breakdown
 - **Tag View** — inspect tag channels/events (`tag_event`, `tag0_event` … `tag7_event`) alongside task/core activity
 - **Metrics Table under Statistics Panel** — tabular Execution Time Per Slice and Inter-Arrival metrics (runs, min/avg/max/p95, CPU%)
-- **Metrics distribution charts** — click any row in the Execution Time or Inter-Arrival table to open a scatter-plot + histogram popup for that task
+- **Metrics distribution charts** — click any row in the Execution Time or Inter-Arrival table to open a scatter-plot + histogram popup for that task; charts live-update when cursors move or cursor-range scope is toggled (Desktop + Web). On Desktop, each trace tab remembers its own open chart when you switch tabs
 - **CPU Load Graph** — real-time bar chart below the timeline showing per-core CPU utilisation over the visible time range; toggle with the **Load** toolbar button
 - **STI event markers** — software trace items rendered as coloured diamond markers
 - **Find & Jump** — search for any task name; `F3` / `Shift+F3` steps through all matching segments
 - **Bookmarks & Annotations** — mark important timestamps and attach free-text notes; persisted per trace file in `btf_viewer.rc`
 - **Right-click context menu** — place/remove/clear cursors, add a bookmark, or add an annotation, all from a single right-click anywhere on the timeline
-- **Recent files** — **File → Open Recent** lists the 5 most recently opened traces for one-click reopening
+- **Recent files** — **File → Open Recent** lists the 8 most recently opened traces for one-click reopening
 - **Dark / Light theme** — switch from **View → Switch to Light/Dark Theme** or **Settings → Appearance**
 - **Export to PNG / clipboard** — save the current viewport as a PNG file or copy it to the clipboard
 - **Persistent settings** — all preferences stored in `btf_viewer.rc` alongside the script
@@ -62,7 +64,9 @@ pip install PyQt5
 python btf_viewer.py [trace.btf]
 ```
 
-A file can also be opened via **File → Open** (`Ctrl+O`) or dragged onto the window.
+A file can also be opened via **File → Open** (`Ctrl+O`) or dragged onto the window. Each open file appears in its own **tab**; use **File → Close Tab** (`Ctrl+W`) to close the active tab. Re-opening the same path switches to the existing tab instead of loading it twice.
+
+On launch (with no command-line file), the viewer restores the previous session: all tabs listed in `btf_viewer.rc`, the last active tab, and each tab’s saved zoom level and cursor positions.
 
 ---
 
@@ -139,6 +143,8 @@ Toggle with the **Task** / **Core** buttons in the toolbar.
 ### Opening a file
 
 Click **Open** in the toolbar and select any `.btf` file.
+Each file opens in a new **tab** in the bar below the toolbar; click a tab to switch traces, or **×** to close one.
+Opening the same filename again focuses the existing tab.
 Large files (5 M+ events) are parsed in a background thread so the UI stays responsive. A progress indicator (`Parsing… 70%`) is shown during loading.
 
 ### Zoom & pan
@@ -179,6 +185,19 @@ A bar chart below the timeline shows per-core (or total) CPU utilisation over th
 - **Hover** — moving the pointer over the timeline projects a live cursor onto the load graph as well.
 - **Cursors, bookmarks & annotations** are also mirrored in the load graph at their exact time positions.
 
+### Statistics panel — cursor-scoped metrics
+
+When **2 or more cursors** are placed, check **Limit to cursor range (C1–Cn)** at the top of the Statistics panel (enabled by default). All summary counts, CPU tables, execution/inter-arrival metrics, CSV/HTML export, and distribution charts then use only data inside the cursor window:
+
+| Metric | Scoping rule |
+|--------|----------------|
+| Span / summary counts | Range width; tasks/segments/STI with any overlap |
+| Core & task CPU % | Overlapping active time ÷ range width |
+| Execution time per slice | Only slices **fully inside** the range |
+| Inter-arrival | Activations whose start time falls inside the range |
+
+Uncheck the box to return to full-trace statistics.
+
 ### Metrics Distribution Charts
 
 In the **Statistics** panel, the **Execution Time** and **Inter-Arrival** tables each have a small chart icon (📈) on every row. Click it to open a floating chart popup for that task:
@@ -187,6 +206,8 @@ In the **Statistics** panel, the **Execution Time** and **Inter-Arrival** tables
 - **Histogram** — a bar chart showing the distribution of durations, revealing multimodal behaviour or long tails.
 
 The popup can be dragged, resized, and closed independently of the main window.
+If the chart is open, it **updates live** when you move cursors or toggle cursor-range scope.
+Each browser tab keeps its own chart state when you switch between open traces.
 
 ### STI events
 
@@ -213,7 +234,9 @@ pip install PyQt5
 python btf_viewer.py [trace.btf]
 ```
 
-A file can also be opened via **File → Open** (`Ctrl+O`) or dragged onto the window.
+Passing a file on the command line opens that trace in a tab immediately. With no argument, the viewer restores the previous session from `btf_viewer.rc`.
+
+Files can also be opened via **File → Open** (`Ctrl+O`), **File → Close Tab** (`Ctrl+W`), or drag-and-drop onto the window.
 
 ---
 
@@ -298,18 +321,26 @@ Between 2 and 8 cursors can be placed on the timeline (default: 4; adjustable in
 | Click a `C1` / `C2` / ... badge in the status bar | Scroll the view to that cursor |
 | `Ctrl+R` / **⊡ Range** toolbar button | Zoom view to fit exactly between C1 and the last cursor |
 
-### Cursor Range Statistics
+### Cursor range summary (status bar)
 
-When two or more cursors are placed, range statistics are computed over all task segments that start **and** end within the cursor range.
+When two or more cursors are placed, the **status bar** shows a quick summary of segment durations for slices that start **and** end within the cursor range: **min**, **max**, and **avg**.
 
-- **Desktop:** shown in the status bar.
-- **Web:** shown in the **Cursor / Bookmark** page.
+For full per-task/per-core metrics scoped to the cursor window, use the **Statistics** panel — see [Statistics Panel](#statistics-panel) and **Limit to cursor range (C1–Cn)**.
 
-The reported values are:
+---
 
-- **min** — shortest segment in the range
-- **max** — longest segment in the range
-- **avg** — mean segment duration in the range
+## Multi-tab traces (Desktop)
+
+| Action | Effect |
+|--------|--------|
+| **File → Open** (`Ctrl+O`) | Open a trace in a **new tab** (or switch to it if already open) |
+| **File → Close Tab** (`Ctrl+W`) | Close the active tab |
+| Click a tab | Switch the timeline, legend, statistics, marks, and CPU load graph to that trace |
+| **×** on a tab | Close that tab |
+
+Each tab has its own cursors, zoom level, bookmarks, annotations, find state, and metrics chart session. Shared settings (theme, orientation, row height, etc.) apply to all tabs.
+
+On exit, the viewer saves the list of open tab paths, the active tab index, and per-tab zoom/cursor layout to `btf_viewer.rc`. The next launch reopens the same tabs automatically (unless a file path on the command line overrides session restore).
 
 ---
 
@@ -408,11 +439,17 @@ Open **Settings** from the toolbar (**⚙ Settings**) or via **View → ⚙ Sett
 
 The **Statistics** dock appears at the bottom of the window. Toggle it from **Settings → Display → Statistics panel**.
 
+At the top, **Limit to cursor range (C1–Cn)** restricts all statistics to the time window from the first placed cursor through the last (requires 2+ cursors). Section titles show **(cursor range)** when scoped.
+
 It shows:
 
-- **Trace span** — total time range covered by the trace
+- **Summary** — span, task/segment/STI counts (scoped when the checkbox is on)
 - **Core utilisation** — percentage of active (non-IDLE, non-TICK) CPU time per core
 - **Top tasks by CPU** — ranked list of worker tasks by total CPU time consumed
+- **Execution Time Per Slice** — per-task min/avg/max/p95, run count, and CPU%; click a row for a scatter + histogram popup
+- **Inter-Arrival Time** — same statistics for gaps between task activations
+
+**Export CSV** / **Export HTML** respect the current cursor scope. Open metrics charts update live when cursors move or scope is toggled; each trace tab remembers its own open chart when you switch tabs.
 
 ---
 
@@ -489,7 +526,22 @@ The **Add Bookmark** and **Add Annotation** items are only shown when a trace is
 
 ## Recent Files
 
-**File → Open Recent** lists the 5 most recently opened `.btf` files. Clicking an entry opens it immediately without a file dialog. The list is stored in `btf_viewer.rc` and persists across launches.
+**File → Open Recent** lists the 8 most recently opened `.btf` files. Clicking an entry opens it in a new tab (or switches to the existing tab). The list is stored in `btf_viewer.rc` and persists across launches.
+
+---
+
+## Session persistence (`btf_viewer.rc`)
+
+Settings, window layout, bookmarks, and multi-tab state are stored in `btf_viewer.rc` next to `btf_viewer.py`.
+
+| Section / key | Purpose |
+|---------------|---------|
+| `[files]` `open_tabs_json` | JSON array of open trace paths (tab order) |
+| `[files]` `active_tab_index` | Which tab was focused on exit |
+| `[files]` `last_file` | Path of the active tab (legacy; also used as fallback when `open_tabs_json` is empty) |
+| `[tab_view]` `trace_<hash>` | Per-trace zoom level, fit mode, and cursor positions |
+| `[trace_state]` `trace_<hash>` | Per-trace bookmarks and annotations |
+| `[zoom]` / `[cursors]` | Zoom and cursors for the last active tab (legacy compatibility) |
 
 ---
 
@@ -497,7 +549,8 @@ The **Add Bookmark** and **Add Annotation** items are only shown when a trace is
 
 | Key | Action |
 |-----|--------|
-| `Ctrl+O` | Open `.btf` file |
+| `Ctrl+O` | Open `.btf` file (new tab) |
+| `Ctrl+W` | Close active tab |
 | `Ctrl+S` | Save viewport as PNG |
 | `Ctrl+Shift+C` | Copy viewport to clipboard |
 | `Ctrl++` | Zoom in |
@@ -519,8 +572,8 @@ The **Add Bookmark** and **Add Annotation** items are only shown when a trace is
 
 - Hover over any segment bar or STI marker for a detailed tooltip.
 - Toggle STI events, grid lines, and hover highlight from **Settings** (`Ctrl+,`).
-- Drag and drop a `.btf` file onto the window to open it.
-- Trace zoom level and cursor positions are saved per file and restored when the same file is reopened.
+- Drag and drop a `.btf` file onto the window to open it in a new tab.
+- Open tabs, active tab, zoom level, and cursor positions are saved per trace in `btf_viewer.rc` and restored on the next launch.
 
 ---
 

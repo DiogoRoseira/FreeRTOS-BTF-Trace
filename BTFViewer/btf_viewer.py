@@ -388,7 +388,7 @@ _IC_SETTINGS = ("M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1
                 "M8 10.93a2.929 2.929 0 1 1 0-5.86 2.929 2.929 0 0 1 0 5.858z")
 
 # App icon - multi-colour 72x72 SVG rendered in the About dialog header.
-_APP_VERSION = "1.2.1"
+_APP_VERSION = "1.3.0"
 _APP_ICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">'
     '<rect x="3" y="3" width="66" height="66" rx="14" fill="#1C3A6E"/>'
@@ -1358,6 +1358,107 @@ def _format_timescale_per_px(timescale_per_px: float, time_scale: str = "ns") ->
         if ns >= threshold:
             return f"{ns / divisor:.1f} {label}/px"
     return f"{ns:.1f} ns/px"  # unreachable; satisfies type checkers
+
+def _pixmap_to_png_bytes(pixmap: QPixmap) -> Tuple[bytes, QByteArray]:
+    """Encode *pixmap* as PNG; return raw bytes and the backing QByteArray."""
+    buf = QByteArray()
+    buf_dev = QBuffer(buf)
+    buf_dev.open(QIODevice.WriteOnly)
+    pixmap.save(buf_dev, 'PNG')
+    buf_dev.close()
+    return bytes(buf), buf
+
+def _is_wsl() -> bool:
+    if os.environ.get('WSL_DISTRO_NAME'):
+        return True
+    try:
+        with open('/proc/version', 'r', encoding='utf-8', errors='ignore') as f:
+            return 'microsoft' in f.read().lower()
+    except OSError:
+        return False
+
+def _copy_png_to_windows_clipboard(png_bytes: bytes) -> bool:
+    """WSL helper: copy PNG bytes to the Windows clipboard as an image via PowerShell."""
+    if not shutil.which('powershell.exe'):
+        return False
+
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix='btf_snapshot_', suffix='.png', delete=False) as tmp:
+            tmp.write(png_bytes)
+            tmp_path = tmp.name
+
+        win_path = subprocess.check_output(['wslpath', '-w', tmp_path], text=True).strip()
+        ps_script = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "Add-Type -AssemblyName System.Drawing; "
+            "$img = [System.Drawing.Image]::FromFile($args[0]); "
+            "[System.Windows.Forms.Clipboard]::SetImage($img); "
+            "$img.Dispose()"
+        )
+        proc = subprocess.run(
+            ['powershell.exe', '-NoProfile', '-STA', '-Command', ps_script, win_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if proc.returncode != 0:
+            print(f"[BTF Viewer] clipboard error: {proc.stderr.strip()}", file=sys.stderr)
+            return False
+        return True
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+def _copy_pixmap_to_clipboard(pixmap: QPixmap) -> Optional[str]:
+    """Copy *pixmap* to the system clipboard as PNG.
+
+    Returns the external tool name used ('powershell', 'wl-copy', 'xclip',
+    'xsel'), or None when the Qt clipboard fallback was used.
+    """
+    png_bytes, buf = _pixmap_to_png_bytes(pixmap)
+
+    if _is_wsl() and _copy_png_to_windows_clipboard(png_bytes):
+        return 'powershell'
+
+    # Prefer tools that explicitly support image MIME types (wl-copy, xclip).
+    # xsel is last — it often accepts bytes but does not store image targets reliably.
+    for tool, args in [
+        ('wl-copy', ['wl-copy', '--type', 'image/png']),
+        ('xclip',   ['xclip',   '-selection', 'clipboard', '-t', 'image/png']),
+        ('xsel',    ['xsel',    '--clipboard', '--input']),
+    ]:
+        if shutil.which(tool):
+            proc = subprocess.Popen(args, stdin=subprocess.PIPE)
+            proc.communicate(png_bytes)
+            if proc.returncode == 0:
+                return tool
+
+    clipboard = QApplication.clipboard()
+    mime = QMimeData()
+    mime.setData('image/png', buf)
+    mime.setImageData(pixmap.toImage())
+    clipboard.setMimeData(mime)
+    clipboard.setPixmap(pixmap)
+    return None
+
+def _stack_pixmaps_vertically(top: QPixmap, bottom: QPixmap) -> QPixmap:
+    """Return a new pixmap with *bottom* drawn below *top*."""
+    combined = QPixmap(max(top.width(), bottom.width()),
+                       top.height() + bottom.height())
+    combined.fill(Qt.transparent)
+    painter = QPainter(combined)
+    try:
+        painter.drawPixmap(0, 0, top)
+        painter.drawPixmap(0, top.height(), bottom)
+    finally:
+        painter.end()
+    return combined
 
 _monospace_font_cache: dict = {}
 
@@ -5678,42 +5779,8 @@ class TimelineView(QGraphicsView):
             raise OSError(f"QPixmap.save() failed for path: {filepath}")
 
     def copy_image_to_clipboard(self) -> Optional[str]:
-        """Copy the current visible scene content as a PNG image to the clipboard.
-        Returns the tool name used ('xclip', 'xsel', 'wl-copy') or None for Qt fallback."""
-        pixmap = self._capture_pixmap()
-
-        # Encode to PNG bytes once
-        buf = QByteArray()
-        buf_dev = QBuffer(buf)
-        buf_dev.open(QIODevice.WriteOnly)
-        pixmap.save(buf_dev, 'PNG')
-        buf_dev.close()
-        png_bytes = bytes(buf)
-
-        # On Linux prefer xclip / xsel / wl-copy - Qt clipboard is unreliable for images on X11/Wayland
-        for tool, args in [
-            ('xclip',   ['xclip',   '-selection', 'clipboard', '-t', 'image/png']),
-            ('xsel',    ['xsel',    '--clipboard', '--input']),
-            ('wl-copy', ['wl-copy', '--type', 'image/png']),
-        ]:
-            if shutil.which(tool):
-                proc = subprocess.Popen(args, stdin=subprocess.PIPE)
-                proc.communicate(png_bytes)
-                if proc.returncode == 0:
-                    return tool
-                # tool failed - try the next one
-
-        # Fallback: Qt clipboard (works on Windows/macOS, variable on Linux)
-        # Set both a pixmap (X11 PIXMAP atom, understood by xclipboard) and
-        # MIME image/png so modern apps can also paste.
-        clipboard = QApplication.clipboard()
-        mime = QMimeData()
-        mime.setData('image/png', buf)
-        mime.setImageData(pixmap.toImage())
-        clipboard.setMimeData(mime)
-        # Also set as pixmap directly for legacy X11 clipboard managers
-        clipboard.setPixmap(pixmap)
-        return None
+        """Copy the current visible scene content as a PNG image to the clipboard."""
+        return _copy_pixmap_to_clipboard(self._capture_pixmap())
 
     # ------------------------------------------------------------------
     # Mouse interaction
@@ -8205,6 +8272,9 @@ class _MetricsPlotDialog(QDialog):
                  color: "QColor",
                  on_point_click,
                  is_dark: bool,
+                 scope_scoped: bool,
+                 scope_badge: str,
+                 scope_detail: str,
                  parent=None) -> None:
         super().__init__(parent, Qt.Window)
         self._title        = title
@@ -8217,6 +8287,14 @@ class _MetricsPlotDialog(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(4)
+
+        self._scope_banner = QLabel()
+        self._scope_banner.setWordWrap(True)
+        self._scope_scoped = scope_scoped
+        self._scope_badge = scope_badge
+        self._scope_detail = scope_detail
+        root.addWidget(self._scope_banner)
+        self._set_scope_banner(scope_scoped, scope_badge, scope_detail)
 
         # Content area (scatter + histogram) - grabbed for PNG/SVG export
         self._content = QWidget()
@@ -8254,10 +8332,41 @@ class _MetricsPlotDialog(QDialog):
         btn_row.addWidget(btn_cls)
         root.addLayout(btn_row)
 
-    def update_data(self, title: str, points: list) -> None:
+    def _set_scope_banner(self, scoped: bool, badge: str, detail: str) -> None:
+        """Show a high-contrast banner indicating cursor-range vs full-trace scope."""
+        if scoped:
+            if self._is_dark:
+                bg, border, badge_bg, badge_fg, detail_fg = (
+                    "#4E342E", "#FF9800", "#FF9800", "#1A1200", "#FFE0B2")
+            else:
+                bg, border, badge_bg, badge_fg, detail_fg = (
+                    "#FFF3E0", "#F57C00", "#FF9800", "#1A1200", "#5D4037")
+        else:
+            if self._is_dark:
+                bg, border, badge_bg, badge_fg, detail_fg = (
+                    "#263238", "#78909C", "#546E7A", "#ECEFF1", "#B0BEC5")
+            else:
+                bg, border, badge_bg, badge_fg, detail_fg = (
+                    "#ECEFF1", "#90A4AE", "#CFD8DC", "#37474F", "#546E7A")
+        self._scope_banner.setText(
+            f'<span style="background:{badge_bg}; color:{badge_fg}; font-weight:700; '
+            f'padding:2px 8px; border-radius:3px; letter-spacing:0.5px;">'
+            f'{badge.upper()}</span>&nbsp;&nbsp;'
+            f'<span style="color:{detail_fg};">{detail}</span>')
+        self._scope_banner.setStyleSheet(
+            f"background:{bg}; border-left:4px solid {border}; "
+            f"padding:8px 12px; border-radius:4px;")
+
+    def update_data(self, title: str, points: list,
+                    *, scope_scoped: bool, scope_badge: str,
+                    scope_detail: str) -> None:
         """Refresh scatter + histogram when cursor range or scope changes."""
         self._title = title
         self.setWindowTitle(title)
+        self._scope_scoped = scope_scoped
+        self._scope_badge = scope_badge
+        self._scope_detail = scope_detail
+        self._set_scope_banner(scope_scoped, scope_badge, scope_detail)
         self._scatter.set_points(points)
         self._histogram.set_values([p[1] for p in points])
 
@@ -8269,6 +8378,7 @@ class _MetricsPlotDialog(QDialog):
         self._is_dark = is_dark
         self._scatter.set_dark(is_dark)
         self._histogram.set_dark(is_dark)
+        self._set_scope_banner(self._scope_scoped, self._scope_badge, self._scope_detail)
         self._content.update()
         self.update()
 
@@ -8409,9 +8519,11 @@ class _StatsPanel(QWidget):
             self._scope_cb.setChecked(self._scope_to_cursors)
         self._scope_cb.blockSignals(False)
         self._update_scope_header()
-        if refresh_stats and self._trace is not None:
+        scoped = self._stats_range() is not None
+        if refresh_stats and self._trace is not None and scoped:
             self.rebuild(self._trace)
-        self._refresh_open_plot()
+        if scoped:
+            self._refresh_open_plot()
 
     def _on_scope_toggled(self, checked: bool) -> None:
         self._scope_to_cursors = bool(checked)
@@ -8444,6 +8556,19 @@ class _StatsPanel(QWidget):
 
     def _scope_suffix(self) -> str:
         return " (cursor range)" if self._stats_range() is not None else ""
+
+    def _plot_scope_banner(self) -> Tuple[bool, str, str]:
+        """Return (is_scoped, badge_label, detail_text) for metrics plot dialogs."""
+        rng = self._stats_range()
+        if rng is None or self._trace is None:
+            return False, "Full trace", "Not limited to cursors — all slices in the loaded trace"
+        lo, hi, n_cur = rng
+        unit = self._trace.time_scale
+        detail = (
+            f"C1–C{n_cur}: {_format_time(lo, unit)} … {_format_time(hi, unit)} "
+            f"({_format_time(hi - lo, unit)})"
+        )
+        return True, "Cursor range", detail
 
     def _build_plot_points(self, trace: "BtfTrace", mk: str, kind: str
                            ) -> Optional[Tuple[str, list, "QColor"]]:
@@ -8484,6 +8609,32 @@ class _StatsPanel(QWidget):
         self._plot_mk = None
         self._plot_kind = None
 
+    def capture_plot_session(self) -> Tuple[Optional[str], Optional[str], bool]:
+        """Return (mk, kind, visible) for the current metrics plot dialog."""
+        open_ = self._plot_dlg is not None and self._plot_dlg.isVisible()
+        return self._plot_mk, self._plot_kind, open_
+
+    def clear_plot_session(self) -> None:
+        """Close the metrics plot and clear tracking (used on tab switch)."""
+        if self._plot_dlg is not None:
+            try:
+                self._plot_dlg.closed.disconnect(self._on_plot_dialog_closed)
+            except TypeError:
+                pass
+            self._plot_dlg.close()
+        self._plot_dlg = None
+        self._plot_mk = None
+        self._plot_kind = None
+
+    def restore_plot_session(self, trace: Optional["BtfTrace"],
+                             mk: Optional[str], kind: Optional[str],
+                             open_: bool) -> None:
+        """Re-open the metrics plot saved for a trace tab, if it was visible."""
+        self.clear_plot_session()
+        if not open_ or not mk or not kind or trace is None:
+            return
+        self._open_plot(trace, mk, kind)
+
     def _refresh_open_plot(self) -> None:
         """Live-update the metrics popup when cursors or scope change."""
         dlg = self._plot_dlg
@@ -8495,7 +8646,9 @@ class _StatsPanel(QWidget):
         if built is None:
             return
         title, pts, _color = built
-        dlg.update_data(title, pts)
+        scoped, badge, detail = self._plot_scope_banner()
+        dlg.update_data(title, pts, scope_scoped=scoped,
+                        scope_badge=badge, scope_detail=detail)
 
     def _open_plot(self, trace, mk: str, kind: str) -> None:
         """Open a metrics distribution popup for the given task and metric kind."""
@@ -8505,6 +8658,7 @@ class _StatsPanel(QWidget):
         title, pts, color = built
         if not pts:
             return
+        scoped, badge, detail = self._plot_scope_banner()
         self._plot_mk = mk
         self._plot_kind = kind
         _on_click = lambda seg: self.segment_select.emit(seg) if seg is not None else None
@@ -8518,6 +8672,9 @@ class _StatsPanel(QWidget):
             title, pts, trace.time_scale, color,
             on_point_click=_on_click,
             is_dark=self._is_dark,
+            scope_scoped=scoped,
+            scope_badge=badge,
+            scope_detail=detail,
             parent=self.window(),
         )
         self._plot_dlg.closed.connect(self._on_plot_dialog_closed)
@@ -9427,7 +9584,8 @@ class _RcSettings:
     [view]     font_size, theme, horizontal, view_mode, show_sti, show_grid
     [zoom]     timescale_per_px  (-1 = use fit-to-width on next open)
     [cursors]  positions  (space-separated ns timestamps; "" = no saved cursors)
-    [files]    last_file, last_dir
+    [files]    last_file, last_dir, open_tabs_json, active_tab_index
+    [tab_view] per-trace zoom/cursor layout (key = trace_<sha256[:16]>)
     """
 
     RC_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "btf_viewer.rc")
@@ -9465,6 +9623,8 @@ class _RcSettings:
         "files": {
             "last_file": "",
             "last_dir":  os.path.expanduser("~"),
+            "open_tabs_json": "[]",
+            "active_tab_index": "0",
         },
     }
 
@@ -11119,94 +11279,8 @@ class SnapshotEditorDialog(QDialog):
         return result
 
     def _on_copy(self) -> None:
-        pixmap = self._render_final_pixmap()
-        buf = QByteArray()
-        buf_dev = QBuffer(buf)
-        buf_dev.open(QIODevice.WriteOnly)
-        pixmap.save(buf_dev, 'PNG')
-        buf_dev.close()
-        png_bytes = bytes(buf)
-
-        used_tool: Optional[str] = None
-
-        # WSL: write directly to the Windows clipboard using PowerShell.
-        if self._is_wsl() and self._copy_image_to_windows_clipboard(png_bytes):
-            used_tool = 'powershell'
-
-        # Prefer tools that explicitly support image MIME types.
-        # xsel often accepts bytes but does not advertise/store image targets,
-        # which results in an empty image paste in many apps.
-        if used_tool is None:
-            for tool, args in [
-                ('wl-copy', ['wl-copy', '--type', 'image/png']),
-                ('xclip',   ['xclip',   '-selection', 'clipboard', '-t', 'image/png']),
-            ]:
-                if shutil.which(tool):
-                    proc = subprocess.Popen(args, stdin=subprocess.PIPE)
-                    proc.communicate(png_bytes)
-                    if proc.returncode == 0:
-                        used_tool = tool
-                        break
-
-        if used_tool is None:
-            clipboard = QApplication.clipboard()
-            mime = QMimeData()
-            mime.setData('image/png', buf)
-            mime.setImageData(pixmap.toImage())
-            clipboard.setMimeData(mime)
-            clipboard.setPixmap(pixmap)
-
+        _copy_pixmap_to_clipboard(self._render_final_pixmap())
         self._show_status("Copied to clipboard!")
-
-    @staticmethod
-    def _is_wsl() -> bool:
-        if os.environ.get('WSL_DISTRO_NAME'):
-            return True
-        try:
-            with open('/proc/version', 'r', encoding='utf-8', errors='ignore') as f:
-                return 'microsoft' in f.read().lower()
-        except Exception:
-            return False
-
-    @staticmethod
-    def _copy_image_to_windows_clipboard(png_bytes: bytes) -> bool:
-        """WSL helper: copy PNG bytes to Windows clipboard as an image via PowerShell."""
-        if not shutil.which('powershell.exe'):
-            return False
-
-        tmp_path = None
-        try:
-            with tempfile.NamedTemporaryFile(prefix='btf_snapshot_', suffix='.png', delete=False) as tmp:
-                tmp.write(png_bytes)
-                tmp_path = tmp.name
-
-            # Convert /tmp/... to a Windows path visible to powershell.exe
-            win_path = subprocess.check_output(['wslpath', '-w', tmp_path], text=True).strip()
-            ps_script = (
-                "Add-Type -AssemblyName System.Windows.Forms; "
-                "Add-Type -AssemblyName System.Drawing; "
-                "$img = [System.Drawing.Image]::FromFile($args[0]); "
-                "[System.Windows.Forms.Clipboard]::SetImage($img); "
-                "$img.Dispose()"
-            )
-            proc = subprocess.run(
-                ['powershell.exe', '-NoProfile', '-STA', '-Command', ps_script, win_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            if proc.returncode != 0:
-                print(f"[BTF Viewer] clipboard error: {proc.stderr.strip()}", file=sys.stderr)
-                return False
-            return True
-        except (OSError, subprocess.SubprocessError, ValueError):
-            return False
-        finally:
-            if tmp_path:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
 
     def _on_save(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -11304,6 +11378,7 @@ class _CpuLoadGraph(QWidget):
     def set_trace(self, trace) -> None:
         self._trace           = trace
         self._selected_task   = None
+        self._collapsed_cores = set()
         self._core_bins       = {}
         self._task_bins       = {}
         self._task_core_bins  = {}
@@ -11833,6 +11908,55 @@ def _dialog_guard(fn):
     return _wrapper
 
 
+class _TraceTab:
+    """One open trace file: timeline, CPU load graph, and per-tab marks/find state."""
+
+    __slots__ = (
+        "path", "trace", "view", "cpu_load_graph", "cpu_load_scroll", "cpu_splitter",
+        "bookmarks", "annotations", "mark_next_id",
+        "find_hits", "find_hit_idx", "find_marker_ns",
+        "undo_stack", "redo_stack",
+        "plot_mk", "plot_kind", "plot_open",
+    )
+
+    def __init__(self, path: str, trace: "BtfTrace", win: "MainWindow") -> None:
+        self.path = path
+        self.trace = trace
+        self.bookmarks: List[TraceBookmark] = []
+        self.annotations: List[TraceAnnotation] = []
+        self.mark_next_id = 1
+        self.find_hits: List[int] = []
+        self.find_hit_idx = -1
+        self.find_marker_ns: Optional[int] = None
+        self.undo_stack: list = []
+        self.redo_stack: list = []
+        self.plot_mk: Optional[str] = None
+        self.plot_kind: Optional[str] = None
+        self.plot_open: bool = False
+
+        self.view = TimelineView(win)
+        win._wire_timeline_view(self.view)
+
+        self.cpu_load_graph = _CpuLoadGraph(self.view)
+        win._wire_cpu_load_graph(self.view, self.cpu_load_graph)
+
+        self.cpu_load_scroll = QScrollArea()
+        self.cpu_load_scroll.setWidget(self.cpu_load_graph)
+        self.cpu_load_scroll.setWidgetResizable(True)
+        self.cpu_load_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.cpu_load_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        self.cpu_splitter = QSplitter(Qt.Vertical)
+        self.cpu_splitter.addWidget(self.view)
+        self.cpu_splitter.addWidget(self.cpu_load_scroll)
+        self.cpu_splitter.setStretchFactor(0, 1)
+        self.cpu_splitter.setStretchFactor(1, 0)
+        self.cpu_splitter.setSizes([600, CPU_LOAD_ROW_H])
+        self.cpu_splitter.setCollapsible(0, False)
+        if not win._show_cpu_load:
+            self.cpu_load_scroll.hide()
+
+
 class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------
@@ -11841,11 +11965,16 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self._trace: Optional[BtfTrace] = None
-        self._current_file: str = ""
+        self._tabs: List[_TraceTab] = []
+        self._previous_tab_index: int = -1
+        self._tab_switch_guard: bool = False
+        self._bound_scene = None
+        self._legend_cancel_fn = None
         self._parse_thread: Optional[_ParseThread] = None
         self._load_in_progress: bool = False
         self._progress_dialog: Optional[QProgressDialog] = None
+        self._session_restore_queue: List[str] = []
+        self._session_restore_active_idx: int = -1
         self._settings = _RcSettings()
 
         # -- Runtime state for settings managed via _SettingsDialog ----------
@@ -11895,6 +12024,421 @@ class MainWindow(QMainWindow):
 
         # Restore all persisted settings (geometry, zoom, orientation, ...).
         self._restore_settings()
+
+    # ------------------------------------------------------------------
+    # Multi-tab trace access
+    # ------------------------------------------------------------------
+
+    @property
+    def _active_tab(self) -> Optional[_TraceTab]:
+        if not hasattr(self, "_tab_widget"):
+            return None
+        idx = self._tab_widget.currentIndex()
+        if 0 <= idx < len(self._tabs):
+            return self._tabs[idx]
+        return None
+
+    @property
+    def _view(self) -> TimelineView:
+        tab = self._active_tab
+        if tab is not None:
+            return tab.view
+        return self._settings_view
+
+    @property
+    def _trace(self) -> Optional[BtfTrace]:
+        tab = self._active_tab
+        return tab.trace if tab is not None else None
+
+    @property
+    def _current_file(self) -> str:
+        tab = self._active_tab
+        return tab.path if tab is not None else ""
+
+    @property
+    def _cpu_load_graph(self) -> _CpuLoadGraph:
+        tab = self._active_tab
+        if tab is not None:
+            return tab.cpu_load_graph
+        return self._settings_cpu_graph
+
+    @property
+    def _cpu_load_scroll(self) -> QScrollArea:
+        tab = self._active_tab
+        if tab is not None:
+            return tab.cpu_load_scroll
+        return self._settings_cpu_scroll
+
+    @property
+    def _cpu_splitter(self) -> QSplitter:
+        tab = self._active_tab
+        if tab is not None:
+            return tab.cpu_splitter
+        raise RuntimeError("No active trace tab")
+
+    def _iter_tab_views(self):
+        for tab in self._tabs:
+            yield tab.view
+        if hasattr(self, "_settings_view"):
+            yield self._settings_view
+
+    def _find_tab_index(self, path: str) -> int:
+        norm = os.path.abspath(os.path.expanduser(path))
+        for i, tab in enumerate(self._tabs):
+            if os.path.abspath(tab.path) == norm:
+                return i
+        return -1
+
+    def _wire_timeline_view(self, view: TimelineView) -> None:
+        view.zoom_changed.connect(lambda tpp, v=view: self._on_zoom_changed(tpp, v))
+        view.cursors_changed.connect(lambda times, v=view: self._on_cursors_changed(times, v))
+        view.mark_moved.connect(self._on_mark_moved)
+        view.mark_dragging.connect(self._on_mark_dragging)
+        view.bookmark_requested.connect(self._add_bookmark_at_ns)
+        view.annotation_requested.connect(self._add_annotation_at_ns)
+        view.clear_bookmarks_requested.connect(self._clear_all_bookmarks)
+        view.clear_annotations_requested.connect(self._clear_all_annotations)
+        view.pre_change.connect(self._push_undo_snapshot)
+        view.horizontalScrollBar().valueChanged.connect(
+            lambda _val, v=view: self._on_view_scrolled(v))
+        view.verticalScrollBar().valueChanged.connect(
+            lambda _val, v=view: self._on_view_scrolled(v))
+
+    def _wire_cpu_load_graph(self, view: TimelineView, graph: _CpuLoadGraph) -> None:
+        view.zoom_changed.connect(graph.update)
+        view.horizontalScrollBar().valueChanged.connect(graph.update)
+        view.verticalScrollBar().valueChanged.connect(graph.update)
+        view._scene.highlight_changed.connect(graph.set_task)
+        view._scene.hover_changed.connect(graph.update)
+        view._scene.marks_changed.connect(graph.update)
+        view.cursors_changed.connect(lambda _: graph.update())
+
+    def _apply_view_settings(self, view: TimelineView) -> None:
+        view.set_font_size(self._font_size_val)
+        view.set_max_cursors(self._max_cursors_val)
+        sc = view._scene
+        sc.set_label_width(self._label_width_val)
+        sc.set_row_height(self._row_height_val)
+        sc.set_row_gap(self._row_gap_val)
+        sc.set_timescale_per_px_default(self._timescale_per_px_default_val)
+        sc.set_sti_row_h(self._sti_row_h_val)
+        sc.set_sti_waveform_h(self._sti_waveform_h_val)
+        sc.set_sti_line_style(self._sti_line_style_val)
+        sc.set_hover_highlight(self._hover_highlight_val)
+        sc.set_theme(self._is_dark, rebuild=False)
+        view.setBackgroundBrush(QBrush(QColor(self._theme_tokens(self._is_dark)["win_bg"])))
+        view.set_horizontal(self._act_horiz.isChecked() if hasattr(self, "_act_horiz") else True)
+        view.set_show_sti(self._show_sti)
+        view.set_show_grid(self._show_grid)
+        view.set_view_mode(self._view_mode if hasattr(self, "_view_mode") else "task")
+
+    def _sync_cpu_load_graph(self, tab: _TraceTab) -> None:
+        """Align one tab's CPU load graph with global view mode and timeline state."""
+        graph = tab.cpu_load_graph
+        mode = self._view_mode if hasattr(self, "_view_mode") else "task"
+        graph.set_view_mode(mode)
+        graph.set_row_h(self._cpu_load_row_h_val)
+        trace = tab.trace
+        if mode == "core" and trace and trace.core_names:
+            sc = tab.view._scene
+            for core in trace.core_names:
+                graph.set_core_expanded(core, sc._core_expanded.get(core, True))
+
+    def _stash_tab_state(self, tab: _TraceTab) -> None:
+        tab.bookmarks = list(self._bookmarks)
+        tab.annotations = list(self._annotations)
+        tab.mark_next_id = self._mark_next_id
+        tab.find_hits = list(self._find_hits)
+        tab.find_hit_idx = self._find_hit_idx
+        tab.find_marker_ns = self._find_marker_ns
+        tab.undo_stack = list(self._undo_stack)
+        tab.redo_stack = list(self._redo_stack)
+        tab.plot_mk, tab.plot_kind, tab.plot_open = self._stats_panel.capture_plot_session()
+        self._persist_trace_state(tab.path, tab.bookmarks, tab.annotations, tab.mark_next_id)
+        self._persist_tab_view_state(tab)
+
+    def _persist_tab_view_state(self, tab: _TraceTab) -> None:
+        """Save zoom/cursor layout for one tab (keyed by trace path hash)."""
+        if not tab.path or tab.trace is None:
+            return
+        sc = tab.view._scene
+        payload = {
+            "zoom": -1 if tab.view._fit_mode else sc.timescale_per_px,
+            "fit_mode": bool(tab.view._fit_mode),
+            "cursors": list(sc.cursor_times()),
+        }
+        key = self._trace_state_key(tab.path)
+        self._settings.set("tab_view", key, json.dumps(payload, ensure_ascii=True), flush=False)
+
+    def _load_tab_view_state(self, tab: _TraceTab) -> None:
+        """Restore zoom/cursors saved for *tab* in btf_viewer.rc."""
+        raw = self._settings.get("tab_view", self._trace_state_key(tab.path), "")
+        if not raw.strip():
+            tab.view.zoom_changed.emit(tab.view._scene.timescale_per_px)
+            return
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            tab.view.zoom_changed.emit(tab.view._scene.timescale_per_px)
+            return
+        sc = tab.view._scene
+        fit_mode = bool(payload.get("fit_mode", True))
+        zoom = float(payload.get("zoom", -1))
+        if not fit_mode and zoom > 0:
+            sc._timescale_per_px = max(sc._timescale_per_px_default, zoom)
+            tab.view._fit_mode = False
+            sc.rebuild()
+        for ns in payload.get("cursors", []):
+            try:
+                sc.add_cursor(int(ns))
+            except (ValueError, TypeError):
+                pass
+        if sc.cursor_times():
+            tab.view.cursors_changed.emit(sc.cursor_times())
+        tab.view.zoom_changed.emit(sc.timescale_per_px)
+
+    def _persist_open_tabs(self) -> None:
+        """Write open tab paths and active tab index to btf_viewer.rc."""
+        for tab in self._tabs:
+            self._persist_tab_view_state(tab)
+        paths = [tab.path for tab in self._tabs]
+        active_idx = self._tab_widget.currentIndex() if self._tabs else -1
+        if 0 <= active_idx < len(paths):
+            last_file = paths[active_idx]
+        elif paths:
+            last_file = paths[-1]
+        else:
+            last_file = ""
+        last_dir = os.path.dirname(last_file) if last_file else self._settings.get(
+            "files", "last_dir", os.path.expanduser("~"))
+        self._settings.set_many("files", {
+            "open_tabs_json": json.dumps(paths, ensure_ascii=True),
+            "active_tab_index": str(max(0, active_idx)),
+            "last_file": last_file,
+            "last_dir": last_dir,
+        }, flush=False)
+        self._settings.prune_section("tab_view", 16)
+
+    def _restore_session_tabs(self) -> None:
+        """Re-open tabs saved in the previous session (called at startup)."""
+        raw = self._settings.get("files", "open_tabs_json", "")
+        paths: List[str] = []
+        try:
+            if raw.strip():
+                loaded = json.loads(raw)
+                if isinstance(loaded, list):
+                    paths = [str(p) for p in loaded if str(p).strip()]
+        except (json.JSONDecodeError, TypeError, ValueError):
+            paths = []
+        if not paths:
+            last = self._settings.get("files", "last_file", "")
+            if last and not os.path.isabs(last):
+                base_dir = os.path.dirname(os.path.abspath(__file__))
+                last = os.path.abspath(os.path.join(base_dir, last))
+            if last:
+                paths = [last]
+        seen: set = set()
+        unique: List[str] = []
+        for p in paths:
+            norm = os.path.abspath(os.path.expanduser(p))
+            if norm in seen or not os.path.isfile(norm):
+                continue
+            seen.add(norm)
+            unique.append(norm)
+        if not unique:
+            return
+        saved_active = self._settings.get_int("files", "active_tab_index", 0)
+        self._session_restore_active_idx = min(max(0, saved_active), len(unique) - 1)
+        self._session_restore_queue = unique[1:]
+        self._open_file(unique[0])
+
+    def _continue_session_restore(self) -> None:
+        """Load the next tab from the startup queue, then focus the saved active tab."""
+        if self._session_restore_queue:
+            path = self._session_restore_queue.pop(0)
+            QTimer.singleShot(50, lambda p=path: self._open_file(p))
+            return
+        if self._session_restore_active_idx >= 0 and self._tabs:
+            idx = min(self._session_restore_active_idx, len(self._tabs) - 1)
+            self._tab_switch_guard = True
+            try:
+                self._tab_widget.setCurrentIndex(idx)
+            finally:
+                self._tab_switch_guard = False
+            self._previous_tab_index = idx
+            self._restore_tab_state(self._tabs[idx])
+        self._session_restore_active_idx = -1
+
+    def _stash_active_tab_state(self) -> None:
+        tab = self._active_tab
+        if tab is None:
+            return
+        self._stash_tab_state(tab)
+
+    def _restore_tab_state(self, tab: _TraceTab) -> None:
+        self._bookmarks = list(tab.bookmarks)
+        self._annotations = list(tab.annotations)
+        self._mark_next_id = tab.mark_next_id
+        self._find_hits = list(tab.find_hits)
+        self._find_hit_idx = tab.find_hit_idx
+        self._find_marker_ns = tab.find_marker_ns
+        self._undo_stack = list(tab.undo_stack)
+        self._redo_stack = list(tab.redo_stack)
+        self._rebuild_bookmark_list()
+        self._rebuild_annotation_list()
+        self._sync_panels_to_active_tab()
+        self._act_undo.setEnabled(bool(self._undo_stack))
+        self._act_redo.setEnabled(bool(self._redo_stack))
+
+    def _sync_panels_to_active_tab(self) -> None:
+        tab = self._active_tab
+        trace = self._trace
+        if tab is None or trace is None:
+            return
+        self._legend.rebuild(trace, show_sti=self._show_sti)
+        self._stats_panel._ui_font_size = self._ui_font_size_val
+        self._stats_panel.set_cursor_times(self._view._scene.cursor_times(), refresh_stats=False)
+        self._stats_panel.rebuild(trace)
+        self._cpu_load_graph.set_trace(trace)
+        self._cpu_load_graph.set_font_size(self._font_size_val)
+        self._sync_cpu_load_graph(tab)
+        self._bind_legend_to_scene(self._view._scene)
+        self._recompute_find_hits()
+        self._refresh_find_marker()
+        self._refresh_zoom_ui_unit()
+        self._update_status_for_active_tab()
+        self._update_tab_actions()
+        if self._show_cpu_load:
+            self._autofit_cpu_load_height()
+
+    def _update_status_for_active_tab(self) -> None:
+        trace = self._trace
+        if trace is None:
+            self._status_file.setText("  No file loaded")
+            self._status_file.setToolTip("")
+            self.setWindowTitle("RTOS BTF Viewer")
+            return
+        fname = os.path.basename(self._current_file)
+        ts = _format_time(trace.time_max - trace.time_min, trace.time_scale)
+        n_seg = len(trace.segments)
+        n_sti = len(trace.sti_events)
+        self.setWindowTitle(f"RTOS BTF Viewer – {fname}")
+        self._status_file.setText(f"  {fname}  |  span: {ts}")
+        self._status_file.setToolTip(
+            f"tasks: {len(trace.tasks)}  "
+            f"segments: {n_seg}  "
+            f"STI events: {n_sti}"
+        )
+
+    def _update_tab_actions(self) -> None:
+        has_trace = self._trace is not None
+        for act in (self._act_save_img, self._act_save_svg, self._act_copy_img):
+            act.setEnabled(has_trace)
+        if hasattr(self, "_act_close_tab"):
+            self._act_close_tab.setEnabled(len(self._tabs) > 0)
+
+    def _bind_legend_to_scene(self, scene) -> None:
+        if self._bound_scene is scene:
+            return
+        self._unbind_legend_from_scene()
+        self._bound_scene = scene
+        self._legend_cancel_fn = lambda: scene.set_highlighted_task(None)
+        self._legend.cancel_highlight.connect(self._legend_cancel_fn)
+        self._legend.filter_changed.connect(scene.set_task_filter)
+        scene.highlight_changed.connect(self._on_scene_highlight_for_legend)
+
+    def _unbind_legend_from_scene(self) -> None:
+        if self._bound_scene is None:
+            return
+        scene = self._bound_scene
+        try:
+            if self._legend_cancel_fn is not None:
+                self._legend.cancel_highlight.disconnect(self._legend_cancel_fn)
+            self._legend.filter_changed.disconnect(scene.set_task_filter)
+            scene.highlight_changed.disconnect(self._on_scene_highlight_for_legend)
+        except (TypeError, RuntimeError):
+            pass
+        self._bound_scene = None
+        self._legend_cancel_fn = None
+
+    def _on_scene_highlight_for_legend(self, task, locked: bool) -> None:
+        self._legend.set_locked_task(task if locked else None)
+
+    def _on_trace_tab_changed(self, index: int) -> None:
+        if self._tab_switch_guard:
+            return
+        prev = self._previous_tab_index
+        if 0 <= prev < len(self._tabs) and prev != index:
+            self._stash_tab_state(self._tabs[prev])
+            self._stats_panel.clear_plot_session()
+        if 0 <= index < len(self._tabs):
+            tab = self._tabs[index]
+            self._restore_tab_state(tab)
+            self._stats_panel.restore_plot_session(
+                tab.trace, tab.plot_mk, tab.plot_kind, tab.plot_open)
+        else:
+            self._update_tab_actions()
+        self._previous_tab_index = index
+
+    def _close_trace_tab(self, index: int) -> None:
+        if index < 0 or index >= len(self._tabs):
+            return
+        if self._active_tab is self._tabs[index]:
+            self._stash_active_tab_state()
+            self._stats_panel.clear_plot_session()
+        tab = self._tabs[index]
+        tab.view._zoom_timer.stop()
+        tab.view._pan_timer.stop()
+        tab.view._pan_heartbeat.stop()
+        tab.view._resize_timer.stop()
+        tab.cpu_load_graph.set_trace(None)
+        sc = tab.view._scene
+        if self._bound_scene is sc:
+            self._unbind_legend_from_scene()
+        sc._trace = None
+        sc.clear()
+        self._tab_switch_guard = True
+        try:
+            self._tab_widget.removeTab(index)
+        finally:
+            self._tab_switch_guard = False
+        self._tabs.pop(index)
+        tab.cpu_splitter.deleteLater()
+        if not self._tabs:
+            self._central_stack.setCurrentIndex(0)
+            self._unbind_legend_from_scene()
+            self._bookmarks = []
+            self._annotations = []
+            self._mark_next_id = 1
+            self._find_hits = []
+            self._find_hit_idx = -1
+            self._find_marker_ns = None
+            self._undo_stack.clear()
+            self._redo_stack.clear()
+            self._rebuild_bookmark_list()
+            self._rebuild_annotation_list()
+            self._previous_tab_index = -1
+            self._update_status_for_active_tab()
+        else:
+            new_idx = min(index, len(self._tabs) - 1)
+            self._tab_widget.setCurrentIndex(new_idx)
+            self._previous_tab_index = new_idx
+        self._update_tab_actions()
+
+    def _add_trace_tab(self, path: str, trace: BtfTrace) -> _TraceTab:
+        tab = _TraceTab(path, trace, self)
+        self._apply_view_settings(tab.view)
+        self._tabs.append(tab)
+        idx = self._tab_widget.addTab(tab.cpu_splitter, os.path.basename(path))
+        self._tab_widget.setTabToolTip(idx, path)
+        self._central_stack.setCurrentIndex(1)
+        self._tab_switch_guard = True
+        try:
+            self._tab_widget.setCurrentIndex(idx)
+        finally:
+            self._tab_switch_guard = False
+        self._previous_tab_index = idx
+        return tab
 
     # ------------------------------------------------------------------
     # Lifecycle persistence
@@ -12156,13 +12700,16 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """Persist all runtime state to btf_viewer.rc on exit."""
-        # ---- 1. Stop all timers immediately -----------------------------------
-        # Prevents any pending rebuild / zoom / resize callback from touching a
-        # partially-destroyed widget tree after this point.
-        self._view._zoom_timer.stop()
-        self._view._pan_timer.stop()
-        self._view._pan_heartbeat.stop()
-        self._view._resize_timer.stop()
+        for tab in self._tabs:
+            tab.view._zoom_timer.stop()
+            tab.view._pan_timer.stop()
+            tab.view._pan_heartbeat.stop()
+            tab.view._resize_timer.stop()
+        if hasattr(self, "_settings_view"):
+            self._settings_view._zoom_timer.stop()
+            self._settings_view._pan_timer.stop()
+            self._settings_view._pan_heartbeat.stop()
+            self._settings_view._resize_timer.stop()
 
         # ---- 2. Abort any in-progress background parse ------------------------
         # IMPORTANT: stop the thread BEFORE disconnecting signals.
@@ -12183,9 +12730,7 @@ class MainWindow(QMainWindow):
         self._persist_settings()
         self._report_settings_io_failure(prefix="Settings save warning")
 
-        # ---- 3. Hide the window immediately -----------------------------------
-        # The window disappears right away so the user never sees a freeze while
-        # we clean up the scene and free the trace below.
+        # Hide the window immediately so cleanup freezes are not visible.
         self.hide()
         self._teardown_scene()
 
@@ -12274,6 +12819,7 @@ class MainWindow(QMainWindow):
         s.set("cursors", "positions",
               " ".join(str(t) for t in _cursor_times) if _cursor_times else "",
               flush=False)
+        self._persist_open_tabs()
         s.flush()
         self._report_settings_io_failure(prefix="Settings save warning")
 
@@ -12291,35 +12837,27 @@ class MainWindow(QMainWindow):
         return True
 
     def _teardown_scene(self) -> None:
-        """Release all scene items and free trace data on a background thread.
-
-        Called after the window is hidden so the visible freeze of freeing
-        large traces is not perceptible to the user.
-        """
-        # ---- 4. Clear the scene explicitly ------------------------------------
-        # Break all Python-side references held by scene items BEFORE calling
-        # scene.clear().  Each _BatchRowItem stores _seg_data / _xs / _coarse_data
-        # - lists that can contain thousands of (QRectF, QBrush, QPen, TaskSegment)
-        # tuples for a large trace.  Keeping those alive until Qt's widget
-        # destructor eventually frees the TimelineScene Python wrapper causes a
-        # main-thread GC cascade of 100K-400K object deallocations, producing the
-        # visible freeze.  Clearing them here (while the window is already hidden)
-        # lets the ref-counts drop to zero immediately and allows step 5 to fully
-        # offload the remaining trace teardown to the background thread.
-        _scene = self._view._scene
-        _scene._trace = None           # prevent any item from reading stale data
-        for _item, _ in _scene._frozen_items:
-            if hasattr(_item, '_seg_data'):
-                _item._seg_data   = []
-                _item._xs         = []
-                _item._coarse_data = []
-        _scene._frozen_items     = []
-        _scene._frozen_top_items = []
-        _scene._cursor_items     = []
-        _scene._hover_overlay_items = []
-        _scene._task_row_rects   = {}
-        _scene.clear()
-        del _scene
+        """Release all scene items and free trace data on background threads."""
+        traces_to_free: List[BtfTrace] = []
+        for tab in self._tabs:
+            tab.cpu_load_graph.set_trace(None)
+            _scene = tab.view._scene
+            _scene._trace = None
+            for _item, _ in _scene._frozen_items:
+                if hasattr(_item, '_seg_data'):
+                    _item._seg_data = []
+                    _item._xs = []
+                    _item._coarse_data = []
+            _scene._frozen_items = []
+            _scene._frozen_top_items = []
+            _scene._cursor_items = []
+            _scene._hover_overlay_items = []
+            _scene._task_row_rects = {}
+            _scene.clear()
+            if tab.trace is not None:
+                traces_to_free.append(tab.trace)
+                tab.trace = None
+        self._tabs.clear()
 
         # ---- 4b. Release the module-level info popup --------------------------
         # _info_popup is a frameless QLabel parented to nothing.  Freeing it
@@ -12338,14 +12876,10 @@ class MainWindow(QMainWindow):
         # thread is not killed prematurely at interpreter shutdown (a daemon
         # thread killed before it finishes would bounce the reference back to
         # the main-thread teardown, negating the benefit).
-        self._cpu_load_graph.set_trace(None)
-        _trace_to_free = self._trace
-        self._trace = None
-        if _trace_to_free is not None:
+        for _trace_to_free in traces_to_free:
             def _drop(_t=_trace_to_free):
-                del _t          # ref count -> 0 here, GC runs on this thread
+                del _t
             threading.Thread(target=_drop, daemon=False).start()
-            del _trace_to_free
 
     def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasUrls():
@@ -12597,8 +13131,14 @@ class MainWindow(QMainWindow):
                 "or press <b>Ctrl+O</b> to open one</p>"
             )
         if hasattr(self, '_view'):
-            self._view.setBackgroundBrush(QBrush(QColor(c['win_bg'])))
-            self._view._scene.set_theme(is_dark, rebuild=(self._trace is not None))
+            c = self._theme_tokens(is_dark)
+            for view in self._iter_tab_views():
+                view.setBackgroundBrush(QBrush(QColor(c['win_bg'])))
+                view._scene.set_theme(is_dark, rebuild=(view._scene._trace is not None))
+        if hasattr(self, '_cpu_load_graph'):
+            self._cpu_load_graph.set_dark(is_dark)
+        for tab in self._tabs:
+            tab.cpu_load_graph.set_dark(is_dark)
         if hasattr(self, '_legend'):
             self._legend.update_theme(is_dark)
         if hasattr(self, '_legend_dock') and self._legend_dock.widget() is not None:
@@ -12607,8 +13147,6 @@ class MainWindow(QMainWindow):
             _host_pal.setColor(QPalette.Window, QColor(c['win_bg']))
             _host_pal.setColor(QPalette.Base, QColor(c['win_bg']))
             _legend_host.setPalette(_host_pal)
-        if hasattr(self, '_cpu_load_graph'):
-            self._cpu_load_graph.set_dark(is_dark)
         if hasattr(self, '_stats_panel'):
             self._stats_panel.set_dark(is_dark)
         if hasattr(self, '_stats_panel'):
@@ -12645,20 +13183,17 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        # --- Central widget: QStackedWidget (page 0=welcome, page 1=timeline) ---
-        self._view = TimelineView(self)
-        self._view.zoom_changed.connect(self._on_zoom_changed)
-        self._view.cursors_changed.connect(self._on_cursors_changed)
-        self._view.mark_moved.connect(self._on_mark_moved)
-        self._view.mark_dragging.connect(self._on_mark_dragging)
-        self._view.bookmark_requested.connect(self._add_bookmark_at_ns)
-        self._view.annotation_requested.connect(self._add_annotation_at_ns)
-        self._view.clear_bookmarks_requested.connect(self._clear_all_bookmarks)
-        self._view.clear_annotations_requested.connect(self._clear_all_annotations)
-        self._view.pre_change.connect(self._push_undo_snapshot)
+        # Hidden settings template view (used before any trace tab exists).
+        self._settings_view = TimelineView(self)
+        self._wire_timeline_view(self._settings_view)
+        self._settings_cpu_graph = _CpuLoadGraph(self._settings_view)
+        self._wire_cpu_load_graph(self._settings_view, self._settings_cpu_graph)
+        self._settings_cpu_scroll = QScrollArea()
+        self._settings_cpu_scroll.setWidget(self._settings_cpu_graph)
+        self._settings_cpu_scroll.hide()
 
-        # Undo / Redo stacks (cursor + mark state)
-        self._undo_stack: list = []   # list of (cursor_times, bookmarks, annotations, next_id)
+        # Undo / Redo stacks (cursor + mark state; synced per tab on switch)
+        self._undo_stack: list = []
         self._redo_stack: list = []
         self._undo_suppress: bool = False
 
@@ -12676,36 +13211,18 @@ class MainWindow(QMainWindow):
         _wl.addWidget(_wlbl)
         self._welcome_label = _wlbl
 
-        self._stack = QStackedWidget()
-        self._stack.addWidget(self._welcome_page)   # index 0
-        self._stack.addWidget(self._view)            # index 1
-        self._stack.setCurrentIndex(0)
+        self._tab_widget = QTabWidget()
+        self._tab_widget.setTabsClosable(True)
+        self._tab_widget.setDocumentMode(True)
+        self._tab_widget.setMovable(True)
+        self._tab_widget.tabCloseRequested.connect(self._close_trace_tab)
+        self._tab_widget.currentChanged.connect(self._on_trace_tab_changed)
 
-        # --- CPU load graph (below timeline, wrapped in a scroll area) ---
-        self._cpu_load_graph = _CpuLoadGraph(self._view)
-        self._cpu_load_scroll = QScrollArea()
-        self._cpu_load_scroll.setWidget(self._cpu_load_graph)
-        self._cpu_load_scroll.setWidgetResizable(True)
-        self._cpu_load_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self._cpu_load_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self._cpu_splitter = QSplitter(Qt.Vertical)
-        self._cpu_splitter.addWidget(self._stack)
-        self._cpu_splitter.addWidget(self._cpu_load_scroll)
-        self._cpu_splitter.setStretchFactor(0, 1)
-        self._cpu_splitter.setStretchFactor(1, 0)
-        self._cpu_splitter.setSizes([600, CPU_LOAD_ROW_H])
-        self._cpu_splitter.setCollapsible(0, False)
-        self.setCentralWidget(self._cpu_splitter)
-
-        # Synchronise CPU graph with timeline zoom / pan / task highlight
-        self._view.zoom_changed.connect(self._cpu_load_graph.update)
-        self._view.horizontalScrollBar().valueChanged.connect(self._cpu_load_graph.update)
-        self._view.verticalScrollBar().valueChanged.connect(self._cpu_load_graph.update)
-        self._view._scene.highlight_changed.connect(self._cpu_load_graph.set_task)
-        # Synchronise cursor, marks, and hover overlays on the CPU load graph
-        self._view._scene.hover_changed.connect(self._cpu_load_graph.update)
-        self._view._scene.marks_changed.connect(self._cpu_load_graph.update)
-        self._view.cursors_changed.connect(lambda _: self._cpu_load_graph.update())
+        self._central_stack = QStackedWidget()
+        self._central_stack.addWidget(self._welcome_page)
+        self._central_stack.addWidget(self._tab_widget)
+        self._central_stack.setCurrentIndex(0)
+        self.setCentralWidget(self._central_stack)
 
         # --- Legend dock (right panel) ---
         self._build_legend_dock()
@@ -12877,21 +13394,14 @@ class MainWindow(QMainWindow):
         self._marks_dock.visibilityChanged.connect(
             lambda v: setattr(self, "_show_marks", v))
         self._find_dock.visibilityChanged.connect(self._on_find_dock_visibility_changed)
-        self._view.horizontalScrollBar().valueChanged.connect(lambda _: self._on_view_scrolled())
-        self._view.verticalScrollBar().valueChanged.connect(lambda _: self._on_view_scrolled())
 
-        # --- Signal wiring: legend <-> scene highlight sync ---
-        # Legend click -> toggle locked highlight
-        sc = self._view._scene
+        # --- Signal wiring: legend <-> scene highlight sync (bound per active tab) ---
         self._legend.task_clicked.connect(self._on_legend_task_clicked)
-        self._legend.cancel_highlight.connect(
-            lambda: sc.set_highlighted_task(None)
-        )
-        self._legend.filter_changed.connect(sc.set_task_filter)
-        # Keep legend lock-highlight in sync whenever the scene highlight changes
-        sc.highlight_changed.connect(
-            lambda t, lk: self._legend.set_locked_task(t if lk else None)
-        )
+
+    def _on_close_tab_action(self) -> None:
+        idx = self._tab_widget.currentIndex()
+        if idx >= 0:
+            self._close_trace_tab(idx)
 
     def _build_legend_dock(self) -> None:
         """Create the legend dock and host container."""
@@ -12941,6 +13451,8 @@ class MainWindow(QMainWindow):
         self._act_save_svg.setEnabled(False)
         self._act_copy_img = fm.addAction("&Copy Image to Clipboard", self._on_copy_image, "Ctrl+Shift+C")
         self._act_copy_img.setEnabled(False)
+        self._act_close_tab = fm.addAction("Close &Tab", self._on_close_tab_action, QKeySequence.Close)
+        self._act_close_tab.setEnabled(False)
         fm.addSeparator()
         _quit_act = fm.addAction("E&xit", self.close)
         _quit_act.setShortcut(QKeySequence("Ctrl+Q"))
@@ -13210,13 +13722,15 @@ class MainWindow(QMainWindow):
         self._act_vert.setChecked(not horizontal)
         self._tb_horiz_btn.setChecked(horizontal)
         self._tb_vert_btn.setChecked(not horizontal)
-        self._view.set_horizontal(horizontal)
+        for view in self._iter_tab_views():
+            view.set_horizontal(horizontal)
         self._refresh_find_marker()
 
     def _set_show_sti(self, show: bool, persist: bool = True) -> None:
         """Apply STI visibility and keep all STI UI controls in sync."""
         self._show_sti = bool(show)
-        self._view.set_show_sti(self._show_sti)
+        for view in self._iter_tab_views():
+            view.set_show_sti(self._show_sti)
         if self._trace is not None:
             self._legend.rebuild(self._trace, show_sti=self._show_sti)
             self._legend.set_locked_task(self._view._scene._locked_task)
@@ -13230,7 +13744,8 @@ class MainWindow(QMainWindow):
     def _set_show_grid(self, show: bool, persist: bool = True) -> None:
         """Apply grid visibility and keep all Grid UI controls in sync."""
         self._show_grid = bool(show)
-        self._view.set_show_grid(self._show_grid)
+        for view in self._iter_tab_views():
+            view.set_show_grid(self._show_grid)
         if hasattr(self, "_grid_toggle_cb"):
             self._grid_toggle_cb.blockSignals(True)
             self._grid_toggle_cb.setChecked(self._show_grid)
@@ -13319,16 +13834,19 @@ class MainWindow(QMainWindow):
         self._tb_core_btn.setChecked(not is_task)
         self._tb_expand_all_btn.setEnabled(not is_task)
         if not is_task:
-            # Sync button state with actual core expanded state
             scene = self._view._scene
             trace = scene._trace
             if trace and trace.core_names:
                 all_expanded = all(
                     scene._core_expanded.get(c, True) for c in trace.core_names)
                 self._tb_expand_all_btn.setChecked(all_expanded)
-        self._view.set_view_mode(mode)
+        for tab in self._tabs:
+            tab.view.set_view_mode(mode)
+            self._sync_cpu_load_graph(tab)
+        if not self._tabs:
+            self._view.set_view_mode(mode)
+            self._cpu_load_graph.set_view_mode(mode)
         self._refresh_find_marker()
-        self._cpu_load_graph.set_view_mode(mode)
         self._autofit_cpu_load_height()
 
     def _autofit_cpu_load_height(self) -> None:
@@ -13352,7 +13870,9 @@ class MainWindow(QMainWindow):
     def _toggle_cpu_load_graph(self) -> None:
         """Show or hide the CPU load graph panel."""
         visible = self._tb_cpu_load_btn.isChecked()
-        self._cpu_load_scroll.setVisible(visible)
+        tab = self._active_tab
+        if tab is not None:
+            tab.cpu_load_scroll.setVisible(visible)
         if visible:
             self._autofit_cpu_load_height()
 
@@ -13439,14 +13959,19 @@ class MainWindow(QMainWindow):
     def _save_current_trace_state(self) -> None:
         if not self._current_file:
             return
-        key = self._trace_state_key(self._current_file)
+        self._persist_trace_state(
+            self._current_file, self._bookmarks, self._annotations, self._mark_next_id)
+
+    def _persist_trace_state(self, path: str, bookmarks, annotations, mark_next_id: int) -> None:
+        if not path:
+            return
+        key = self._trace_state_key(path)
         payload = {
-            "next_id": self._mark_next_id,
-            "bookmarks": [{"id": b.id, "ns": b.ns, "label": b.label} for b in self._bookmarks],
-            "annotations": [{"id": a.id, "ns": a.ns, "note": a.note} for a in self._annotations],
+            "next_id": mark_next_id,
+            "bookmarks": [{"id": b.id, "ns": b.ns, "label": b.label} for b in bookmarks],
+            "annotations": [{"id": a.id, "ns": a.ns, "note": a.note} for a in annotations],
         }
         self._settings.set("trace_state", key, json.dumps(payload, ensure_ascii=True), flush=False)
-        # Keep the trace_state section bounded to the recent-files limit.
         self._settings.prune_section("trace_state", 8)
         self._settings.flush()
 
@@ -13850,7 +14375,9 @@ class MainWindow(QMainWindow):
             lbl.setPos(2, min(coord + 2, scene_r.height() - 14))
             self._find_marker_items = [line, lbl]
 
-    def _on_view_scrolled(self) -> None:
+    def _on_view_scrolled(self, view: TimelineView) -> None:
+        if view is not self._view:
+            return
         if self._find_marker_ns is not None:
             self._refresh_find_marker()
 
@@ -13874,15 +14401,21 @@ class MainWindow(QMainWindow):
                 pass
 
     def _open_file(self, path: str) -> None:
+        path = os.path.abspath(os.path.expanduser(path))
+
+        existing = self._find_tab_index(path)
+        if existing >= 0:
+            self._tab_widget.setCurrentIndex(existing)
+            if self._session_restore_queue or self._session_restore_active_idx >= 0:
+                self._continue_session_restore()
+            return
+
         if self._load_in_progress:
             self._status_file.setText("  A load is already in progress…")
             return
         self._load_in_progress = True
 
-        path = os.path.abspath(os.path.expanduser(path))
-
-        if self._trace is not None and self._current_file:
-            self._save_current_trace_state()
+        self._stash_active_tab_state()
 
         if self._progress_dialog is not None:
             self._progress_dialog.close()
@@ -13978,105 +14511,56 @@ class MainWindow(QMainWindow):
     def _finalize_loaded_trace(self, trace: BtfTrace, path: str,
                                progress_dialog: _LoadProgressDialog) -> None:
         """Complete all post-parse UI/state updates for a successful load."""
-        self._trace = trace
-        self._current_file = path
+        self._settings.set("files", "last_dir", os.path.dirname(path), flush=False)
 
-        # Check whether to restore the saved zoom BEFORE updating last_file.
-        prev_file = self._settings.get("files", "last_file", "")
-        saved_zoom = self._settings.get_float("zoom", "timescale_per_px", -1.0)
-        self._settings.set_many("files", {
-            "last_file": path,
-            "last_dir":  os.path.dirname(path),
-        }, flush=False)
-
-        self._stack.setCurrentIndex(1)
-        _process_ui_events_safely()   # force layout pass -> viewport settles
-        self._view.load_trace(trace)
-        self._timescale_per_px_default_val = self._view._scene._timescale_per_px_default
+        tab = self._add_trace_tab(path, trace)
+        _process_ui_events_safely()
+        tab.view.load_trace(trace)
+        self._timescale_per_px_default_val = tab.view._scene._timescale_per_px_default
         self._refresh_zoom_ui_unit()
         self._load_trace_state(path)
+        tab.bookmarks = list(self._bookmarks)
+        tab.annotations = list(self._annotations)
+        tab.mark_next_id = self._mark_next_id
         self._recompute_find_hits()
-
-        if prev_file == path and saved_zoom > 0:
-            self._view._scene._timescale_per_px = max(
-                self._view._scene._timescale_per_px_default, saved_zoom)
-            self._view._scene.rebuild()
-            self._view._fit_mode = False
-            self._view.zoom_changed.emit(self._view._scene.timescale_per_px)
-        else:
-            self._settings.set("zoom", "timescale_per_px", "-1", flush=False)
-            self._view.zoom_changed.emit(self._view._scene.timescale_per_px)
-
-        saved_cursors = self._settings.get("cursors", "positions", "")
-        if prev_file == path and saved_cursors.strip():
-            try:
-                for ns in [int(t) for t in saved_cursors.split()]:
-                    self._view._scene.add_cursor(ns)
-                self._view.cursors_changed.emit(self._view._scene.cursor_times())
-            except ValueError:
-                pass
+        tab.find_hits = list(self._find_hits)
+        tab.find_hit_idx = self._find_hit_idx
+        tab.find_marker_ns = self._find_marker_ns
+        self._load_tab_view_state(tab)
 
         progress_dialog.update_progress(100, "Building legend…")
         _process_ui_events_safely()
-        self._legend.rebuild(trace, show_sti=self._show_sti)
-        self._stats_panel._ui_font_size = self._ui_font_size_val
-        self._stats_panel.set_cursor_times(self._view._scene.cursor_times(), refresh_stats=False)
-        self._stats_panel.rebuild(trace)
-        self._cpu_load_graph.set_trace(trace)
-        self._cpu_load_graph.set_font_size(self._font_size_val)
-        # Re-fit the CPU load panel height now that trace data (and all cores)
-        # is available - especially important when core view was restored from
-        # settings before any file was loaded (sizeHint was 40px at that point).
-        self._autofit_cpu_load_height()
+        self._sync_panels_to_active_tab()
 
         self._undo_stack.clear()
         self._redo_stack.clear()
+        tab.undo_stack = []
+        tab.redo_stack = []
         self._act_undo.setEnabled(False)
         self._act_redo.setEnabled(False)
         if self._show_stats:
             self._stats_dock.show()
         if self._show_cpu_load:
             self._cpu_load_scroll.show()
-        self._act_save_img.setEnabled(True)
-        self._act_save_svg.setEnabled(True)
-        self._act_copy_img.setEnabled(True)
 
-        fname = os.path.basename(path)
-        ts = _format_time(trace.time_max - trace.time_min, trace.time_scale)
-        n_seg = len(trace.segments)
-        n_sti = len(trace.sti_events)
-        self.setWindowTitle(f"RTOS BTF Viewer – {fname}")
-        self._status_file.setText(f"  {fname}  |  span: {ts}")
-        self._status_file.setToolTip(
-            f"tasks: {len(trace.tasks)}  "
-            f"segments: {n_seg}  "
-            f"STI events: {n_sti}"
-        )
         self._save_recent_files(path)
         self._rebuild_recent_menu()
         self._settings.flush()
         self._report_settings_io_failure(prefix="Settings save warning")
+        self._continue_session_restore()
+
+    def _capture_viewport_pixmap(self) -> QPixmap:
+        """Capture the active tab's timeline viewport, optionally with CPU load graph."""
+        tl_pix = self._view._capture_pixmap()
+        if self._show_cpu_load and self._cpu_load_scroll.isVisible():
+            return _stack_pixmaps_vertically(tl_pix, self._cpu_load_graph.grab())
+        return tl_pix
 
     @_dialog_guard
     def _on_save_image(self) -> None:
         if self._trace is None:
             return
-        tl_pix = self._view._capture_pixmap()
-        if self._show_cpu_load and self._cpu_load_scroll.isVisible():
-            cpu_pix = self._cpu_load_graph.grab()
-            combined = QPixmap(max(tl_pix.width(), cpu_pix.width()),
-                               tl_pix.height() + cpu_pix.height())
-            combined.fill(Qt.transparent)
-            _p = QPainter(combined)
-            try:
-                _p.drawPixmap(0, 0, tl_pix)
-                _p.drawPixmap(0, tl_pix.height(), cpu_pix)
-            finally:
-                _p.end()
-            pixmap = combined
-        else:
-            pixmap = tl_pix
-        dlg = SnapshotEditorDialog(pixmap, self)
+        dlg = SnapshotEditorDialog(self._capture_viewport_pixmap(), self)
         _exec_centred(dlg, self)
 
     @_dialog_guard
@@ -14126,23 +14610,8 @@ class MainWindow(QMainWindow):
     def _on_copy_image(self) -> None:
         if self._trace is None:
             return
-        tl_pix = self._view._capture_pixmap()
-        if self._show_cpu_load and self._cpu_load_scroll.isVisible():
-            cpu_pix = self._cpu_load_graph.grab()
-            combined = QPixmap(max(tl_pix.width(), cpu_pix.width()),
-                               tl_pix.height() + cpu_pix.height())
-            combined.fill(Qt.transparent)
-            _p = QPainter(combined)
-            try:
-                _p.drawPixmap(0, 0, tl_pix)
-                _p.drawPixmap(0, tl_pix.height(), cpu_pix)
-            finally:
-                _p.end()
-            pixmap = combined
-        else:
-            pixmap = tl_pix
-        dlg = SnapshotEditorDialog(pixmap, self)
-        _exec_centred(dlg, self)
+        _copy_pixmap_to_clipboard(self._capture_viewport_pixmap())
+        self.statusBar().showMessage("Copied to clipboard!", 4000)
 
     # -- Settings actions -----------------------------------------------
 
@@ -14389,7 +14858,10 @@ class MainWindow(QMainWindow):
             sc.rebuild()
             self._view.zoom_changed.emit(sc.timescale_per_px)
 
-    def _on_zoom_changed(self, timescale_per_px: float) -> None:
+    def _on_zoom_changed(self, timescale_per_px: float,
+                         view: TimelineView = None) -> None:
+        if view is not None and view is not self._view:
+            return
         # Rebuild percentage presets if the fit level changed (resize / new trace).
         sc = self._view._scene
         cur_fit = sc._timescale_per_px_fit if sc else float('inf')
@@ -14429,7 +14901,9 @@ class MainWindow(QMainWindow):
         self._view._scene.remove_nearest_cursor(ns)
         self._view.cursors_changed.emit(self._view._scene.cursor_times())
 
-    def _on_cursors_changed(self, times: list) -> None:
+    def _on_cursors_changed(self, times: list, view: TimelineView = None) -> None:
+        if view is not None and view is not self._view:
+            return
         self._cursor_bar.rebuild(times, self._trace)
         if hasattr(self, "_stats_panel"):
             self._stats_panel.set_cursor_times(times)
@@ -15029,12 +15503,7 @@ def main() -> None:
         if os.path.isfile(path):
             QTimer.singleShot(100, lambda: win._open_file(path))
     else:
-        last = win._settings.get("files", "last_file", "")
-        if last and not os.path.isabs(last):
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            last = os.path.abspath(os.path.join(base_dir, last))
-        if last and os.path.isfile(last):
-            QTimer.singleShot(100, lambda: win._open_file(last))
+        QTimer.singleShot(100, win._restore_session_tabs)
 
     sys.exit(app.exec_())
 

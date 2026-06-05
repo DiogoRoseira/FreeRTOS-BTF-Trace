@@ -26,6 +26,34 @@
       @show-about="openAboutDialog"
     />
 
+    <!-- Trace tabs -->
+    <div
+      v-if="tabs.length"
+      class="trace-tabs"
+      role="tablist"
+      aria-label="Open traces"
+    >
+      <button
+        v-for="tab in tabs"
+        :key="tab.id"
+        class="trace-tab"
+        :class="{ active: tab.id === activeTabId }"
+        role="tab"
+        type="button"
+        :aria-selected="tab.id === activeTabId"
+        :title="tab.name"
+        @click="activeTabId = tab.id"
+      >
+        <span class="trace-tab-label">{{ tab.name }}</span>
+        <span
+          class="trace-tab-close"
+          title="Close tab"
+          aria-label="Close tab"
+          @click.stop="closeTab(tab.id)"
+        >×</span>
+      </button>
+    </div>
+
     <!-- Main area -->
     <div class="main-area">
       <!-- Loading overlay -->
@@ -526,7 +554,7 @@
 </template>
 
 <script setup>
-import { ref, shallowRef, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { toBlob as domToBlob, toSvg as domToSvg } from 'html-to-image'
 import Toolbar          from './components/Toolbar.vue'
 import TimelinePanel    from './components/TimelinePanel.vue'
@@ -538,17 +566,33 @@ import MarksPanel       from './components/MarksPanel.vue'
 import SnapshotEditor   from './components/SnapshotEditor.vue'
 import { formatTime }   from './renderer/TimelineRenderer.js'
 import { taskDisplayName, taskMergeKey } from './utils/colors.js'
+import { useTraceTabs } from './composables/useTraceTabs.js'
 import exampleBtfB64   from 'virtual:example-btf'
 
 // ---- State ---------------------------------------------------------------
 const appVersion = __APP_VERSION__
 const buildDate  = __BUILD_DATE__
-const trace      = shallowRef(null)
+const {
+  tabs,
+  activeTabId,
+  activeTab,
+  trace,
+  cursors,
+  marks,
+  pinnedHighlightKey,
+  highlightSegment,
+  timelineViewport,
+  cpuLoadExpanded,
+  openTab,
+  closeTab,
+  resetTabForLoad,
+  getNavCache,
+  setNavCache,
+} = useTraceTabs()
 const loading    = ref(false)
 const loadingPct = ref(0)
 const loadingMsg = ref('')
 const loadingFileName = ref('')
-const cursors    = ref([null, null, null, null])
 const helpOpen   = ref(false)
 const aboutOpen  = ref(false)
 const rightPanelTab = ref('stats')
@@ -589,29 +633,15 @@ const timelineOptions = reactive({
   highlightSegment: null,
   selectedMarkId:  null,
 })
-const cpuLoadExpanded = ref(true)
 const cpuLoadHoverTime = ref(null)
-const timelineViewport = reactive({
-  timeStart: 0,
-  timeEnd: 1,
-  scrollY: 0,
-  scrollX: 0,
-  canvasW: 1,
-  canvasH: 1,
-})
+
 const cpuLoadSelectedTask = computed(() => {
   if (highlightSegment.value?.task) return taskMergeKey(highlightSegment.value.task)
   return pinnedHighlightKey.value
 })
 
-// Marks state (bookmarks + annotations)
-const marks              = ref([])
-let   _markNextId        = 1
-const pinnedHighlightKey = ref(null)  // sticky highlight set by legend click
-const highlightSegment   = ref(null)  // single-segment lock (bar click or Tab nav)
-
 // ---- Segment navigation cache (built lazily per trace) -------------------
-let _navCache = null   // { trace, segs: TaskSegment[] sorted by time + identity }
+let _navCache = null   // mirrored to active tab via getNavCache/setNavCache
 
 function _sameSegment(a, b) {
   if (!a || !b) return false
@@ -627,7 +657,12 @@ function _segmentCmp(a, b) {
 }
 
 function _ensureNavCache() {
-  if (!trace.value || _navCache?.trace === trace.value) return
+  if (!trace.value || !activeTab.value) return
+  const cached = getNavCache(activeTab.value)
+  if (cached?.trace === trace.value) {
+    _navCache = cached
+    return
+  }
   const tickMk = taskMergeKey('TICK')
   const isCoreEntity = (name) => typeof name === 'string' && name.startsWith('Core_')
   _navCache = {
@@ -638,6 +673,7 @@ function _ensureNavCache() {
       .filter(s => taskMergeKey(s.task) !== tickMk)
       .sort(_segmentCmp),
   }
+  setNavCache(activeTab.value, _navCache)
 }
 
 function cycleHighlightedSegment(forward) {
@@ -728,6 +764,14 @@ function onSegmentClick(seg) {
 watch(marks, (m) => {
   timelineOptions.marks = m
 }, { deep: true })
+
+watch(activeTabId, () => {
+  const tab = activeTab.value
+  timelineOptions.highlightKey = tab?.pinnedHighlightKey ?? null
+  timelineOptions.highlightSegment = tab?.highlightSegment ?? null
+  _navCache = tab ? getNavCache(tab) : null
+  nextTick(() => syncTimelineViewport())
+})
 
 // ---- Refs ----------------------------------------------------------------
 const leftPaneRef = ref(null)
@@ -843,15 +887,12 @@ async function onTraceLoaded({ text, name }) {
     try {
       const { parseBtf } = await import('./parser/btfParser.js')
       const result = parseBtf(text, (pct, msg) => { loadingPct.value = pct; loadingMsg.value = msg || '' })
-      trace.value = result
-      cursors.value = [null, null, null, null]
+      const tab = openTab(name || 'trace.btf')
+      resetTabForLoad(tab)
+      tab.trace = result
       timelineOptions.highlightKey = null
       timelineOptions.showCpuLoad = true
-      pinnedHighlightKey.value = null
-      highlightSegment.value = null
       timelineOptions.highlightSegment = null
-      cpuLoadExpanded.value = true
-      _navCache = null
       syncTimelineViewport()
     } catch (err) {
       console.error('BTF parse error:', err)
@@ -870,18 +911,15 @@ async function onTraceLoaded({ text, name }) {
       loadingPct.value = data.pct
       loadingMsg.value = data.msg || ''
     } else if (data.type === 'done') {
-      trace.value = data.trace
-      cursors.value = [null, null, null, null]
+      const tab = openTab(name || 'trace.btf')
+      resetTabForLoad(tab)
+      tab.trace = data.trace
       timelineOptions.highlightKey = null
       timelineOptions.showCpuLoad = true
-      pinnedHighlightKey.value = null
+      timelineOptions.highlightSegment = null
       loading.value = false
       _parseWorker = null
       worker.terminate()
-      highlightSegment.value = null
-      timelineOptions.highlightSegment = null
-      cpuLoadExpanded.value = true
-      _navCache = null
       syncTimelineViewport()
     } else if (data.type === 'error') {
       console.error('BTF parse error:', data.message)
@@ -1006,12 +1044,12 @@ function onCollapseAll() {
 }
 
 function onTimelineViewportChange(vp) {
-  Object.assign(timelineViewport, vp)
+  if (activeTab.value) Object.assign(activeTab.value.timelineViewport, vp)
 }
 
 function syncTimelineViewport() {
   const vp = timelinePanelRef.value?.getViewport?.()
-  if (vp) Object.assign(timelineViewport, vp)
+  if (vp && activeTab.value) Object.assign(activeTab.value.timelineViewport, vp)
 }
 
 function clearCursors() {
@@ -1263,10 +1301,14 @@ function onAddAnnotation(ns) {
 }
 
 function addMarkAtNs(ns, type = 'bookmark') {
-  if (!trace.value) return
-  // Clamp to trace time range
+  if (!trace.value || !activeTab.value) return
   const clamped = Math.max(trace.value.timeMin, Math.min(trace.value.timeMax, ns))
-  marks.value.push({ id: _markNextId++, ns: clamped, label: '', type: type === 'annotation' ? 'annotation' : 'bookmark' })
+  marks.value.push({
+    id: activeTab.value.markNextId++,
+    ns: clamped,
+    label: '',
+    type: type === 'annotation' ? 'annotation' : 'bookmark',
+  })
   marks.value.sort((a, b) => a.ns - b.ns)
 }
 
@@ -1293,9 +1335,10 @@ function onUpdateMarkLabel({ id, label }) {
 }
 
 function onImportMarks(imported) {
+  if (!activeTab.value) return
   for (const { ns, label, type } of imported) {
     marks.value.push({
-      id: _markNextId++,
+      id: activeTab.value.markNextId++,
       ns,
       label: label || '',
       type: type === 'annotation' ? 'annotation' : 'bookmark',
@@ -1380,6 +1423,61 @@ body {
   height: 100vh;
   background: var(--bg);
   color: var(--fg);
+}
+
+.trace-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  padding: 0 6px;
+  background: var(--tb-bg);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.trace-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 6px 8px 6px 12px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.trace-tab.active {
+  color: var(--fg);
+  border-bottom-color: var(--accent);
+  background: rgba(127, 127, 127, 0.08);
+}
+
+.trace-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.trace-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.65;
+}
+
+.trace-tab-close:hover {
+  opacity: 1;
+  background: rgba(127, 127, 127, 0.2);
 }
 
 .main-area {
