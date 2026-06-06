@@ -72,3 +72,15 @@ export function applySavedTabState(tab, saved) {
     Object.assign(tab.timelineViewport, saved.timelineViewport)
   }
 }
+
+/** True when saved viewport has a real zoom/pan window for this trace. */
+export function isRestorableViewport(vp, trace) {
+  if (!vp || !trace) return false
+  const lo = trace.timeMin >= 0 ? Math.max(0, trace.timeMin) : trace.timeMin
+  const hi = trace.timeMax
+  if (hi <= lo) return false
+  const vpSpan = vp.timeEnd - vp.timeStart
+  // Sentinel from _emptyViewport() / resetTabForLoad before session restore
+  if (vp.timeStart === 0 && vp.timeEnd === 1 && vpSpan <= 1) return false
+  return vpSpan > 0 && vp.timeStart < hi && vp.timeEnd > lo
+}

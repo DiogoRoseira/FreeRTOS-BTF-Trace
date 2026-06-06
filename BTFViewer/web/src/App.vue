@@ -86,6 +86,7 @@
             :trace="trace"
             :options="timelineOptions"
             :cursors="cursors"
+            :persisted-viewport="timelineViewport"
             @cursors-change="cursors = $event"
             @hover-time-change="cpuLoadHoverTime = $event"
             @viewport-change="onTimelineViewportChange"
@@ -581,6 +582,7 @@ import SnapshotEditor   from './components/SnapshotEditor.vue'
 import { formatTime }   from './renderer/TimelineRenderer.js'
 import { taskDisplayName, taskMergeKey } from './utils/colors.js'
 import { useTraceTabs } from './composables/useTraceTabs.js'
+import { loadSession, saveSession, getSavedTabState, applySavedTabState, buildSessionSnapshot } from './utils/sessionStore.js'
 import exampleBtfB64   from 'virtual:example-btf'
 
 // ---- State ---------------------------------------------------------------
@@ -792,8 +794,22 @@ watch(activeTabId, () => {
   timelineOptions.highlightSegment = tab?.highlightSegment ?? null
   timelineOptions.lockedTaskKey = tab?.pinnedHighlightKey ?? null
   _navCache = tab ? getNavCache(tab) : null
-  nextTick(() => syncTimelineViewport())
+  nextTick(() => applyTimelineViewport())
 })
+
+watch([tabs, activeTabId, cursors, marks, timelineViewport], scheduleSessionSave, { deep: true })
+watch(
+  () => ({
+    viewMode: timelineOptions.viewMode,
+    orientation: timelineOptions.orientation,
+    showGrid: timelineOptions.showGrid,
+    showSti: timelineOptions.showSti,
+    showCpuLoad: timelineOptions.showCpuLoad,
+    darkMode: timelineOptions.darkMode,
+    migratedOnlyFilter: timelineOptions.migratedOnlyFilter,
+  }),
+  scheduleSessionSave,
+)
 
 // ---- Refs ----------------------------------------------------------------
 const leftPaneRef = ref(null)
@@ -912,10 +928,10 @@ async function onTraceLoaded({ text, name }) {
       const tab = openTab(name || 'trace.btf')
       resetTabForLoad(tab)
       tab.trace = result
-      timelineOptions.highlightKey = null
+      restoreTabState(tab)
+      timelineOptions.highlightKey = tab.pinnedHighlightKey ?? null
       timelineOptions.showCpuLoad = true
-      timelineOptions.highlightSegment = null
-      syncTimelineViewport()
+      timelineOptions.highlightSegment = tab.highlightSegment ?? null
     } catch (err) {
       console.error('BTF parse error:', err)
       showToast('Failed to parse BTF file: ' + err.message, 'error')
@@ -936,13 +952,13 @@ async function onTraceLoaded({ text, name }) {
       const tab = openTab(name || 'trace.btf')
       resetTabForLoad(tab)
       tab.trace = data.trace
-      timelineOptions.highlightKey = null
+      restoreTabState(tab)
+      timelineOptions.highlightKey = tab.pinnedHighlightKey ?? null
       timelineOptions.showCpuLoad = true
-      timelineOptions.highlightSegment = null
+      timelineOptions.highlightSegment = tab.highlightSegment ?? null
       loading.value = false
       _parseWorker = null
       worker.terminate()
-      syncTimelineViewport()
     } else if (data.type === 'error') {
       console.error('BTF parse error:', data.message)
       showToast('Failed to parse BTF file: ' + data.message, 'error')
@@ -1072,6 +1088,12 @@ function onTimelineViewportChange(vp) {
 function syncTimelineViewport() {
   const vp = timelinePanelRef.value?.getViewport?.()
   if (vp && activeTab.value) Object.assign(activeTab.value.timelineViewport, vp)
+}
+
+function applyTimelineViewport() {
+  const tab = activeTab.value
+  if (!tab?.trace) return
+  timelinePanelRef.value?.applyViewport?.(tab.timelineViewport)
 }
 
 function clearCursors() {
@@ -1310,6 +1332,10 @@ function _onDocWheel(e) {
 }
 
 onMounted(() => {
+  const saved = loadSession()
+  if (saved?.timelineOptions) {
+    Object.assign(timelineOptions, saved.timelineOptions)
+  }
   window.addEventListener('keydown', onGlobalKeydown)
   document.addEventListener('wheel', _onDocWheel, { passive: false, capture: true })
 })
@@ -1381,6 +1407,28 @@ function onMoveMark({ id, ns }) {
 
 function onJumpToMark(ns) {
   timelinePanelRef.value?.jumpToNs(ns)
+}
+
+function restoreTabState(tab) {
+  const saved = getSavedTabState(tab.name)
+  if (!saved) return
+  applySavedTabState(tab, saved)
+  timelineOptions.highlightKey = saved.pinnedHighlightKey ?? null
+  timelineOptions.highlightSegment = saved.highlightSegment ?? null
+  timelineOptions.lockedTaskKey = saved.pinnedHighlightKey ?? null
+}
+
+let _sessionSaveTimer = null
+function scheduleSessionSave() {
+  clearTimeout(_sessionSaveTimer)
+  _sessionSaveTimer = setTimeout(() => {
+    if (!tabs.value.length) return
+    saveSession(buildSessionSnapshot({
+      tabs: tabs.value,
+      activeTabId: activeTabId.value,
+      timelineOptions,
+    }))
+  }, 400)
 }
 
 function onUpdateMarkLabel({ id, label }) {

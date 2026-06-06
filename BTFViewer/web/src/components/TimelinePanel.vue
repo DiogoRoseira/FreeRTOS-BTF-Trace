@@ -168,12 +168,15 @@ import { renderToSvg } from '../renderer/SvgExporter.js'
 import { InteractionHandler } from '../renderer/InteractionHandler.js'
 import { taskMergeKey, taskColor, coreColor, coreTint, stiNoteColor, parseTaskName, stiChannelColor, taskDisplayName } from '../utils/colors.js'
 import { segmentTooltipLines as buildSegmentTooltipLines } from '../utils/statsAnalysis.js'
+import { isRestorableViewport } from '../utils/sessionStore.js'
 
 // ---- Props & emits -------------------------------------------------------
 const props = defineProps({
   trace:   { type: Object, default: null },
   options: { type: Object, required: true },  // { viewMode, highlightKey, showGrid, darkMode, orientation, marks }
   cursors: { type: Array, default: () => [] },
+  /** Per-tab viewport from session store; applied on trace load instead of fit-to-trace when valid. */
+  persistedViewport: { type: Object, default: null },
 })
 const emit = defineEmits(['viewportChange', 'cursorsChange', 'hoverTimeChange', 'highlightChange', 'highlightClick', 'segmentClick', 'clearSelection', 'addBookmark', 'addAnnotation', 'markMove', 'copyScreenshot'])
 
@@ -695,6 +698,34 @@ function fitToTrace() {
   scheduleRender()
 }
 
+function applyViewport(vp) {
+  if (!props.trace || !vp) return false
+  const lo = props.trace.timeMin >= 0 ? Math.max(0, props.trace.timeMin) : props.trace.timeMin
+  const hi = props.trace.timeMax
+  let timeStart = vp.timeStart
+  let timeEnd = vp.timeEnd
+  if (timeEnd <= timeStart) return false
+  const minSpan = Math.max(1, (hi - lo) * 1e-6)
+  if (timeEnd - timeStart < minSpan) {
+    const center = (timeStart + timeEnd) / 2
+    timeStart = center - minSpan / 2
+    timeEnd = center + minSpan / 2
+  }
+  timeStart = Math.max(lo, timeStart)
+  timeEnd = Math.min(hi, timeEnd)
+  if (timeEnd - timeStart < minSpan) {
+    if (timeStart <= lo) timeEnd = Math.min(hi, lo + minSpan)
+    else timeStart = Math.max(lo, hi - minSpan)
+  }
+  viewport.timeStart = timeStart
+  viewport.timeEnd = timeEnd
+  viewport.scrollX = vp.scrollX ?? 0
+  viewport.scrollY = vp.scrollY ?? 0
+  emitViewportChange()
+  scheduleRender()
+  return true
+}
+
 // ---- Zoom around center (called from parent via ref) ---------------------
 function zoomCenter(factor) {
   const span   = (viewport.timeEnd - viewport.timeStart) * factor
@@ -869,7 +900,7 @@ function getHoverTime() { return hoverTime.value }
 function getLastActiveCursorTime() { return _handler?.getLastActiveCursorTime() ?? null }
 function getViewport() { return { ...viewport } }
 
-defineExpose({ fitToTrace, scheduleRender, zoomCenter, expandAll, collapseAll, jumpToNs, getViewport, getViewportCenter, getCoreAtViewportCenter, scrollToTask, scrollToSegmentIfNeeded, captureScreenshotBlob, captureAsSvg, getHoverTime, getLastActiveCursorTime })
+defineExpose({ fitToTrace, applyViewport, scheduleRender, zoomCenter, expandAll, collapseAll, jumpToNs, getViewport, getViewportCenter, getCoreAtViewportCenter, scrollToTask, scrollToSegmentIfNeeded, captureScreenshotBlob, captureAsSvg, getHoverTime, getLastActiveCursorTime })
 
 // ---- Expand / collapse core rows -----------------------------------------
 function onExpandToggle(coreName) {
@@ -903,7 +934,12 @@ watch(() => props.trace, (trace) => {
   expanded.clear()
   for (const coreName of trace.coreNames) expanded.add(coreName)
   nextTick(() => {
-    fitToTrace()
+    const saved = props.persistedViewport
+    if (isRestorableViewport(saved, trace)) {
+      applyViewport(saved)
+    } else {
+      fitToTrace()
+    }
     setupHandler()
     scheduleRender()
   })

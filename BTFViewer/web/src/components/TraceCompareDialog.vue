@@ -53,6 +53,14 @@
         </label>
       </div>
 
+      <label class="compare-scope">
+        <input
+          v-model="scopeToCursors"
+          type="checkbox"
+        />
+        Limit to each tab's cursor range (C1–Cn, when 2+ cursors placed)
+      </label>
+
       <div class="compare-tabs" role="tablist">
         <button
           v-for="tab in pageTabs"
@@ -189,6 +197,7 @@ const pageTabs = [
 ]
 
 const activePage = ref('summary')
+const scopeToCursors = ref(false)
 const tabAId = ref(props.tabs[0]?.id ?? null)
 const tabBId = ref(props.tabs[Math.min(1, props.tabs.length - 1)]?.id ?? null)
 
@@ -203,12 +212,17 @@ watch(
   { deep: true },
 )
 
-const traceA = computed(() => props.tabs.find(t => t.id === tabAId.value)?.trace ?? null)
-const traceB = computed(() => props.tabs.find(t => t.id === tabBId.value)?.trace ?? null)
+const tabA = computed(() => props.tabs.find(t => t.id === tabAId.value) ?? null)
+const tabB = computed(() => props.tabs.find(t => t.id === tabBId.value) ?? null)
+const traceA = computed(() => tabA.value?.trace ?? null)
+const traceB = computed(() => tabB.value?.trace ?? null)
 
-const summaryRows = computed(() => buildSummaryCompareRows(traceA.value, traceB.value))
-const topTaskRows = computed(() => buildTopTasksCompareRows(traceA.value, traceB.value))
-const migrationRows = computed(() => buildMigrationCompareRows(traceA.value, traceB.value))
+const summaryRows = computed(() =>
+  buildSummaryCompareRows(traceA.value, traceB.value, tabA.value, tabB.value, scopeToCursors.value))
+const topTaskRows = computed(() =>
+  buildTopTasksCompareRows(traceA.value, traceB.value, tabA.value, tabB.value, scopeToCursors.value))
+const migrationRows = computed(() =>
+  buildMigrationCompareRows(traceA.value, traceB.value, tabA.value, tabB.value, scopeToCursors.value))
 </script>
 
 <style scoped>
@@ -263,6 +277,16 @@ const migrationRows = computed(() => buildMigrationCompareRows(traceA.value, tra
 .compare-close-btn:hover {
   background: var(--tb-btn-hover);
   color: var(--fg);
+}
+
+.compare-scope {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+  cursor: pointer;
 }
 
 .compare-select-row {

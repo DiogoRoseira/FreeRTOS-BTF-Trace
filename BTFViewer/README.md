@@ -28,9 +28,9 @@ Histogram of Execution Time:
 - **Default zoom 2 timescale units/px** — the **1:1** toolbar button resets to 2 timescale units per pixel (for `ns` timescale, the UI shows `2 ns/px`; configurable in Settings)
 - **Zoom to cursor range** — `Ctrl+R` or the **⊡ Range** toolbar button fits the viewport exactly between cursor C1 (left/top edge) and the last cursor (right/bottom edge)
 - **Viewport culling** — only visible rows/columns and segments are rendered; no slowdown on large traces
-- **Multi-tab traces** — open several `.btf` files at once (Desktop: closable tabs; Web: tab bar under the toolbar). Session tabs, active tab, and per-tab zoom/cursors are restored from `btf_viewer.rc` on launch (Desktop)
+- **Multi-tab traces** — open several `.btf` files at once (Desktop: closable tabs; Web: tab bar under the toolbar). Desktop restores session tabs, active tab, and per-tab zoom/cursors from `btf_viewer.rc` on launch; Web restores per-tab cursors, marks, viewport, and view options from browser `localStorage` when you reload a trace by name
 - **Measurement cursors** — Desktop supports 2–8 cursors (default: 4); Web supports up to 4 cursors
-- **Trace compare** — with 2+ tabs open, **Trace Compare…** in the Statistics panel diffs **Summary**, **Top Tasks**, and **Core Migrations** side-by-side (Desktop + Web; full-trace metrics, not cursor scope)
+- **Trace compare** — with 2+ tabs open, **Trace Compare…** in the Statistics panel diffs **Summary**, **Top Tasks**, and **Core Migrations** side-by-side (Desktop + Web). Optional **Limit to each tab's cursor range** compares metrics within C1–Cn when 2+ cursors are placed on each trace
 - **Core migration analysis** — detect tasks that run on multiple cores; **Core Migrations** stats table (ping-pong, STI correlation, gap-after vs other gaps), **Migrated tasks only** legend filter, and Find **Migrations** mode (Desktop)
 - **Cursor-scoped statistics** — with 2+ cursors, the Statistics panel can limit all metrics (CPU%, execution slices, blocking time, inter-arrival, scheduling summary, exports, and charts) to the window from C1 through the last cursor; toggle **Limit to cursor range (C1–Cn)** (Desktop + Web)
 - **Cursor range summary** — with 2+ cursors, Desktop also shows a quick min/max/avg segment summary in the status bar; Web shows range stats in the **Cursors** panel
@@ -201,7 +201,16 @@ The right side holds **Cursor / Bookmark** and **Statistics** pages (tab bar at 
 
 ### Multi-tab traces (Web)
 
-Same tab bar behaviour as desktop: each `.btf` opens in its own tab with independent cursors, marks, zoom, and chart state. **Trace Compare…** uses any two loaded tabs — useful for before/after or build-to-build diffs.
+Same tab bar behaviour as desktop: each `.btf` opens in its own tab with independent cursors, marks, zoom, and chart state. When you reload a trace by name, cursors, marks, viewport, and pinned highlights are restored from browser `localStorage`. **Trace Compare…** uses any two loaded tabs — useful for before/after or build-to-build diffs.
+
+### Session restore (Web)
+
+The web viewer persists session state in browser `localStorage` (key `btf-viewer-session-v1`). Saved per trace **name**:
+
+- Cursors, bookmarks/annotations, viewport (zoom/pan), pinned task highlight, and selected segment
+- Global view options: task/core mode, orientation, grid, STI, CPU load panel, dark mode, migrated-only filter
+
+Re-open the same `.btf` file (same tab name) to restore that tab's layout. Unlike the desktop viewer, the web app does not auto-reopen file paths on page load — you still choose **Open** or **Demo** after refreshing the browser.
 
 ### Statistics panel — cursor-scoped metrics
 
@@ -222,7 +231,7 @@ Uncheck the box to return to full-trace statistics.
 
 Below the scope checkbox, a **scheduling summary** line shows context-switch count and average/max core gap (idle time between consecutive slices on each core). Metric tables (**Core Utilisation**, **Top Tasks**, **Core Migrations**, **Execution Time**, **Blocking Time**, **Inter-Arrival**) are **collapsible** — click a section title to expand or collapse it. Drag the handle below a metric table to resize its height.
 
-**Core Migrations** lists tasks that ran on two or more cores (see [Core migration analysis](#core-migration-analysis)). **Trace Compare…** (footer, next to Export) opens a dialog with **Summary**, **Top Tasks**, and **Core Migrations** tabs to diff two open trace tabs; it requires at least two loaded tabs and uses **full-trace** metrics (not cursor scope).
+**Core Migrations** lists tasks that ran on two or more cores (see [Core migration analysis](#core-migration-analysis)). **Trace Compare…** (footer, next to Export) opens a dialog with **Summary**, **Top Tasks**, and **Core Migrations** tabs to diff two open trace tabs; optional cursor-range scoping compares each tab's C1–Cn window independently.
 
 ### Snapshot Editor
 
@@ -510,7 +519,7 @@ It shows:
 - **Blocking Time** — off-CPU gap between consecutive activations of the same task (min/avg/max/p95); click a row for a distribution chart; click **Min** / **Max** to jump to the slice at the shortest / longest off-CPU gap (collapsible)
 - **Inter-Arrival Time** — same statistics for gaps between task activations; click **Min** / **Max** to jump to the activation at the shortest / longest inter-arrival gap (collapsible)
 
-**Export CSV** / **Export HTML** respect the current cursor scope. **Trace Compare…** compares summary, top tasks, and core migrations between two open tabs (full trace, not cursor scope). Open metrics charts update live when cursors move or scope is toggled; each trace tab remembers its own open chart when you switch tabs.
+**Export CSV** / **Export HTML** respect the current cursor scope. **Trace Compare…** compares summary, top tasks, and core migrations between two open tabs; enable **Limit to each tab's cursor range** to scope each side to its own C1–Cn window. Open metrics charts update live when cursors move or scope is toggled; each trace tab remembers its own open chart when you switch tabs.
 
 ### Core migration analysis
 
@@ -527,6 +536,8 @@ A **migration** is recorded when consecutive slices of the same task (merge-key)
 | **Min** / **Max** slice links (execution / blocking / inter-arrival) | ✓ | ✓ |
 | Find bar **Migrations** mode | ✓ | — |
 | **Trace Compare…** (2+ open traces) | ✓ | ✓ |
+| **Trace Compare…** cursor-scoped mode | ✓ | ✓ |
+| Web session restore (`localStorage`) | — | ✓ |
 | Core View: dim other tasks when one is locked | ✓ | ✓ |
 
 **Legend panel:** the core-tint key explains Task View colouring by core. Check **Migrated tasks only** to hide tasks that never left their first core.
@@ -552,15 +563,16 @@ Compare two traces you already have open side-by-side:
 1. Open at least **two** `.btf` files (Desktop: **File → Open** adds a tab; Web: **Open** adds a tab in the bar under the toolbar).
 2. In the **Statistics** panel footer, click **Trace Compare…** (enabled when two or more tabs are loaded).
 3. Choose **Trace A** and **Trace B** from the dropdowns.
-4. Switch between **Summary**, **Top Tasks**, and **Core Migrations** tabs.
+4. Optionally check **Limit to each tab's cursor range** to compare metrics within C1–Cn on each trace (requires 2+ cursors per tab).
+5. Switch between **Summary**, **Top Tasks**, and **Core Migrations** tabs.
 
-All compare views use the **full trace** (not cursor scope).
+By default, compare views use the **full trace**. With the cursor-range checkbox enabled, each side uses that tab's own cursor window independently.
 
 **Summary** — high-level diff:
 
 | Metric | Notes |
 |--------|--------|
-| Span | Total trace duration |
+| Span | Total trace duration (or cursor-range width when scoped) |
 | Tasks / Segments / STI events | Counts |
 | Context switches | Total across all cores |
 | Core gap avg / max | Idle time between consecutive slices on each core |
@@ -575,7 +587,7 @@ Each row shows Trace A, Trace B, and **Δ** (signed difference).
 | Column | Meaning |
 |--------|---------|
 | **Task** | Display name (`Name[id]`) |
-| **Migrations A** / **B** | Total migration count in that trace (full trace, not cursor scope) |
+| **Migrations A** / **B** | Migration count in scope for that trace |
 | **Δ** | Difference (A − B) |
 | **Ping-pong A** / **B** | Ping-pong count in each trace |
 

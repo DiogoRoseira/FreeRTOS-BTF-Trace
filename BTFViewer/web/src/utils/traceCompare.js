@@ -1,48 +1,77 @@
 /**
- * Compare summary and per-task metrics between two loaded traces (full trace, not cursor scope).
+ * Compare summary and per-task metrics between two loaded traces.
+ * Optional lo/hi per trace for cursor-scoped compare.
  */
 
 import { formatTime, isStiTagChannel } from '../renderer/TimelineRenderer.js'
 import { parseTaskName, taskDisplayName, taskLabelForMergeKey, taskReprGet, isIdleTaskName } from './colors.js'
 import { schedulingStats } from './statsAnalysis.js'
 import { isMigratedTask, migrationRows } from './migrationAnalysis.js'
+import { getPlacedCursors } from './statsRange.js'
 
-export function traceSummarySnapshot(trace) {
+export function cursorRangeForCursors(cursors) {
+  const placed = getPlacedCursors(cursors || [])
+  if (placed.length < 2) return { lo: null, hi: null }
+  const sorted = [...placed].sort((a, b) => a - b)
+  return { lo: sorted[0], hi: sorted[sorted.length - 1] }
+}
+
+export function traceSummarySnapshot(trace, lo = null, hi = null) {
   if (!trace) return null
-  const spanNs = trace.timeMax - trace.timeMin
-  const stiEvents = (trace.stiEvents || []).filter(ev => !isStiTagChannel(ev.target)).length
-  const { contextSwitches, coreGaps } = schedulingStats(trace, null, null)
+  const fullSpan = trace.timeMax - trace.timeMin
+  const spanNs = (lo != null && hi != null) ? Math.max(0, hi - lo) : fullSpan
+  const stiEvents = (trace.stiEvents || []).filter(ev => {
+    if (isStiTagChannel(ev.target)) return false
+    if (lo != null && hi != null) return ev.time >= lo && ev.time <= hi
+    return true
+  }).length
+  const { contextSwitches, coreGaps } = schedulingStats(trace, lo, hi)
   const gapAvgNs = coreGaps.length
     ? Math.round(coreGaps.reduce((a, b) => a + b, 0) / coreGaps.length)
     : 0
   const gapMaxNs = coreGaps.length ? Math.max(...coreGaps) : 0
-  const migratedTasks = (trace.tasks || []).filter(mk => isMigratedTask(trace, mk)).length
+  let migrations = trace.migrations?.length ?? 0
+  let migratedTasks = (trace.tasks || []).filter(mk => isMigratedTask(trace, mk)).length
+  if (lo != null && hi != null) {
+    migrations = (trace.migrations || []).filter(m => m.ns >= lo && m.ns <= hi).length
+    migratedTasks = migrationRows(trace, lo, hi, formatTime).length
+  }
   return {
     spanNs,
     tasks: trace.tasks?.length ?? 0,
-    segments: trace.segments?.length ?? 0,
+    segments: lo != null && hi != null
+      ? trace.segments.filter(s => s.end > lo && s.start < hi).length
+      : (trace.segments?.length ?? 0),
     stiEvents,
     contextSwitches,
     gapAvgNs,
     gapMaxNs,
-    migrations: trace.migrations?.length ?? 0,
+    migrations,
     migratedTasks,
     timeScale: trace.timeScale,
   }
 }
 
 /** Top tasks by CPU% keyed by display name. */
-export function topTasksCpuByName(trace, limit = 10) {
+export function topTasksCpuByName(trace, limit = 10, lo = null, hi = null) {
   if (!trace?.segByMergeKey) return new Map()
-  const total = trace.timeMax - trace.timeMin
-  if (total <= 0) return new Map()
+  const total = (lo != null && hi != null)
+    ? Math.max(1, hi - lo)
+    : Math.max(1, trace.timeMax - trace.timeMin)
   const accum = new Map()
   for (const [mk, segs] of trace.segByMergeKey) {
     const repr = taskReprGet(trace, mk) ?? mk
     const { name } = parseTaskName(repr)
     if (isIdleTaskName(name) || name === 'TICK') continue
     let t = 0
-    for (const s of segs) t += s.end - s.start
+    for (const s of segs) {
+      if (lo != null && hi != null) {
+        if (s.end <= lo || s.start >= hi) continue
+        t += Math.min(s.end, hi) - Math.max(s.start, lo)
+      } else {
+        t += s.end - s.start
+      }
+    }
     if (t > 0) accum.set(mk, t)
   }
   const sorted = [...accum.entries()].sort((a, b) => b[1] - a[1]).slice(0, limit)
@@ -71,14 +100,21 @@ function fmtSignedPct(delta) {
   return `${sign}${delta.toFixed(1)}`
 }
 
-export function buildSummaryCompareRows(traceA, traceB) {
-  const a = traceSummarySnapshot(traceA)
-  const b = traceSummarySnapshot(traceB)
+function rangeForTab(tab, scopeEnabled) {
+  if (!scopeEnabled || !tab) return { lo: null, hi: null }
+  return cursorRangeForCursors(tab.cursors)
+}
+
+export function buildSummaryCompareRows(traceA, traceB, tabA = null, tabB = null, scopeEnabled = false) {
+  const ra = rangeForTab(tabA, scopeEnabled)
+  const rb = rangeForTab(tabB, scopeEnabled)
+  const a = traceSummarySnapshot(traceA, ra.lo, ra.hi)
+  const b = traceSummarySnapshot(traceB, rb.lo, rb.hi)
   if (!a || !b) return []
   const scale = a.timeScale || b.timeScale || 'ns'
-  const rows = [
+  return [
     {
-      label: 'Span',
+      label: scopeEnabled ? 'Span (cursor range)' : 'Span',
       a: formatTime(a.spanNs, scale),
       b: formatTime(b.spanNs, scale),
       delta: fmtSignedTime(a.spanNs - b.spanNs, scale),
@@ -117,12 +153,13 @@ export function buildSummaryCompareRows(traceA, traceB) {
       delta: fmtSignedInt(a.migratedTasks - b.migratedTasks),
     },
   ]
-  return rows
 }
 
-export function buildTopTasksCompareRows(traceA, traceB, limit = 10) {
-  const mapA = topTasksCpuByName(traceA, limit)
-  const mapB = topTasksCpuByName(traceB, limit)
+export function buildTopTasksCompareRows(traceA, traceB, tabA = null, tabB = null, scopeEnabled = false, limit = 10) {
+  const ra = rangeForTab(tabA, scopeEnabled)
+  const rb = rangeForTab(tabB, scopeEnabled)
+  const mapA = topTasksCpuByName(traceA, limit, ra.lo, ra.hi)
+  const mapB = topTasksCpuByName(traceB, limit, rb.lo, rb.hi)
   const names = new Set([...mapA.keys(), ...mapB.keys()])
   return [...names]
     .sort((x, y) => {
@@ -144,16 +181,18 @@ export function buildTopTasksCompareRows(traceA, traceB, limit = 10) {
     })
 }
 
-export function buildMigrationCompareRows(traceA, traceB) {
+export function buildMigrationCompareRows(traceA, traceB, tabA = null, tabB = null, scopeEnabled = false) {
+  const ra = rangeForTab(tabA, scopeEnabled)
+  const rb = rangeForTab(tabB, scopeEnabled)
   const mapA = new Map()
   const mapB = new Map()
   if (traceA) {
-    for (const row of migrationRows(traceA, null, null, formatTime)) {
+    for (const row of migrationRows(traceA, ra.lo, ra.hi, formatTime)) {
       mapA.set(row.mk, row)
     }
   }
   if (traceB) {
-    for (const row of migrationRows(traceB, null, null, formatTime)) {
+    for (const row of migrationRows(traceB, rb.lo, rb.hi, formatTime)) {
       mapB.set(row.mk, row)
     }
   }
@@ -164,18 +203,18 @@ export function buildMigrationCompareRows(traceA, traceB) {
     return na.localeCompare(nb)
   })
   return keys.map((mk) => {
-    const ra = mapA.get(mk)
-    const rb = mapB.get(mk)
-    const ma = ra?.migrations ?? 0
-    const mb = rb?.migrations ?? 0
+    const raRow = mapA.get(mk)
+    const rbRow = mapB.get(mk)
+    const ma = raRow?.migrations ?? 0
+    const mb = rbRow?.migrations ?? 0
     return {
       mk,
-      name: ra?.name ?? rb?.name ?? taskLabelForMergeKey(traceA || traceB, mk),
+      name: raRow?.name ?? rbRow?.name ?? taskLabelForMergeKey(traceA || traceB, mk),
       migrationsA: ma,
       migrationsB: mb,
       delta: ma - mb,
-      pingA: ra?.pingPong ?? 0,
-      pingB: rb?.pingPong ?? 0,
+      pingA: raRow?.pingPong ?? 0,
+      pingB: rbRow?.pingPong ?? 0,
     }
   })
 }

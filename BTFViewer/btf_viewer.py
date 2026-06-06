@@ -866,30 +866,48 @@ def _migration_rows(trace: "BtfTrace",
     rows.sort(key=lambda r: (-r[2], r[1].lower()))
     return rows
 
-def _trace_summary_snapshot(trace: "BtfTrace") -> dict:
-    """Full-trace summary metrics for trace compare."""
-    span = trace.time_max - trace.time_min
-    sti = sum(1 for ev in trace.sti_events if not _is_tag_sti_channel(ev.target))
-    ctx, gaps = _scheduling_stats(trace)
+def _trace_summary_snapshot(trace: "BtfTrace",
+                            lo: Optional[int] = None, hi: Optional[int] = None) -> dict:
+    """Summary metrics for trace compare (optional cursor scope)."""
+    full_span = trace.time_max - trace.time_min
+    span = max(0, hi - lo) if lo is not None and hi is not None else full_span
+    sti = sum(
+        1 for ev in trace.sti_events
+        if not _is_tag_sti_channel(ev.target)
+        and (lo is None or hi is None or (lo <= ev.time <= hi))
+    )
+    ctx, gaps = _scheduling_stats(trace, lo, hi)
     gap_avg = int(round(sum(gaps) / len(gaps))) if gaps else 0
     gap_max = max(gaps) if gaps else 0
-    mig_tasks = sum(1 for mk in trace.tasks if _is_migrated_task(trace, mk))
+    if lo is not None and hi is not None:
+        migrations = sum(1 for m in trace.migrations if lo <= m.ns <= hi)
+        mig_tasks = len(_migration_rows(trace, lo, hi))
+        segments = sum(
+            1 for s in trace.segments if s.end > lo and s.start < hi)
+    else:
+        migrations = len(trace.migrations)
+        mig_tasks = sum(1 for mk in trace.tasks if _is_migrated_task(trace, mk))
+        segments = len(trace.segments)
     return {
         "span_ns": span,
         "tasks": len(trace.tasks),
-        "segments": len(trace.segments),
+        "segments": segments,
         "sti_events": sti,
         "context_switches": ctx,
         "gap_avg_ns": gap_avg,
         "gap_max_ns": gap_max,
-        "migrations": len(trace.migrations),
+        "migrations": migrations,
         "migrated_tasks": mig_tasks,
         "time_scale": trace.time_scale,
     }
 
-def _top_tasks_cpu_by_name(trace: "BtfTrace", limit: int = 10) -> Dict[str, float]:
-    """Top tasks by CPU%, keyed by display name (full trace)."""
-    total_ns = trace.time_max - trace.time_min
+def _top_tasks_cpu_by_name(trace: "BtfTrace", limit: int = 10,
+                           lo: Optional[int] = None, hi: Optional[int] = None) -> Dict[str, float]:
+    """Top tasks by CPU%, keyed by display name."""
+    if lo is not None and hi is not None:
+        total_ns = max(1, hi - lo)
+    else:
+        total_ns = trace.time_max - trace.time_min
     if total_ns <= 0:
         return {}
     task_times: Dict[str, int] = {}
@@ -898,14 +916,31 @@ def _top_tasks_cpu_by_name(trace: "BtfTrace", limit: int = 10) -> Dict[str, floa
         _, _, tname = _parse_task_name(raw)
         if _is_idle_task_name(tname) or tname == "TICK":
             continue
-        task_times[mk] = sum(s.end - s.start for s in segs)
+        t_ns = 0
+        for s in segs:
+            if lo is not None and hi is not None:
+                if s.end <= lo or s.start >= hi:
+                    continue
+                t_ns += min(s.end, hi) - max(s.start, lo)
+            else:
+                t_ns += s.end - s.start
+        if t_ns > 0:
+            task_times[mk] = t_ns
     result: Dict[str, float] = {}
     for mk, t_ns in sorted(task_times.items(), key=lambda kv: kv[1], reverse=True)[:limit]:
-        if t_ns <= 0:
-            continue
         raw = trace.task_repr.get(mk, mk)
         result[_task_display_name(raw)] = 100.0 * t_ns / total_ns
     return result
+
+def _cursor_range_for_tab(win: "MainWindow", tab_idx: int) -> Tuple[Optional[int], Optional[int]]:
+    """Return (lo, hi) from a tab's placed cursors, or (None, None) if fewer than 2."""
+    if tab_idx < 0 or tab_idx >= len(win._tabs):
+        return None, None
+    times = win._tabs[tab_idx].view._scene.cursor_times()
+    if len(times) < 2:
+        return None, None
+    sorted_t = sorted(times)
+    return sorted_t[0], sorted_t[-1]
 
 def _fmt_signed_time_delta(delta_ns: int, scale: str) -> str:
     if delta_ns == 0:
@@ -8976,6 +9011,10 @@ class _TraceCompareDialog(QDialog):
         row.addWidget(self._combo_b, 1)
         lay.addLayout(row)
 
+        self._scope_cb = QCheckBox(
+            "Limit to each tab's cursor range (C1–Cn, when 2+ cursors placed)")
+        lay.addWidget(self._scope_cb)
+
         self._pages = QTabWidget()
         self._summary_table = QTableWidget(0, 4)
         self._summary_table.setHorizontalHeaderLabels(
@@ -9008,7 +9047,16 @@ class _TraceCompareDialog(QDialog):
             self._combo_b.setCurrentIndex(min(1, len(win._tabs) - 1))
         self._combo_a.currentIndexChanged.connect(self._refresh)
         self._combo_b.currentIndexChanged.connect(self._refresh)
+        self._scope_cb.toggled.connect(self._refresh)
         self._refresh()
+
+    def _range_for_trace(self, combo: QComboBox) -> Tuple[Optional[int], Optional[int]]:
+        if not self._scope_cb.isChecked():
+            return None, None
+        idx = combo.currentData()
+        if idx is None:
+            return None, None
+        return _cursor_range_for_tab(self._win, idx)
 
     def _trace_for_combo(self, combo: QComboBox) -> Optional[BtfTrace]:
         idx = combo.currentData()
@@ -9039,8 +9087,10 @@ class _TraceCompareDialog(QDialog):
         if ta is None or tb is None:
             self._summary_table.setRowCount(0)
             return
-        a = _trace_summary_snapshot(ta)
-        b = _trace_summary_snapshot(tb)
+        lo_a, hi_a = self._range_for_trace(self._combo_a)
+        lo_b, hi_b = self._range_for_trace(self._combo_b)
+        a = _trace_summary_snapshot(ta, lo_a, hi_a)
+        b = _trace_summary_snapshot(tb, lo_b, hi_b)
         scale = a["time_scale"]
         rows = [
             ["Span",
@@ -9070,8 +9120,10 @@ class _TraceCompareDialog(QDialog):
         self._fill_table(self._summary_table, rows)
 
     def _refresh_top_tasks(self, ta: Optional[BtfTrace], tb: Optional[BtfTrace]) -> None:
-        map_a = _top_tasks_cpu_by_name(ta) if ta else {}
-        map_b = _top_tasks_cpu_by_name(tb) if tb else {}
+        lo_a, hi_a = self._range_for_trace(self._combo_a)
+        lo_b, hi_b = self._range_for_trace(self._combo_b)
+        map_a = _top_tasks_cpu_by_name(ta, lo=lo_a, hi=hi_a) if ta else {}
+        map_b = _top_tasks_cpu_by_name(tb, lo=lo_b, hi=hi_b) if tb else {}
         names = sorted(set(map_a) | set(map_b),
                        key=lambda n: (-max(map_a.get(n, 0.0), map_b.get(n, 0.0)), n.lower()))
         rows: List[List] = []
@@ -9089,8 +9141,10 @@ class _TraceCompareDialog(QDialog):
         self._fill_table(self._top_table, rows)
 
     def _refresh_migrations(self, ta: Optional[BtfTrace], tb: Optional[BtfTrace]) -> None:
-        rows_a = {r[0]: r for r in (_migration_rows(ta) if ta else [])}
-        rows_b = {r[0]: r for r in (_migration_rows(tb) if tb else [])}
+        lo_a, hi_a = self._range_for_trace(self._combo_a)
+        lo_b, hi_b = self._range_for_trace(self._combo_b)
+        rows_a = {r[0]: r for r in (_migration_rows(ta, lo_a, hi_a) if ta else [])}
+        rows_b = {r[0]: r for r in (_migration_rows(tb, lo_b, hi_b) if tb else [])}
         keys = sorted(set(rows_a) | set(rows_b),
                       key=lambda k: rows_a.get(k, rows_b.get(k))[1].lower())
         mig_rows: List[List] = []
