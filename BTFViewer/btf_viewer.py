@@ -3327,6 +3327,76 @@ class TimelineScene(QGraphicsScene):
         """Build SegLodData for the global TICK task."""
         return self._seg_lod_for_task(_task_merge_key("TICK"))
 
+    def _add_tick_ruler_band(
+        self,
+        horiz: bool,
+        vp: ViewClipParams,
+        timeline_span: float,
+    ) -> bool:
+        """Draw TICK marks on the ruler band. Returns True when anything was drawn."""
+        trace = self._trace
+        _tick_mk = _task_merge_key("TICK")
+        _tick_segs = trace.seg_map_by_merge_key.get(_tick_mk, [])
+        _tick_sti = trace.tick_sti_times
+        if not _tick_segs and not _tick_sti:
+            return False
+        _tick_no_pen = QPen(Qt.NoPen)
+        _sti_tick_brush = QBrush(QColor("#E8C84A"))
+        seg_data: list = []
+        xs: list = []
+
+        if horiz:
+            band_y = RULER_HEIGHT - 10
+            band_h = 8.0
+            mark_thin = 2.0
+            band_rect = QRectF(vp.offset, band_y, timeline_span, band_h)
+            batch_z = 12
+            freeze_top = True
+
+            def _mark_rect(t_coord: float) -> QRectF:
+                return QRectF(t_coord - 0.5, band_y, mark_thin, band_h)
+        else:
+            band_x = RULER_WIDTH - 18
+            band_w = 14.0
+            mark_thin = 2.0
+            band_rect = QRectF(band_x, vp.offset, band_w, timeline_span)
+            batch_z = 37
+            freeze_top = False
+
+            def _mark_rect(t_coord: float) -> QRectF:
+                return QRectF(band_x, t_coord - 0.5, band_w, mark_thin)
+
+        def _time_coord(t_ns: int) -> float:
+            return vp.offset + (t_ns - vp.time_min) * vp.px_per_ns
+
+        if _tick_segs:
+            for _seg in _visible_segs(self._seg_lod_for_tick(), vp):
+                tc = _time_coord(_seg.start)
+                seg_data.append((
+                    _mark_rect(tc),
+                    _task_brush(_seg.task), _tick_no_pen, _seg,
+                ))
+                xs.append((tc - 0.5, tc + 1.5, len(seg_data) - 1))
+        if _tick_sti:
+            _lo = max(0, bisect_left(_tick_sti, vp.ns_lo) - 1)
+            _hi = min(len(_tick_sti), bisect_right(_tick_sti, vp.ns_hi) + 1)
+            for _ts in _tick_sti[_lo:_hi]:
+                seg_data.append((
+                    _mark_rect(_time_coord(_ts)),
+                    _sti_tick_brush, _tick_no_pen, None,
+                ))
+
+        batch = _BatchRowItem(
+            band_rect, seg_data, trace.time_scale, xs=xs,
+            time_min=trace.time_min)
+        batch.setZValue(batch_z)
+        self.addItem(batch)
+        if freeze_top:
+            self._frozen_top_items.append((batch, 0))
+        else:
+            self._frozen_items.append((batch, 0))
+        return True
+
     def _seg_lod_for_core(self, core: str) -> SegLodData:
         """Build SegLodData for a core-summary row/column."""
         tr = self._trace
@@ -3423,46 +3493,7 @@ class TimelineScene(QGraphicsScene):
         self._frozen_top_items.append((_ruler_hdr, 0))
         vp = self._view_clip_params()
 
-        # --- TICK band on ruler (bottom strip) ---------------------------
-        # Each TICK event is rendered as a narrow 2-px-wide vertical mark at
-        # the tick START time, so individual ticks are always distinguishable
-        # regardless of the ISR execution-window duration.
-        _tick_mk   = _task_merge_key("TICK")
-        _tick_segs = trace.seg_map_by_merge_key.get(_tick_mk, [])
-        _tick_sti  = trace.tick_sti_times
-        if _tick_segs or _tick_sti:
-            _ht_y        = RULER_HEIGHT - 10
-            _ht_h        = 8
-            _tick_mark_w = 2.0    # fixed tick-mark width in scene pixels
-            _tick_no_pen = QPen(Qt.NoPen)
-            _ht_data: list = []
-            _ht_xs:   list = []
-            if _tick_segs:
-                for _i, _seg in enumerate(_visible_segs(self._seg_lod_for_tick(), vp)):
-                    _x1 = vp.offset + (_seg.start - vp.time_min) * vp.px_per_ns
-                    _ht_data.append((
-                        QRectF(_x1 - 0.5, _ht_y, _tick_mark_w, _ht_h),
-                        _task_brush(_seg.task), _tick_no_pen, _seg,
-                    ))
-                    _ht_xs.append((_x1 - 0.5, _x1 + 1.5, len(_ht_data) - 1))
-            # STI TICK timestamps - drawn as same-style marks, no tooltip.
-            if _tick_sti:
-                _sti_tick_brush = QBrush(QColor("#E8C84A"))
-                _lo = max(0, bisect_left(_tick_sti, vp.ns_lo) - 1)
-                _hi = min(len(_tick_sti), bisect_right(_tick_sti, vp.ns_hi) + 1)
-                for _ts in _tick_sti[_lo:_hi]:
-                    _x1 = vp.offset + (_ts - vp.time_min) * vp.px_per_ns
-                    _ht_data.append((
-                        QRectF(_x1 - 0.5, _ht_y, _tick_mark_w, _ht_h),
-                        _sti_tick_brush, _tick_no_pen, None,
-                    ))
-            _ht_batch = _BatchRowItem(
-                QRectF(vp.offset, _ht_y, timeline_w, _ht_h),
-                _ht_data, trace.time_scale, xs=_ht_xs,
-                time_min=trace.time_min)
-            _ht_batch.setZValue(12)   # above frozen ruler_bg+header
-            self.addItem(_ht_batch)
-            self._frozen_top_items.append((_ht_batch, 0))
+        self._add_tick_ruler_band(True, vp, timeline_w)
 
         # Shared colors/pens/brushes hoisted out of loops
         _bg_even     = QBrush(self._c_row_even)
@@ -3615,7 +3646,7 @@ class TimelineScene(QGraphicsScene):
 
         # --- Frozen label column header ----------------------------------
         # Drawn last so it sits on top of all other frozen items (z=38-39).
-        _has_tick_h = bool(trace.seg_map_by_merge_key.get(_tick_mk, []))
+        _has_tick_h = bool(trace.seg_map_by_merge_key.get(_task_merge_key("TICK"), []))
         corner = self.addRect(QRectF(0, 0, lw, RULER_HEIGHT),
                               QPen(Qt.NoPen), QBrush(self._c_corner_bg))
         corner.setZValue(38)
@@ -3703,46 +3734,8 @@ class TimelineScene(QGraphicsScene):
         self._frozen_items.append((_ruler_hdr, 0))
         vp = self._view_clip_params()
 
-        # --- TICK band on ruler (right strip of ruler column) ------------
-        # Each TICK event is rendered as a narrow 2-px-wide horizontal mark at
-        # the tick START time (vertical layout: time on Y axis).
-        _tick_mk   = _task_merge_key("TICK")
-        _tick_segs = trace.seg_map_by_merge_key.get(_tick_mk, [])
-        _tick_sti_v = trace.tick_sti_times
-        _has_tick_v = bool(_tick_segs) or bool(_tick_sti_v)
-        if _has_tick_v:
-            _vt_x        = RULER_WIDTH - 18
-            _vt_w        = 14
-            _tick_mark_h = 2.0    # fixed tick-mark height in scene pixels
-            _tick_no_pen_v = QPen(Qt.NoPen)
-            _vt_data: list = []
-            _vt_xs:   list = []
-            if _tick_segs:
-                for _i, _seg in enumerate(_visible_segs(self._seg_lod_for_tick(), vp)):
-                    _y1 = label_row_h + (_seg.start - vp.time_min) * vp.px_per_ns
-                    _vt_data.append((
-                        QRectF(_vt_x, _y1 - 0.5, _vt_w, _tick_mark_h),
-                        _task_brush(_seg.task), _tick_no_pen_v, _seg,
-                    ))
-                    _vt_xs.append((_y1 - 0.5, _y1 + 1.5, len(_vt_data) - 1))
-            # STI TICK timestamps - drawn as same-style marks, no tooltip.
-            if _tick_sti_v:
-                _sti_tick_brush_v = QBrush(QColor("#E8C84A"))
-                _lo2 = max(0, bisect_left(_tick_sti_v, vp.ns_lo) - 1)
-                _hi2 = min(len(_tick_sti_v), bisect_right(_tick_sti_v, vp.ns_hi) + 1)
-                for _ts in _tick_sti_v[_lo2:_hi2]:
-                    _y1 = label_row_h + (_ts - vp.time_min) * vp.px_per_ns
-                    _vt_data.append((
-                        QRectF(_vt_x, _y1 - 0.5, _vt_w, _tick_mark_h),
-                        _sti_tick_brush_v, _tick_no_pen_v, None,
-                    ))
-            _vt_batch = _BatchRowItem(
-                QRectF(_vt_x, label_row_h, _vt_w, timeline_h),
-                _vt_data, trace.time_scale, xs=_vt_xs,
-                time_min=trace.time_min)
-            _vt_batch.setZValue(37)   # above ruler header (z=36)
-            self.addItem(_vt_batch)
-            self._frozen_items.append((_vt_batch, 0))
+        _tick_mk = _task_merge_key("TICK")
+        _has_tick_v = self._add_tick_ruler_band(False, vp, timeline_h)
 
         # --- Task columns ------------------------------------------------
         _bg_even   = QBrush(self._c_row_even)
@@ -3932,10 +3925,8 @@ class TimelineScene(QGraphicsScene):
             core_tasks = _filtered_core_tasks
 
         # TICK is a global event - shown as a sticky first row above all cores.
-        _tick_mk   = _task_merge_key("TICK")
-        _tick_segs = trace.seg_map_by_merge_key.get(_tick_mk, [])
-        _tick_sti_h = trace.tick_sti_times
-        _has_tick  = bool(_tick_segs) or bool(_tick_sti_h)
+        _has_tick = (bool(trace.seg_map_by_merge_key.get(_task_merge_key("TICK"), []))
+                     or bool(trace.tick_sti_times))
 
         def _row_count(c: str) -> int:
             return 1 + (len(core_tasks[c]) if self._core_expanded.get(c, True) else 0)
@@ -3986,41 +3977,7 @@ class TimelineScene(QGraphicsScene):
         _vp_ns_lo  = self._vp_ns_lo
         _vp_ns_hi  = self._vp_ns_hi
         vp = self._view_clip_params()
-        # --- TICK band: TICK events as narrow tick marks on the ruler bottom strip ---
-        # Each mark is 2 px wide at the tick START time so individual ticks are
-        # always distinguishable regardless of the ISR execution-window duration.
-        if _has_tick:
-            _tb_y = RULER_HEIGHT - 10   # y of TICK band within ruler (bottom 10 px)
-            _tb_h = 8                   # height of TICK band
-            _tick_mark_w_c = 2.0        # fixed tick-mark width in scene pixels
-            _tick_no_pen_c = QPen(Qt.NoPen)
-            _tick_seg_data: list = []
-            _tick_xs:       list = []
-            if _tick_segs:
-                for i_s, seg in enumerate(_visible_segs(self._seg_lod_for_tick(), vp)):
-                    x1 = lw + (seg.start - _time_min) * _px_per_ns
-                    _tick_seg_data.append((
-                        QRectF(x1 - 0.5, _tb_y, _tick_mark_w_c, _tb_h),
-                        _task_brush(seg.task), _tick_no_pen_c, seg,
-                    ))
-                    _tick_xs.append((x1 - 0.5, x1 + 1.5, len(_tick_seg_data) - 1))
-            if _tick_sti_h:
-                _sti_tick_brush_h = QBrush(QColor("#E8C84A"))
-                _lo_h = max(0, bisect_left(_tick_sti_h, vp.ns_lo) - 1)
-                _hi_h = min(len(_tick_sti_h), bisect_right(_tick_sti_h, vp.ns_hi) + 1)
-                for _ts in _tick_sti_h[_lo_h:_hi_h]:
-                    x1 = lw + (_ts - _time_min) * _px_per_ns
-                    _tick_seg_data.append((
-                        QRectF(x1 - 0.5, _tb_y, _tick_mark_w_c, _tb_h),
-                        _sti_tick_brush_h, _tick_no_pen_c, None,
-                    ))
-            tick_batch = _BatchRowItem(
-                QRectF(lw, _tb_y, timeline_w, _tb_h),
-                _tick_seg_data, trace.time_scale,
-                xs=_tick_xs, time_min=trace.time_min)
-            tick_batch.setZValue(12)   # above frozen ruler_bg+header
-            self.addItem(tick_batch)
-            self._frozen_top_items.append((tick_batch, 0))
+        self._add_tick_ruler_band(True, vp, timeline_w)
 
         row_idx = 0
 
@@ -4307,10 +4264,8 @@ class TimelineScene(QGraphicsScene):
             core_tasks = _filtered_core_tasks
 
         # TICK is a global event - shown as a band in the ruler column.
-        _tick_mk   = _task_merge_key("TICK")
-        _tick_segs = trace.seg_map_by_merge_key.get(_tick_mk, [])
-        _tick_sti_v2 = trace.tick_sti_times
-        _has_tick  = bool(_tick_segs) or bool(_tick_sti_v2)
+        _has_tick = (bool(trace.seg_map_by_merge_key.get(_task_merge_key("TICK"), []))
+                     or bool(trace.tick_sti_times))
 
         def _col_count(c: str) -> int:
             return 1 + (len(core_tasks[c]) if self._core_expanded.get(c, True) else 0)
@@ -4368,41 +4323,7 @@ class TimelineScene(QGraphicsScene):
         _vp_ns_lo  = self._vp_ns_lo
         _vp_ns_hi  = self._vp_ns_hi
         vp = self._view_clip_params()
-
-        # --- TICK band: TICK events as narrow tick marks on the ruler right strip ---
-        # Each mark is 2 px tall at the tick START time (vertical layout).
-        if _has_tick:
-            _vtb_x = RULER_WIDTH - 18   # x of TICK band within ruler (right edge strip)
-            _vtb_w = 14                 # width of TICK band
-            _tick_mark_h_vc = 2.0       # fixed tick-mark height in scene pixels
-            _tick_no_pen_vc = QPen(Qt.NoPen)
-            _tick_seg_data_v: list = []
-            _tick_xs_v:       list = []
-            if _tick_segs:
-                for i_s, seg in enumerate(_visible_segs(self._seg_lod_for_tick(), vp)):
-                    y1 = label_row_h + (seg.start - _time_min) * _px_per_ns
-                    _tick_seg_data_v.append((
-                        QRectF(_vtb_x, y1 - 0.5, _vtb_w, _tick_mark_h_vc),
-                        _task_brush(seg.task), _tick_no_pen_vc, seg,
-                    ))
-                    _tick_xs_v.append((y1 - 0.5, y1 + 1.5, len(_tick_seg_data_v) - 1))
-            if _tick_sti_v2:
-                _sti_tick_brush_v2 = QBrush(QColor("#E8C84A"))
-                _lo_v2 = max(0, bisect_left(_tick_sti_v2, vp.ns_lo) - 1)
-                _hi_v2 = min(len(_tick_sti_v2), bisect_right(_tick_sti_v2, vp.ns_hi) + 1)
-                for _ts in _tick_sti_v2[_lo_v2:_hi_v2]:
-                    y1 = label_row_h + (_ts - _time_min) * _px_per_ns
-                    _tick_seg_data_v.append((
-                        QRectF(_vtb_x, y1 - 0.5, _vtb_w, _tick_mark_h_vc),
-                        _sti_tick_brush_v2, _tick_no_pen_vc, None,
-                    ))
-            tick_batch_v = _BatchRowItem(
-                QRectF(_vtb_x, label_row_h, _vtb_w, timeline_h),
-                _tick_seg_data_v, trace.time_scale,
-                xs=_tick_xs_v, time_min=trace.time_min)
-            tick_batch_v.setZValue(37)   # above ruler header (z=36)
-            self.addItem(tick_batch_v)
-            self._frozen_items.append((tick_batch_v, 0))
+        self._add_tick_ruler_band(False, vp, timeline_h)
 
         col_idx = 0
 
@@ -9890,90 +9811,11 @@ class _StatsPanel(QWidget):
         rows.sort(key=lambda r: (-r[2], r[1].lower()))
         return rows
 
-    def _build_migration_table(self, rows: List[tuple], ui_fs: str,
-                               empty_hint: str,
-                               on_row_click=None) -> QWidget:
-        host = QWidget()
-        lay = QVBoxLayout(host)
-        lay.setContentsMargins(0, 0, 0, 0)
-        if not rows:
-            lay.addWidget(self._lbl(empty_hint, color="#888888", ui_fs=ui_fs))
-            return host
-        headers = ["Task", "Migr", "Cores", "Primary", "Ping", "STI±",
-                   "Gap after", "Gap other"]
-        table = QTableWidget(len(rows), len(headers))
-        table.setHorizontalHeaderLabels(headers)
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.setSelectionMode(QAbstractItemView.NoSelection)
-        table.setFocusPolicy(Qt.NoFocus)
-        table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setStretchLastSection(True)
-        table.setShowGrid(False)
-        table.setFrameShape(QFrame.NoFrame)
-        table.verticalHeader().setDefaultSectionSize(16)
-        table.verticalHeader().setMinimumSectionSize(14)
-        table.horizontalHeader().setFixedHeight(18)
-        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        table.setStyleSheet(
-            f"font-size:{ui_fs};"
-            "QTableWidget::item{border:none; padding:0px 3px;}"
-            "QHeaderView::section{border:none; background:transparent; color:#9A9A9A; padding:0px 3px;}"
-        )
-        _hover_bg = QBrush(QColor("#3A3A50") if self._is_dark else QColor("#E0E0EC"))
-        _default_bg = QBrush()
-        _hovered_row = [-1]
-
-        def _clear_row_hover() -> None:
-            row = _hovered_row[0]
-            if row < 0:
-                return
-            for c in range(len(headers)):
-                item = table.item(row, c)
-                if item is not None:
-                    item.setBackground(_default_bg)
-            _hovered_row[0] = -1
-
-        def _set_row_hover(row: int) -> None:
-            if not on_row_click or row < 0 or row == _hovered_row[0]:
-                return
-            _clear_row_hover()
-            _hovered_row[0] = row
-            for c in range(len(headers)):
-                item = table.item(row, c)
-                if item is not None:
-                    item.setBackground(_hover_bg)
-
-        for r, row in enumerate(rows):
-            mk, name, n_mig, n_cores, _cores, primary, primary_pct, ping, sti, g_after, g_other = row
-            vals = [
-                name, str(n_mig), str(n_cores),
-                f"{primary} ({primary_pct:.0f}%)",
-                str(ping), str(sti), g_after, g_other,
-            ]
-            for c, val in enumerate(vals):
-                item = QTableWidgetItem(val)
-                item.setData(Qt.UserRole, mk)
-                table.setItem(r, c, item)
-        if on_row_click:
-            def _on_cell(_row: int, _col: int) -> None:
-                item = table.item(_row, 0)
-                if item is not None:
-                    on_row_click(item.data(Qt.UserRole))
-            table.cellClicked.connect(_on_cell)
-            table.setMouseTracking(True)
-            table.viewport().setMouseTracking(True)
-            _hover_filter = _StatsTableHoverFilter(_clear_row_hover)
-            table.viewport().installEventFilter(_hover_filter)
-            table.cellEntered.connect(_set_row_hover)
-        self._wrap_table_with_resizer(lay, table, "migrations")
-        return host
-
     def _build_stats_table(self, rows: List[tuple], ui_fs: str, empty_hint: str,
                            include_cpu: bool = False,
                            count_header: str = "Runs",
                            section_id: str = "exec",
+                           migrations: bool = False,
                            on_row_click=None, on_min_click=None,
                            on_max_click=None) -> QWidget:
         host = QWidget()
@@ -9985,22 +9827,31 @@ class _StatsPanel(QWidget):
             lay.addWidget(self._lbl(empty_hint, color="#888888", ui_fs=ui_fs))
             return host
 
-        cols = 7 if include_cpu else 6
-        headers = (["Task", count_header, "CPU%", "Min", "Avg", "Max", "p95"]
-                   if include_cpu
-                   else ["Task", count_header, "Min", "Avg", "Max", "p95"])
+        if migrations:
+            headers = ["Task", "Migr", "Cores", "Primary", "Ping", "STI±",
+                       "Gap after", "Gap other"]
+            cols = len(headers)
+        else:
+            cols = 7 if include_cpu else 6
+            headers = (["Task", count_header, "CPU%", "Min", "Avg", "Max", "p95"]
+                       if include_cpu
+                       else ["Task", count_header, "Min", "Avg", "Max", "p95"])
         table = QTableWidget(len(rows), cols)
         table.setHorizontalHeaderLabels(headers)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionMode(QAbstractItemView.NoSelection)
         table.setFocusPolicy(Qt.NoFocus)
         table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setStretchLastSection(False)
+        table.horizontalHeader().setStretchLastSection(migrations)
         table.setShowGrid(False)
         table.setFrameShape(QFrame.NoFrame)
         table.verticalHeader().setDefaultSectionSize(16)
         table.verticalHeader().setMinimumSectionSize(14)
         table.horizontalHeader().setFixedHeight(18)
+        if migrations:
+            table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         table.setStyleSheet(
             f"font-size:{ui_fs};"
             "QTableWidget::item{border:none; padding:0px 3px;}"
@@ -10039,7 +9890,14 @@ class _StatsPanel(QWidget):
                     item.setBackground(_hover_bg)
 
         for r, row in enumerate(rows):
-            if include_cpu:
+            if migrations:
+                mk, name, n_mig, n_cores, _cores, primary, primary_pct, ping, sti, g_after, g_other = row
+                vals = [
+                    name, str(n_mig), str(n_cores),
+                    f"{primary} ({primary_pct:.0f}%)",
+                    str(ping), str(sti), g_after, g_other,
+                ]
+            elif include_cpu:
                 mk_r, name, runs, cpu, mn, avg, mx, p95 = row
                 vals = [name, runs, f"{cpu:.1f}%", mn, avg, mx, p95]
             else:
@@ -10048,52 +9906,66 @@ class _StatsPanel(QWidget):
 
             for c, v in enumerate(vals):
                 item = QTableWidgetItem(str(v))
-                if c == 0:
+                if migrations:
+                    if c == 0:
+                        item.setData(Qt.UserRole, mk)
+                elif c == 0:
                     tip = (f"{_row_tip} for {name}"
                            if on_row_click is not None else str(name))
                     item.setToolTip(tip)
                     item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 else:
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                if c == _min_col and on_min_click is not None:
-                    item.setToolTip(f"Click to jump to shortest slice for {name}")
-                    item.setForeground(_link_color)
-                elif c == _max_col and on_max_click is not None:
-                    item.setToolTip(
-                        f"Click to jump to longest slice (WCET) for {name}"
-                        if include_cpu else
-                        f"Click to jump to longest sample for {name}")
-                    item.setForeground(_link_color)
-                elif on_row_click is not None:
-                    item.setToolTip(f"{_row_tip} for {name}")
+                if not migrations:
+                    if c == _min_col and on_min_click is not None:
+                        item.setToolTip(f"Click to jump to shortest slice for {name}")
+                        item.setForeground(_link_color)
+                    elif c == _max_col and on_max_click is not None:
+                        item.setToolTip(
+                            f"Click to jump to longest slice (WCET) for {name}"
+                            if include_cpu else
+                            f"Click to jump to longest sample for {name}")
+                        item.setForeground(_link_color)
+                    elif on_row_click is not None:
+                        item.setToolTip(f"{_row_tip} for {name}")
                 table.setItem(r, c, item)
 
-        table.resizeColumnsToContents()
-        table.horizontalHeader().setStretchLastSection(False)
-        p95_col = 6 if include_cpu else 5
-        table.setColumnWidth(p95_col, min(table.columnWidth(p95_col), 76))
-        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        if not migrations:
+            table.resizeColumnsToContents()
+            table.horizontalHeader().setStretchLastSection(False)
+            p95_col = 6 if include_cpu else 5
+            table.setColumnWidth(p95_col, min(table.columnWidth(p95_col), 76))
+            table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         table.setAlternatingRowColors(False)
         table.setShowGrid(False)
         table.setSortingEnabled(False)
 
         if _interactive:
-            def _cell_clicked(r: int, c: int, _rows=rows) -> None:
-                mk = _rows[r][0]
-                if on_min_click is not None and c == _min_col:
-                    on_min_click(mk)
-                elif on_max_click is not None and c == _max_col:
-                    on_max_click(mk)
-                elif on_row_click is not None:
-                    on_row_click(mk)
-
-            table.cellClicked.connect(_cell_clicked)
+            if migrations:
+                def _cell_clicked_mig(_row: int, _col: int) -> None:
+                    item = table.item(_row, 0)
+                    if item is not None and on_row_click is not None:
+                        on_row_click(item.data(Qt.UserRole))
+                table.cellClicked.connect(_cell_clicked_mig)
+            else:
+                def _cell_clicked(r: int, c: int, _rows=rows) -> None:
+                    mk = _rows[r][0]
+                    if on_min_click is not None and c == _min_col:
+                        on_min_click(mk)
+                    elif on_max_click is not None and c == _max_col:
+                        on_max_click(mk)
+                    elif on_row_click is not None:
+                        on_row_click(mk)
+                table.cellClicked.connect(_cell_clicked)
             table.setCursor(Qt.PointingHandCursor)
             table.setMouseTracking(True)
             table.viewport().setMouseTracking(True)
-            table.itemEntered.connect(
-                lambda item: _set_row_hover(item.row()) if item is not None else None)
+            if migrations:
+                table.cellEntered.connect(_set_row_hover)
+            else:
+                table.itemEntered.connect(
+                    lambda item: _set_row_hover(item.row()) if item is not None else None)
             _hover_filter = _StatsTableHoverFilter(_clear_row_hover)
             table.viewport().installEventFilter(_hover_filter)
             host._stats_hover_filter = _hover_filter  # prevent GC
@@ -10620,8 +10492,10 @@ class _StatsPanel(QWidget):
             self.task_clicked.emit(mk)
 
         def _populate_mig(blay: QVBoxLayout) -> None:
-            blay.addWidget(self._build_migration_table(
-                _mig_rows, _fs, empty_mig, on_row_click=_on_mig_row))
+            blay.addWidget(self._build_stats_table(
+                _mig_rows, _fs, empty_mig,
+                section_id="migrations", migrations=True,
+                on_row_click=_on_mig_row))
 
         self._add_collapsible_section(
             "migrations",
@@ -12740,10 +12614,9 @@ class SnapshotEditorDialog(QDialog):
             w = shape.get('width', 2) + extra_width
             if t == 'text':
                 self._paint_text(painter, shape, override_color, extra_width)
-            elif t == 'arrow':
-                self._paint_arrow(painter, shape, col, w, extra_width)
-            elif t == 'dblarrow':
-                self._paint_dbl_arrow(painter, shape, col, w, extra_width)
+            elif t == 'arrow' or t == 'dblarrow':
+                self._paint_line_arrow(
+                    painter, shape, col, w, extra_width, double=(t == 'dblarrow'))
             elif t == 'line' or t == 'dash':
                 dashed = self._shape_is_dashed(shape)
                 painter.setPen(self._stroke_pen(col, w, dashed))
@@ -12855,13 +12728,15 @@ class SnapshotEditorDialog(QDialog):
             painter.fillPath(path, col)
         painter.restore()
 
-    def _paint_arrow(
+    def _paint_line_arrow(
         self,
         painter: QPainter,
         shape: dict,
         col: QColor,
         w: int,
         extra_width: int,
+        *,
+        double: bool = False,
     ) -> None:
         x1, y1 = shape['x1'], shape['y1']
         x2, y2 = shape['x2'], shape['y2']
@@ -12871,49 +12746,19 @@ class SnapshotEditorDialog(QDialog):
         angle = math.atan2(y2 - y1, x2 - x1)
         arrow_len = max(12.0, shape['width'] * 4.0)
         arrow_ang = math.pi / 6.0
-        tail_x = x2 - arrow_len * 0.6 * math.cos(angle)
-        tail_y = y2 - arrow_len * 0.6 * math.sin(angle)
+        if double:
+            inset = arrow_len * 0.6
+            sx = x1 + inset * math.cos(angle)
+            sy = y1 + inset * math.sin(angle)
+            ex = x2 - inset * math.cos(angle)
+            ey = y2 - inset * math.sin(angle)
+            tips = ((x2, y2, angle), (x1, y1, angle + math.pi))
+        else:
+            sx, sy = x1, y1
+            ex = x2 - arrow_len * 0.6 * math.cos(angle)
+            ey = y2 - arrow_len * 0.6 * math.sin(angle)
+            tips = ((x2, y2, angle),)
 
-        # Shaft
-        painter.setPen(self._stroke_pen(col, w, self._shape_is_dashed(shape)))
-        painter.setBrush(Qt.NoBrush)
-        self._draw_line_with_label_gap(
-            painter, x1, y1, tail_x, tail_y, self._line_label_gap_half(shape))
-
-        # Arrowhead polygon
-        tip = QPointF(x2, y2)
-        p1 = QPointF(x2 - arrow_len * math.cos(angle - arrow_ang),
-                     y2 - arrow_len * math.sin(angle - arrow_ang))
-        p2 = QPointF(x2 - arrow_len * math.cos(angle + arrow_ang),
-                     y2 - arrow_len * math.sin(angle + arrow_ang))
-        poly = QPolygonF([tip, p1, p2])
-        stroke_w = max(1, extra_width)
-        painter.setPen(QPen(col, stroke_w, Qt.SolidLine))
-        painter.setBrush(QBrush(col))
-        painter.drawPolygon(poly)
-
-    def _paint_dbl_arrow(
-        self,
-        painter: QPainter,
-        shape: dict,
-        col: QColor,
-        w: int,
-        extra_width: int,
-    ) -> None:
-        x1, y1 = shape['x1'], shape['y1']
-        x2, y2 = shape['x2'], shape['y2']
-        length = math.hypot(x2 - x1, y2 - y1)
-        if length < 1:
-            return
-        angle = math.atan2(y2 - y1, x2 - x1)
-        arrow_len = max(12.0, shape['width'] * 4.0)
-        arrow_ang = math.pi / 6.0
-        inset = arrow_len * 0.6
-
-        sx = x1 + inset * math.cos(angle)
-        sy = y1 + inset * math.sin(angle)
-        ex = x2 - inset * math.cos(angle)
-        ey = y2 - inset * math.sin(angle)
         painter.setPen(self._stroke_pen(col, w, self._shape_is_dashed(shape)))
         painter.setBrush(Qt.NoBrush)
         self._draw_line_with_label_gap(
@@ -12922,7 +12767,7 @@ class SnapshotEditorDialog(QDialog):
         stroke_w = max(1, extra_width)
         painter.setPen(QPen(col, stroke_w, Qt.SolidLine))
         painter.setBrush(QBrush(col))
-        for tip_x, tip_y, ang in ((x2, y2, angle), (x1, y1, angle + math.pi)):
+        for tip_x, tip_y, ang in tips:
             tip = QPointF(tip_x, tip_y)
             p1 = QPointF(tip_x - arrow_len * math.cos(ang - arrow_ang),
                          tip_y - arrow_len * math.sin(ang - arrow_ang))
