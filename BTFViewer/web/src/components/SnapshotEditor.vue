@@ -50,6 +50,12 @@
           <input class="se-range" type="range" min="1" max="20" step="1" v-model.number="lineWidth" />
         </label>
 
+        <!-- Dash stroke -->
+        <label v-if="tool !== 'text'" class="se-ctl se-dash-ctl" title="Dashed stroke">
+          <input type="checkbox" v-model="dashChecked" @change="onDashToggle" />
+          <span class="se-ctl-lbl">Dash</span>
+        </label>
+
         <!-- Font size (text tool only) -->
         <label v-if="tool === 'text'" class="se-ctl" title="Font size">
           <span class="se-ctl-lbl">Font&nbsp;{{ fontSize }}</span>
@@ -128,6 +134,7 @@
             @mousemove="onMouseMove"
             @mouseup="onMouseUp"
             @mouseleave="onMouseLeave"
+            @dblclick.prevent="onDoubleClick"
             @contextmenu.prevent="onContextMenu"
           />
 
@@ -167,6 +174,12 @@
                  :value="ctxShape?.width"
                  @change="e => ctxSetProp('width', +e.target.value)" />
         </div>
+        <div class="se-ctx-item">
+          <span class="se-ctx-lbl">Label</span>
+          <input type="text" class="se-ctx-text"
+                 :value="ctxShape?.label || ''"
+                 @change="e => ctxSetProp('label', e.target.value)" />
+        </div>
       </template>
       <template v-else>
         <div class="se-ctx-item">
@@ -204,12 +217,12 @@ const TOOLS = [
     icon: `<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 14L13 3M13 3H7M13 3V9"/></svg>`,
   },
   {
-    id: 'line', label: 'Line',
-    icon: `<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="2" y1="14" x2="14" y2="2"/></svg>`,
+    id: 'dblarrow', label: 'Double Arrow',
+    icon: `<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h8M4 8l2.5-2.5M4 8l2.5 2.5M12 8l-2.5-2.5M12 8l-2.5 2.5"/></svg>`,
   },
   {
-    id: 'dash', label: 'Dashed Line',
-    icon: `<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="3 2.5"><line x1="2" y1="14" x2="14" y2="2"/></svg>`,
+    id: 'line', label: 'Line',
+    icon: `<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="2" y1="14" x2="14" y2="2"/></svg>`,
   },
   {
     id: 'rect', label: 'Rectangle (Shift: square)',
@@ -227,12 +240,14 @@ const TOOLS = [
 
 const TOOL_CURSORS = {
   arrow: 'crosshair',
+  dblarrow: 'crosshair',
   line:  'crosshair',
-  dash:  'crosshair',
   rect:  'crosshair',
   circle:'crosshair',
   text:  'text',
 }
+
+const LINE_TOOL_TYPES = new Set(['line', 'arrow', 'dblarrow', 'dash'])
 
 // ── Reactive state ────────────────────────────────────────────────────────────
 
@@ -240,6 +255,7 @@ const tool      = ref('arrow')
 const color     = ref('#ff4444')
 const lineWidth = ref(3)
 const fontSize  = ref(20)
+const dashChecked = ref(false)
 
 const colorPanelOpen = ref(false)
 const PRESET_COLORS = [
@@ -270,14 +286,19 @@ const canvasEl   = ref(null)
 const textareaEl = ref(null)
 
 const textEdit = reactive({
-  active:  false,
-  canvasX: 0,
-  canvasY: 0,
-  value:   '',
+  active:   false,
+  canvasX:  0,
+  canvasY:  0,
+  value:    '',
+  shapeIdx: -1,
+  angle:    0,
 })
+
+const DRAG_THRESHOLD = 4
 
 let _mouseDown   = false
 let _startPos    = null
+let _pendingDrag = null // { idx, startX, startY, startPos }
 let _dragIdx     = -1
 let _dragPrev    = null
 let _dragHandle  = null
@@ -327,14 +348,27 @@ const wrapStyle = computed(() => ({
 
 const textInputStyle = computed(() => {
   const s  = dScale.value
-  const fs = fontSize.value * s
-  return {
+  const editingShape = textEdit.shapeIdx >= 0 ? shapes.value[textEdit.shapeIdx] : null
+  const isShapeLabel = editingShape && editingShape.type !== 'text'
+  let fs = fontSize.value
+  let col = color.value
+  if (editingShape) {
+    if (editingShape.type === 'text') {
+      fs = editingShape.fontSize
+      col = editingShape.color
+    } else {
+      const anchor = shapeLabelAnchor(editingShape)
+      fs = anchor.fontSize
+      col = anchor.color
+    }
+  }
+  const style = {
     position:    'absolute',
     left:        `${Math.round(textEdit.canvasX * s)}px`,
     top:         `${Math.round(textEdit.canvasY * s)}px`,
-    fontSize:    `${fs}px`,
+    fontSize:    `${fs * s}px`,
     lineHeight:  '1.2',
-    color:       color.value,
+    color:       col,
     fontFamily:  'sans-serif',
     fontWeight:  'bold',
     background:  'transparent',
@@ -344,12 +378,18 @@ const textInputStyle = computed(() => {
     padding:     '0 2px',
     margin:      '0',
     minWidth:    '60px',
-    maxWidth:    `${Math.max(60, (imgNW.value - textEdit.canvasX) * s)}px`,
+    maxWidth:    isShapeLabel ? 'none' : `${Math.max(60, (imgNW.value - textEdit.canvasX) * s)}px`,
     overflow:    'hidden',
     whiteSpace:  'nowrap',
     boxSizing:   'border-box',
     zIndex:      '1',
+    textAlign:   isShapeLabel ? 'center' : 'left',
   }
+  if (isShapeLabel) {
+    style.transform = `translate(-50%, -50%) rotate(${textEdit.angle}rad)`
+    style.transformOrigin = 'center center'
+  }
+  return style
 })
 
 // ── Lifecycle ─────────────────────────────────────────────────────────────────
@@ -395,6 +435,7 @@ function onDocKeyDown(e) {
     e.stopPropagation()
     if (colorPanelOpen.value) { colorPanelOpen.value = false; return }
     if (ctxMenu.visible) { closeCtxMenu(); return }
+    if (textEdit.active) { cancelText(); return }
     return
   }
   // Ctrl/Cmd+Z — undo
@@ -411,6 +452,22 @@ function onDocKeyDown(e) {
 function setTool(t) {
   cancelText()
   tool.value = t
+}
+
+function onDashToggle() {
+  if (selectedIdx.value >= 0) {
+    const s = shapes.value[selectedIdx.value]
+    if (s && s.type !== 'text') {
+      s.dashed = dashChecked.value
+      scheduleRedraw()
+    }
+  }
+}
+
+function syncDashFromShape(idx) {
+  if (idx < 0 || idx >= shapes.value.length) return
+  const s = shapes.value[idx]
+  if (s.type !== 'text') dashChecked.value = !!s.dashed
 }
 
 function handleClose() {
@@ -437,6 +494,13 @@ function onMouseDown(e) {
 
   if (tool.value === 'text') {
     commitText()
+    const hit = hitTest(pos.x, pos.y)
+    if (hit >= 0 && shapes.value[hit].type === 'text') {
+      selectedIdx.value = hit
+      scheduleRedraw()
+      return
+    }
+    textEdit.shapeIdx = -1
     textEdit.canvasX = pos.x
     textEdit.canvasY = pos.y
     textEdit.value   = ''
@@ -457,12 +521,24 @@ function onMouseDown(e) {
   // Hit-test: select and drag an existing shape rather than drawing a new one
   const hit = hitTest(pos.x, pos.y)
   if (hit >= 0) {
+    if (e.ctrlKey || e.metaKey) {
+      const newIdx = duplicateShape(hit)
+      selectedIdx.value = newIdx
+      syncDashFromShape(newIdx)
+      _dragIdx  = newIdx
+      _dragPrev = pos
+      _dragHandle = null
+      _dragAnchor = null
+      dragMode.value = 'move'
+      hoverHandleId.value = ''
+      scheduleRedraw()
+      return
+    }
     selectedIdx.value = hit
-    _dragIdx  = hit
-    _dragPrev = pos
+    syncDashFromShape(hit)
+    _pendingDrag = { idx: hit, startX: pos.x, startY: pos.y, startPos: pos }
     _dragHandle = null
     _dragAnchor = null
-    dragMode.value = 'move'
     hoverHandleId.value = ''
     scheduleRedraw()
     return
@@ -477,6 +553,17 @@ function onMouseDown(e) {
 
 function onMouseMove(e) {
   const pos = getPos(e)
+
+  if (_pendingDrag && dragMode.value === 'none') {
+    const dx = pos.x - _pendingDrag.startX
+    const dy = pos.y - _pendingDrag.startY
+    if (Math.hypot(dx, dy) >= DRAG_THRESHOLD) {
+      _dragIdx = _pendingDrag.idx
+      _dragPrev = _pendingDrag.startPos
+      dragMode.value = 'move'
+      _pendingDrag = null
+    }
+  }
 
   if (dragMode.value === 'handle' && _dragIdx >= 0 && _dragHandle) {
     updateShapeByHandle(_dragIdx, _dragHandle, pos, e.shiftKey)
@@ -506,6 +593,7 @@ function onMouseMove(e) {
 }
 
 function onMouseUp(e) {
+  _pendingDrag = null
   if (dragMode.value !== 'none') {
     _dragIdx  = -1
     _dragPrev = null
@@ -530,6 +618,7 @@ function onMouseUp(e) {
 function onMouseLeave() {
   hoverIdx.value = -1
   hoverHandleId.value = ''
+  _pendingDrag = null
   if (dragMode.value !== 'none') {
     _dragIdx  = -1
     _dragPrev = null
@@ -545,6 +634,26 @@ function onMouseLeave() {
     _startPos     = null
     scheduleRedraw()
   }
+}
+
+function onDoubleClick(e) {
+  closeCtxMenu()
+  _pendingDrag = null
+  _mouseDown = false
+  drawing.value = null
+  _startPos = null
+  if (dragMode.value !== 'none') {
+    _dragIdx = -1
+    _dragPrev = null
+    _dragHandle = null
+    _dragAnchor = null
+    dragMode.value = 'none'
+  }
+
+  const pos = getPos(e)
+  const hit = hitTest(pos.x, pos.y)
+  if (hit < 0) return
+  beginEditShapeText(hit)
 }
 
 // ── Hit-testing & shape movement ─────────────────────────────────────────────
@@ -585,9 +694,53 @@ function moveShape(idx, dx, dy) {
   }
 }
 
+function cloneShape(shape) {
+  if (shape.type === 'text') {
+    return {
+      type: shape.type,
+      color: shape.color,
+      fontSize: shape.fontSize,
+      x: shape.x,
+      y: shape.y,
+      text: shape.text,
+    }
+  }
+  if (shape.type === 'rect' || shape.type === 'circle') {
+    return {
+      type: shape.type,
+      color: shape.color,
+      width: shape.width,
+      x: shape.x,
+      y: shape.y,
+      w: shape.w,
+      h: shape.h,
+      ...(shape.label ? { label: shape.label } : {}),
+      ...(shape.labelFontSize ? { labelFontSize: shape.labelFontSize } : {}),
+      ...(shape.dashed ? { dashed: true } : {}),
+    }
+  }
+  return {
+    type: shape.type,
+    color: shape.color,
+    width: shape.width,
+    x1: shape.x1,
+    y1: shape.y1,
+    x2: shape.x2,
+    y2: shape.y2,
+    ...(shape.label ? { label: shape.label } : {}),
+    ...(shape.labelFontSize ? { labelFontSize: shape.labelFontSize } : {}),
+    ...(shape.dashed ? { dashed: true } : {}),
+  }
+}
+
+function duplicateShape(idx) {
+  shapes.value.push(cloneShape(shapes.value[idx]))
+  return shapes.value.length - 1
+}
+
 function getControlPoints(shape) {
   if (!shape) return []
-  if (shape.type === 'line' || shape.type === 'arrow' || shape.type === 'dash') {
+  if (LINE_TOOL_TYPES.has(shape.type)) {
     return [
       { id: 'start', x: shape.x1, y: shape.y1 },
       { id: 'end', x: shape.x2, y: shape.y2 },
@@ -637,7 +790,7 @@ function getHandleAnchor(shape, handleId) {
 function updateShapeByHandle(idx, handleId, pos, forceSnap = false) {
   const s = shapes.value[idx]
   if (!s) return
-  if (s.type === 'line' || s.type === 'arrow' || s.type === 'dash') {
+  if (LINE_TOOL_TYPES.has(s.type)) {
     if (handleId === 'start') {
       const end = snapLineEnd(s.x2, s.y2, pos.x, pos.y, forceSnap)
       s.x1 = end.x
@@ -742,7 +895,15 @@ function ctxDelete() {
 
 function ctxSetProp(key, val) {
   if (ctxShape.value) {
-    ctxShape.value[key] = val
+    if (key === 'label' && !val) {
+      delete ctxShape.value.label
+      delete ctxShape.value.labelFontSize
+    } else {
+      ctxShape.value[key] = val
+      if (key === 'label' && val && !ctxShape.value.labelFontSize) {
+        ctxShape.value.labelFontSize = fontSize.value
+      }
+    }
     scheduleRedraw()
   }
 }
@@ -792,7 +953,12 @@ function snapLineEnd(x1, y1, x2, y2, force = false) {
 }
 
 function buildShape(type, p1, p2, forceSnap = false) {
-  const base = { type, color: color.value, width: lineWidth.value }
+  const base = {
+    type,
+    color: color.value,
+    width: lineWidth.value,
+    ...(type !== 'text' && dashChecked.value ? { dashed: true } : {}),
+  }
   if (type === 'rect' || type === 'circle') {
     const box = forceSnap ? constrainBox(p1, p2) : {
       x: Math.min(p1.x, p2.x),
@@ -806,18 +972,185 @@ function buildShape(type, p1, p2, forceSnap = false) {
     }
   }
   // Line-based tools: apply angle snapping to the endpoint
-  const end = (type === 'line' || type === 'arrow' || type === 'dash')
+  const end = LINE_TOOL_TYPES.has(type)
     ? snapLineEnd(p1.x, p1.y, p2.x, p2.y, forceSnap)
     : { x: p2.x, y: p2.y }
   return { ...base, x1: p1.x, y1: p1.y, x2: end.x, y2: end.y }
 }
 
+// ── Shape labels ──────────────────────────────────────────────────────────────
+
+function labelAngleForLine(x1, y1, x2, y2) {
+  let angle = Math.atan2(y2 - y1, x2 - x1)
+  if (angle > Math.PI / 2) angle -= Math.PI
+  else if (angle < -Math.PI / 2) angle += Math.PI
+  return angle
+}
+
+function shapeLabelAnchor(shape) {
+  if (shape.type === 'text') {
+    return {
+      x: shape.x,
+      y: shape.y,
+      angle: 0,
+      fontSize: shape.fontSize,
+      color: shape.color,
+    }
+  }
+  const fs = shape.labelFontSize ?? fontSize.value
+  if (LINE_TOOL_TYPES.has(shape.type)) {
+    return {
+      x: (shape.x1 + shape.x2) / 2,
+      y: (shape.y1 + shape.y2) / 2,
+      angle: labelAngleForLine(shape.x1, shape.y1, shape.x2, shape.y2),
+      fontSize: fs,
+      color: shape.color,
+    }
+  }
+  if (shape.type === 'rect' || shape.type === 'circle') {
+    return {
+      x: shape.x + shape.w / 2,
+      y: shape.y + shape.h / 2,
+      angle: 0,
+      fontSize: fs,
+      color: shape.color,
+    }
+  }
+  return { x: 0, y: 0, angle: 0, fontSize: fs, color: shape.color }
+}
+
+function isEditingShapeLabel(shape) {
+  return textEdit.active && textEdit.shapeIdx >= 0
+    && shapes.value[textEdit.shapeIdx] === shape
+    && shapes.value[textEdit.shapeIdx].type !== 'text'
+}
+
+function effectiveLineLabel(shape) {
+  if (!LINE_TOOL_TYPES.has(shape.type)) return ''
+  if (isEditingShapeLabel(shape) && textEdit.value.trim()) {
+    return textEdit.value.trim()
+  }
+  return shape.label || ''
+}
+
+function lineLabelGapHalf(shape) {
+  const label = effectiveLineLabel(shape)
+  if (!label) return 0
+  const fs = shape.labelFontSize ?? fontSize.value
+  return Math.max(label.length * fs * 0.65, fs) / 2 + 6
+}
+
+function strokeSegment(ctx, x1, y1, x2, y2) {
+  ctx.beginPath()
+  ctx.moveTo(x1, y1)
+  ctx.lineTo(x2, y2)
+  ctx.stroke()
+}
+
+function strokeLineWithLabelGap(ctx, x1, y1, x2, y2, gapHalf) {
+  if (gapHalf <= 0) {
+    strokeSegment(ctx, x1, y1, x2, y2)
+    return
+  }
+  const dx = x2 - x1
+  const dy = y2 - y1
+  const len = Math.hypot(dx, dy)
+  if (len < 1) return
+  if (gapHalf * 2.2 >= len) {
+    strokeSegment(ctx, x1, y1, x2, y2)
+    return
+  }
+  const ux = dx / len
+  const uy = dy / len
+  const mx = (x1 + x2) / 2
+  const my = (y1 + y2) / 2
+  strokeSegment(ctx, x1, y1, mx - ux * gapHalf, my - uy * gapHalf)
+  strokeSegment(ctx, mx + ux * gapHalf, my + uy * gapHalf, x2, y2)
+}
+
+function paintAttachedLabel(ctx, shape, overrideColor = null) {
+  const label = shape.label
+  if (!label || shape.type === 'text') return
+  const anchor = shapeLabelAnchor(shape)
+  const col = overrideColor ?? anchor.color
+  ctx.save()
+  ctx.translate(anchor.x, anchor.y)
+  if (anchor.angle) ctx.rotate(anchor.angle)
+  ctx.font = `bold ${anchor.fontSize}px sans-serif`
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  if (overrideColor !== null) {
+    ctx.strokeStyle = col
+    ctx.lineWidth = 4
+    ctx.lineJoin = 'round'
+    ctx.strokeText(label, 0, 0)
+  } else {
+    ctx.fillStyle = col
+    ctx.shadowColor = 'rgba(0,0,0,0.85)'
+    ctx.shadowBlur = 4
+    ctx.shadowOffsetX = 1
+    ctx.shadowOffsetY = 1
+    ctx.fillText(label, 0, 0)
+  }
+  ctx.restore()
+}
+
 // ── Text editing ──────────────────────────────────────────────────────────────
+
+function beginEditShapeText(idx) {
+  const s = shapes.value[idx]
+  if (!s) return
+  if (textEdit.active && textEdit.shapeIdx !== idx) commitText()
+  selectedIdx.value = idx
+  textEdit.shapeIdx = idx
+  if (s.type === 'text') {
+    textEdit.canvasX = s.x
+    textEdit.canvasY = s.y
+    textEdit.angle = 0
+    textEdit.value = s.text
+  } else {
+    const anchor = shapeLabelAnchor(s)
+    textEdit.canvasX = anchor.x
+    textEdit.canvasY = anchor.y
+    textEdit.angle = anchor.angle
+    textEdit.value = s.label || ''
+  }
+  textEdit.active = true
+  nextTick(() => {
+    const el = textareaEl.value
+    if (!el) return
+    el.focus()
+    el.select()
+  })
+}
+
+function beginEditText(idx) {
+  beginEditShapeText(idx)
+}
 
 function commitText() {
   if (!textEdit.active) return
   const text = textEdit.value.trim()
-  if (text) {
+  if (textEdit.shapeIdx >= 0) {
+    const s = shapes.value[textEdit.shapeIdx]
+    if (s?.type === 'text') {
+      if (text) {
+        s.text = text
+      } else {
+        shapes.value.splice(textEdit.shapeIdx, 1)
+        if (selectedIdx.value === textEdit.shapeIdx) selectedIdx.value = -1
+        else if (selectedIdx.value > textEdit.shapeIdx) selectedIdx.value -= 1
+      }
+    } else if (s) {
+      if (text) {
+        s.label = text
+        if (!s.labelFontSize) s.labelFontSize = fontSize.value
+      } else {
+        delete s.label
+        delete s.labelFontSize
+      }
+    }
+  } else if (text) {
     shapes.value.push({
       type:     'text',
       color:    color.value,
@@ -827,12 +1160,16 @@ function commitText() {
       text,
     })
   }
+  textEdit.shapeIdx = -1
+  textEdit.angle = 0
   textEdit.active = false
   textEdit.value  = ''
   scheduleRedraw()
 }
 
 function cancelText() {
+  textEdit.shapeIdx = -1
+  textEdit.angle = 0
   textEdit.active = false
   textEdit.value  = ''
 }
@@ -871,13 +1208,31 @@ function redraw() {
   const ctx = canvas.getContext('2d')
   ctx.clearRect(0, 0, imgNW.value, imgNH.value)
   ctx.drawImage(imgEl.value, 0, 0)
+  const skipTextEdit = textEdit.active && textEdit.shapeIdx >= 0
+    && shapes.value[textEdit.shapeIdx]?.type === 'text'
+    ? shapes.value[textEdit.shapeIdx]
+    : null
   // White outline pass — always drawn first so color sits on top
-  for (const shape of shapes.value) paint(ctx, shape, '#ffffff', 2)
+  for (const shape of shapes.value) {
+    if (shape === skipTextEdit) continue
+    paint(ctx, shape, '#ffffff', 2)
+    if (shape.label && !isEditingShapeLabel(shape)) {
+      paintAttachedLabel(ctx, shape, '#ffffff')
+    }
+  }
   if (drawing.value) paint(ctx, drawing.value, '#ffffff', 2)
-  for (const shape of shapes.value) paint(ctx, shape)
+  for (const shape of shapes.value) {
+    if (shape === skipTextEdit) continue
+    paint(ctx, shape)
+    if (shape.label && !isEditingShapeLabel(shape)) {
+      paintAttachedLabel(ctx, shape)
+    }
+  }
   if (drawing.value) paint(ctx, drawing.value)
-  if (selectedIdx.value >= 0 && selectedIdx.value < shapes.value.length && !drawing.value && !textEdit.active) {
-    paintSelection(ctx, shapes.value[selectedIdx.value])
+  const sel = selectedIdx.value
+  if (sel >= 0 && sel < shapes.value.length && !drawing.value
+      && (!textEdit.active || textEdit.shapeIdx !== sel)) {
+    paintSelection(ctx, shapes.value[sel])
   }
 }
 
@@ -922,6 +1277,29 @@ function paintSelection(ctx, shape) {
   ctx.restore()
 }
 
+function fillArrowHead(ctx, tipX, tipY, angle, hl, ha, strokeOutline = false) {
+  ctx.setLineDash([])
+  ctx.beginPath()
+  ctx.moveTo(tipX, tipY)
+  ctx.lineTo(tipX - hl * Math.cos(angle - ha), tipY - hl * Math.sin(angle - ha))
+  ctx.lineTo(tipX - hl * Math.cos(angle + ha), tipY - hl * Math.sin(angle + ha))
+  ctx.closePath()
+  ctx.fill()
+  if (strokeOutline) ctx.stroke()
+}
+
+function shapeIsDashed(shape) {
+  return !!shape.dashed || shape.type === 'dash'
+}
+
+function applyShapeDash(ctx, shape) {
+  if (shapeIsDashed(shape)) {
+    ctx.setLineDash([shape.width * 4, shape.width * 3])
+  } else {
+    ctx.setLineDash([])
+  }
+}
+
 function paint(ctx, shape, overrideColor = null, extraWidth = 0) {
   const eff = overrideColor ?? shape.color
   ctx.save()
@@ -934,18 +1312,10 @@ function paint(ctx, shape, overrideColor = null, extraWidth = 0) {
 
   const { type } = shape
 
-  if (type === 'line') {
-    ctx.beginPath()
-    ctx.moveTo(shape.x1, shape.y1)
-    ctx.lineTo(shape.x2, shape.y2)
-    ctx.stroke()
-
-  } else if (type === 'dash') {
-    ctx.setLineDash([shape.width * 4, shape.width * 3])
-    ctx.beginPath()
-    ctx.moveTo(shape.x1, shape.y1)
-    ctx.lineTo(shape.x2, shape.y2)
-    ctx.stroke()
+  if (type === 'line' || type === 'dash') {
+    applyShapeDash(ctx, shape)
+    strokeLineWithLabelGap(
+      ctx, shape.x1, shape.y1, shape.x2, shape.y2, lineLabelGapHalf(shape))
 
   } else if (type === 'arrow') {
     const dx    = shape.x2 - shape.x1
@@ -955,27 +1325,40 @@ function paint(ctx, shape, overrideColor = null, extraWidth = 0) {
     const angle = Math.atan2(dy, dx)
     const hl    = Math.max(shape.width * 5, 14)
     const ha    = Math.PI / 7
-    // Line body (shortened so it doesn't overlap arrowhead)
     const tailX = shape.x2 - hl * 0.6 * Math.cos(angle)
     const tailY = shape.y2 - hl * 0.6 * Math.sin(angle)
-    ctx.beginPath()
-    ctx.moveTo(shape.x1, shape.y1)
-    ctx.lineTo(tailX, tailY)
-    ctx.stroke()
-    // Filled arrowhead
-    ctx.beginPath()
-    ctx.moveTo(shape.x2, shape.y2)
-    ctx.lineTo(shape.x2 - hl * Math.cos(angle - ha), shape.y2 - hl * Math.sin(angle - ha))
-    ctx.lineTo(shape.x2 - hl * Math.cos(angle + ha), shape.y2 - hl * Math.sin(angle + ha))
-    ctx.closePath()
-    ctx.fill()
-    // In outline pass, also stroke the triangle so the halo extends beyond its edges
-    if (overrideColor !== null) ctx.stroke()
+    applyShapeDash(ctx, shape)
+    strokeLineWithLabelGap(ctx, shape.x1, shape.y1, tailX, tailY, lineLabelGapHalf(shape))
+    ctx.setLineDash([])
+    const outline = overrideColor !== null
+    fillArrowHead(ctx, shape.x2, shape.y2, angle, hl, ha, outline)
+
+  } else if (type === 'dblarrow') {
+    const dx    = shape.x2 - shape.x1
+    const dy    = shape.y2 - shape.y1
+    const dist  = Math.hypot(dx, dy)
+    if (dist < 2) { ctx.restore(); return }
+    const angle = Math.atan2(dy, dx)
+    const hl    = Math.max(shape.width * 5, 14)
+    const ha    = Math.PI / 7
+    const inset = hl * 0.6
+    const sx = shape.x1 + inset * Math.cos(angle)
+    const sy = shape.y1 + inset * Math.sin(angle)
+    const ex = shape.x2 - inset * Math.cos(angle)
+    const ey = shape.y2 - inset * Math.sin(angle)
+    applyShapeDash(ctx, shape)
+    strokeLineWithLabelGap(ctx, sx, sy, ex, ey, lineLabelGapHalf(shape))
+    ctx.setLineDash([])
+    const outline = overrideColor !== null
+    fillArrowHead(ctx, shape.x2, shape.y2, angle, hl, ha, outline)
+    fillArrowHead(ctx, shape.x1, shape.y1, angle + Math.PI, hl, ha, outline)
 
   } else if (type === 'rect') {
+    applyShapeDash(ctx, shape)
     ctx.strokeRect(shape.x, shape.y, shape.w, shape.h)
 
   } else if (type === 'circle') {
+    applyShapeDash(ctx, shape)
     if (shape.w < 1 && shape.h < 1) { ctx.restore(); return }
     if (shape.w < 1) {
       ctx.beginPath()
@@ -1196,6 +1579,15 @@ function triggerDownload(blob) {
   color: #6a6a99;
   white-space: nowrap;
   line-height: 1;
+}
+
+.se-dash-ctl {
+  cursor: pointer;
+}
+
+.se-dash-ctl input {
+  margin: 0;
+  cursor: pointer;
 }
 
 .se-color-ctl {

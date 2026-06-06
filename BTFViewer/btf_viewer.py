@@ -866,6 +866,64 @@ def _migration_rows(trace: "BtfTrace",
     rows.sort(key=lambda r: (-r[2], r[1].lower()))
     return rows
 
+def _trace_summary_snapshot(trace: "BtfTrace") -> dict:
+    """Full-trace summary metrics for trace compare."""
+    span = trace.time_max - trace.time_min
+    sti = sum(1 for ev in trace.sti_events if not _is_tag_sti_channel(ev.target))
+    ctx, gaps = _scheduling_stats(trace)
+    gap_avg = int(round(sum(gaps) / len(gaps))) if gaps else 0
+    gap_max = max(gaps) if gaps else 0
+    mig_tasks = sum(1 for mk in trace.tasks if _is_migrated_task(trace, mk))
+    return {
+        "span_ns": span,
+        "tasks": len(trace.tasks),
+        "segments": len(trace.segments),
+        "sti_events": sti,
+        "context_switches": ctx,
+        "gap_avg_ns": gap_avg,
+        "gap_max_ns": gap_max,
+        "migrations": len(trace.migrations),
+        "migrated_tasks": mig_tasks,
+        "time_scale": trace.time_scale,
+    }
+
+def _top_tasks_cpu_by_name(trace: "BtfTrace", limit: int = 10) -> Dict[str, float]:
+    """Top tasks by CPU%, keyed by display name (full trace)."""
+    total_ns = trace.time_max - trace.time_min
+    if total_ns <= 0:
+        return {}
+    task_times: Dict[str, int] = {}
+    for mk, segs in trace.seg_map_by_merge_key.items():
+        raw = trace.task_repr.get(mk, mk)
+        _, _, tname = _parse_task_name(raw)
+        if _is_idle_task_name(tname) or tname == "TICK":
+            continue
+        task_times[mk] = sum(s.end - s.start for s in segs)
+    result: Dict[str, float] = {}
+    for mk, t_ns in sorted(task_times.items(), key=lambda kv: kv[1], reverse=True)[:limit]:
+        if t_ns <= 0:
+            continue
+        raw = trace.task_repr.get(mk, mk)
+        result[_task_display_name(raw)] = 100.0 * t_ns / total_ns
+    return result
+
+def _fmt_signed_time_delta(delta_ns: int, scale: str) -> str:
+    if delta_ns == 0:
+        return "0"
+    sign = "+" if delta_ns >= 0 else "−"
+    return f"{sign}{_format_time(abs(delta_ns), scale)}"
+
+def _fmt_signed_int_delta(delta: int) -> str:
+    if delta == 0:
+        return "0"
+    return f"+{delta}" if delta > 0 else str(delta)
+
+def _fmt_signed_pct_delta(delta: float) -> str:
+    if abs(delta) < 0.05:
+        return "0.0"
+    sign = "+" if delta >= 0 else ""
+    return f"{sign}{delta:.1f}"
+
 def _core_sort_key_tuple(c: str) -> tuple:
     if c.startswith("Core_"):
         tail = c[5:]
@@ -8979,14 +9037,14 @@ class _StatsSectionGrip(QWidget):
         p.end()
 
 
-class _MigrationCompareDialog(QDialog):
-    """Compare core-migration metrics between two open trace tabs."""
+class _TraceCompareDialog(QDialog):
+    """Compare summary, top tasks, and core migrations between two open trace tabs."""
 
     def __init__(self, win: "MainWindow", parent=None) -> None:
         super().__init__(parent or win)
-        self.setWindowTitle("Compare Core Migrations")
+        self.setWindowTitle("Trace Compare")
         self.setModal(True)
-        self.resize(720, 420)
+        self.resize(760, 480)
         lay = QVBoxLayout(self)
         row = QHBoxLayout()
         row.addWidget(QLabel("Trace A:"))
@@ -8996,13 +9054,26 @@ class _MigrationCompareDialog(QDialog):
         self._combo_b = QComboBox()
         row.addWidget(self._combo_b, 1)
         lay.addLayout(row)
-        self._table = QTableWidget(0, 6)
-        self._table.setHorizontalHeaderLabels(
+
+        self._pages = QTabWidget()
+        self._summary_table = QTableWidget(0, 4)
+        self._summary_table.setHorizontalHeaderLabels(
+            ["Metric", "Trace A", "Trace B", "Δ"])
+        self._top_table = QTableWidget(0, 4)
+        self._top_table.setHorizontalHeaderLabels(
+            ["Task", "CPU% A", "CPU% B", "Δ"])
+        self._mig_table = QTableWidget(0, 6)
+        self._mig_table.setHorizontalHeaderLabels(
             ["Task", "Migrations A", "Migrations B", "Δ", "Ping-pong A", "Ping-pong B"])
-        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self._table.verticalHeader().setVisible(False)
-        self._table.horizontalHeader().setStretchLastSection(True)
-        lay.addWidget(self._table, 1)
+        for tbl in (self._summary_table, self._top_table, self._mig_table):
+            tbl.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            tbl.verticalHeader().setVisible(False)
+            tbl.horizontalHeader().setStretchLastSection(True)
+        self._pages.addTab(self._summary_table, "Summary")
+        self._pages.addTab(self._top_table, "Top Tasks")
+        self._pages.addTab(self._mig_table, "Core Migrations")
+        lay.addWidget(self._pages, 1)
+
         btns = QDialogButtonBox(QDialogButtonBox.Close)
         btns.rejected.connect(self.reject)
         btns.accepted.connect(self.accept)
@@ -9024,14 +9095,85 @@ class _MigrationCompareDialog(QDialog):
             return None
         return self._win._tabs[idx].trace
 
+    @staticmethod
+    def _fill_table(table: QTableWidget, rows: List[List], left_cols: int = 1) -> None:
+        table.setRowCount(len(rows))
+        for ri, vals in enumerate(rows):
+            for ci, val in enumerate(vals):
+                item = QTableWidgetItem(str(val))
+                if ci < left_cols:
+                    item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+                else:
+                    item.setTextAlignment(Qt.AlignVCenter | Qt.AlignRight)
+                table.setItem(ri, ci, item)
+
     def _refresh(self) -> None:
         ta = self._trace_for_combo(self._combo_a)
         tb = self._trace_for_combo(self._combo_b)
+        self._refresh_summary(ta, tb)
+        self._refresh_top_tasks(ta, tb)
+        self._refresh_migrations(ta, tb)
+
+    def _refresh_summary(self, ta: Optional[BtfTrace], tb: Optional[BtfTrace]) -> None:
+        if ta is None or tb is None:
+            self._summary_table.setRowCount(0)
+            return
+        a = _trace_summary_snapshot(ta)
+        b = _trace_summary_snapshot(tb)
+        scale = a["time_scale"]
+        rows = [
+            ["Span",
+             _format_time(a["span_ns"], scale),
+             _format_time(b["span_ns"], scale),
+             _fmt_signed_time_delta(a["span_ns"] - b["span_ns"], scale)],
+            ["Tasks", a["tasks"], b["tasks"], _fmt_signed_int_delta(a["tasks"] - b["tasks"])],
+            ["Segments", a["segments"], b["segments"],
+             _fmt_signed_int_delta(a["segments"] - b["segments"])],
+            ["STI events", a["sti_events"], b["sti_events"],
+             _fmt_signed_int_delta(a["sti_events"] - b["sti_events"])],
+            ["Context switches", a["context_switches"], b["context_switches"],
+             _fmt_signed_int_delta(a["context_switches"] - b["context_switches"])],
+            ["Core gap avg",
+             _format_time(a["gap_avg_ns"], scale),
+             _format_time(b["gap_avg_ns"], scale),
+             _fmt_signed_time_delta(a["gap_avg_ns"] - b["gap_avg_ns"], scale)],
+            ["Core gap max",
+             _format_time(a["gap_max_ns"], scale),
+             _format_time(b["gap_max_ns"], scale),
+             _fmt_signed_time_delta(a["gap_max_ns"] - b["gap_max_ns"], scale)],
+            ["Migrations (total)", a["migrations"], b["migrations"],
+             _fmt_signed_int_delta(a["migrations"] - b["migrations"])],
+            ["Migrated tasks", a["migrated_tasks"], b["migrated_tasks"],
+             _fmt_signed_int_delta(a["migrated_tasks"] - b["migrated_tasks"])],
+        ]
+        self._fill_table(self._summary_table, rows)
+
+    def _refresh_top_tasks(self, ta: Optional[BtfTrace], tb: Optional[BtfTrace]) -> None:
+        map_a = _top_tasks_cpu_by_name(ta) if ta else {}
+        map_b = _top_tasks_cpu_by_name(tb) if tb else {}
+        names = sorted(set(map_a) | set(map_b),
+                       key=lambda n: (-max(map_a.get(n, 0.0), map_b.get(n, 0.0)), n.lower()))
+        rows: List[List] = []
+        for name in names:
+            pa = map_a.get(name)
+            pb = map_b.get(name)
+            a_val = pa if pa is not None else 0.0
+            b_val = pb if pb is not None else 0.0
+            rows.append([
+                name,
+                f"{pa:.1f}" if pa is not None else "—",
+                f"{pb:.1f}" if pb is not None else "—",
+                _fmt_signed_pct_delta(a_val - b_val),
+            ])
+        self._fill_table(self._top_table, rows)
+
+    def _refresh_migrations(self, ta: Optional[BtfTrace], tb: Optional[BtfTrace]) -> None:
         rows_a = {r[0]: r for r in (_migration_rows(ta) if ta else [])}
         rows_b = {r[0]: r for r in (_migration_rows(tb) if tb else [])}
-        keys = sorted(set(rows_a) | set(rows_b), key=lambda k: rows_a.get(k, rows_b.get(k))[1].lower())
-        self._table.setRowCount(len(keys))
-        for ri, mk in enumerate(keys):
+        keys = sorted(set(rows_a) | set(rows_b),
+                      key=lambda k: rows_a.get(k, rows_b.get(k))[1].lower())
+        mig_rows: List[List] = []
+        for mk in keys:
             ra = rows_a.get(mk)
             rb = rows_b.get(mk)
             name = (ra or rb)[1]
@@ -9039,14 +9181,8 @@ class _MigrationCompareDialog(QDialog):
             mb = rb[2] if rb else 0
             pa = ra[7] if ra else 0
             pb = rb[7] if rb else 0
-            vals = [name, ma, mb, ma - mb, pa, pb]
-            for ci, val in enumerate(vals):
-                item = QTableWidgetItem(str(val))
-                if ci == 0:
-                    item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-                else:
-                    item.setTextAlignment(Qt.AlignVCenter | Qt.AlignRight)
-                self._table.setItem(ri, ci, item)
+            mig_rows.append([name, ma, mb, ma - mb, pa, pb])
+        self._fill_table(self._mig_table, mig_rows)
 
 
 class _StatsPanel(QWidget):
@@ -9120,9 +9256,9 @@ class _StatsPanel(QWidget):
         self._btn_export_html.clicked.connect(self._export_html)
         self._btn_export_html.setEnabled(False)
         exp_row.addWidget(self._btn_export_html)
-        self._btn_compare_mig = QPushButton("Compare Tabs…")
+        self._btn_compare_mig = QPushButton("Trace Compare…")
         self._btn_compare_mig.setToolTip(
-            "Compare core-migration statistics between two open trace tabs")
+            "Compare summary, top tasks, and core migrations between two open trace tabs")
         self._btn_compare_mig.setEnabled(False)
         exp_row.addWidget(self._btn_compare_mig)
         outer.addLayout(exp_row)
@@ -11648,10 +11784,14 @@ class _AnnotationCanvas(QWidget):
         # Scale painter to image coordinates
         painter.scale(ed._scale, ed._scale)
         # Two-pass rendering: white outline, then colour
-        ed._paint_shapes(painter, ed._shapes, QColor('#ffffff'), 2)
+        visible = [
+            s for i, s in enumerate(ed._shapes)
+            if not ed._should_skip_text_shape_paint(i, s)
+        ]
+        ed._paint_shapes(painter, visible, QColor('#ffffff'), 2)
         if ed._drawing:
             ed._paint_shapes(painter, [ed._drawing], QColor('#ffffff'), 2)
-        ed._paint_shapes(painter, ed._shapes)
+        ed._paint_shapes(painter, visible)
         if ed._drawing:
             ed._paint_shapes(painter, [ed._drawing])
         if ed._selected_idx >= 0 and ed._selected_idx < len(ed._shapes) and ed._drawing is None:
@@ -11662,19 +11802,18 @@ class _AnnotationCanvas(QWidget):
         if event.button() != Qt.LeftButton:
             return
         ed = self._editor
+        if ed._text_edit_active() and ed._tool != 'text':
+            ed._commit_text_edit()
         x, y = ed._to_img(event.x(), event.y())
         if ed._tool == 'text':
-            text, ok = QInputDialog.getText(self, "Add Text", "Enter text:")
-            if ok and text:
-                ed._shapes.append({
-                    'type': 'text',
-                    'color': QColor(ed._color),
-                    'font_size': ed._font_size,
-                    'x': x, 'y': y,
-                    'text': text,
-                })
-                ed._selected_idx = -1
+            hit = ed._hit_test(x, y)
+            if hit >= 0 and ed._shapes[hit]['type'] == 'text':
+                ed._selected_idx = hit
                 self.update()
+                return
+            ed._begin_text_edit(shape_idx=-1, img_x=x, img_y=y, angle=0.0,
+                                initial='', color=ed._color, font_size=ed._font_size)
+            return
         else:
             handle = ed._hit_control_point(x, y)
             if handle and ed._selected_idx >= 0:
@@ -11688,7 +11827,20 @@ class _AnnotationCanvas(QWidget):
             # Try to pick up an existing shape for dragging
             hit = ed._hit_test(x, y)
             if hit >= 0:
+                if bool(event.modifiers() & Qt.ControlModifier):
+                    new_idx = ed._duplicate_shape(hit)
+                    ed._selected_idx = new_idx
+                    ed._sync_dash_from_shape(new_idx)
+                    ed._drag_idx = new_idx
+                    ed._drag_prev = (x, y)
+                    ed._drag_mode = 'move'
+                    ed._drag_handle = ''
+                    ed._drag_anchor = None
+                    self.setCursor(Qt.SizeAllCursor)
+                    self.update()
+                    return
                 ed._selected_idx = hit
+                ed._sync_dash_from_shape(hit)
                 ed._drag_idx = hit
                 ed._drag_prev = (x, y)
                 ed._drag_mode = 'move'
@@ -11702,6 +11854,7 @@ class _AnnotationCanvas(QWidget):
                     'type': ed._tool,
                     'color': QColor(ed._color),
                     'width': ed._line_width,
+                    'dashed': ed._dashed,
                     'x1': x, 'y1': y,
                     'x2': x, 'y2': y,
                     'x': x, 'y': y, 'w': 0.0, 'h': 0.0,
@@ -11722,7 +11875,7 @@ class _AnnotationCanvas(QWidget):
             self.update()
         elif ed._drawing is not None:
             d = ed._drawing
-            if d['type'] in ('line', 'arrow', 'dash'):
+            if d['type'] in SnapshotEditorDialog._LINE_TOOLS:
                 force = bool(event.modifiers() & Qt.ShiftModifier)
                 d['x2'], d['y2'] = _snap_line_end(d['x1'], d['y1'], x, y, force)
             else:
@@ -11761,7 +11914,7 @@ class _AnnotationCanvas(QWidget):
         elif ed._drawing is not None:
             x, y = ed._to_img(event.x(), event.y())
             d = ed._drawing
-            if d['type'] in ('line', 'arrow', 'dash'):
+            if d['type'] in SnapshotEditorDialog._LINE_TOOLS:
                 force = bool(event.modifiers() & Qt.ShiftModifier)
                 d['x2'], d['y2'] = _snap_line_end(d['x1'], d['y1'], x, y, force)
             else:
@@ -11813,7 +11966,7 @@ class _AnnotationCanvas(QWidget):
         menu.addSeparator()
         act_color     = menu.addAction("Change Color...")
         act_size      = None if is_text else menu.addAction("Change Size...")
-        act_edit_text = menu.addAction("Edit Text...")     if is_text else None
+        act_edit_text = menu.addAction("Edit Text...") if is_text else menu.addAction("Edit Label...")
         act_font_size = menu.addAction("Change Font Size...") if is_text else None
 
         chosen = menu.exec_(event.globalPos())
@@ -11848,11 +12001,8 @@ class _AnnotationCanvas(QWidget):
                         shape['width'] = val
                         self.update()
                 elif act_edit_text and chosen == act_edit_text:
-                    text, ok = QInputDialog.getText(
-                        self, "Edit Text", "Text:", text=shape.get('text', ''))
-                    if ok and text:
-                        shape['text'] = text
-                        self.update()
+                    ed._begin_edit_shape_text(idx)
+                    self.update()
                 elif act_font_size and chosen == act_font_size:
                     val, ok = QInputDialog.getInt(
                         self, "Change Font Size", "Font size (pt):",
@@ -11865,29 +12015,47 @@ class _AnnotationCanvas(QWidget):
 
         QTimer.singleShot(0, _open_dialog)
 
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
+        if event.button() != Qt.LeftButton:
+            return
+        ed = self._editor
+        x, y = ed._to_img(event.x(), event.y())
+        idx = ed._hit_test(x, y)
+        if idx < 0:
+            return
+        ed._selected_idx = idx
+        ed._drag_idx = -1
+        ed._drag_mode = 'none'
+        ed._drag_handle = ''
+        ed._drag_anchor = None
+        ed._begin_edit_shape_text(idx)
+        self.update()
+
 
 class SnapshotEditorDialog(QDialog):
     """Annotation editor dialog opened when the user captures a viewport snapshot.
 
-    Supported tools: arrow, line, dash-line, rectangle, circle, text.
+    Supported tools: arrow, double-arrow, line, rectangle, circle, text.
+    Use the Dash checkbox for dashed strokes on line-based shapes and boxes.
     All shapes are rendered with a white outline pass followed by a colour
     pass, mirroring the web-app behaviour.
     """
 
-    _TOOLS = ('arrow', 'line', 'dash', 'rect', 'circle', 'text')
+    _TOOLS = ('arrow', 'dblarrow', 'line', 'rect', 'circle', 'text')
+    _LINE_TOOLS = ('arrow', 'dblarrow', 'line', 'dash')
     _TOOL_LABELS = {
-        'arrow':  'Arrow',
-        'line':   'Line',
-        'dash':   'Dashed Line',
+        'arrow':    'Arrow',
+        'dblarrow': 'Double Arrow',
+        'line':     'Line',
         'rect':   'Rectangle  (Shift: square)',
         'circle': 'Circle / Ellipse  (Shift: circle)',
         'text':   'Add Text (click to place)',
     }
     # SVG icon data for each tool (mirrors the web app icons)
     _TOOL_ICONS = {
-        'arrow': b'<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 14L13 3M13 3H7M13 3V9"/></svg>',
+        'arrow':  b'<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 14L13 3M13 3H7M13 3V9"/></svg>',
+        'dblarrow': b'<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h8M4 8l2.5-2.5M4 8l2.5 2.5M12 8l-2.5-2.5M12 8l-2.5 2.5"/></svg>',
         'line':  b'<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="2" y1="14" x2="14" y2="2"/></svg>',
-        'dash':  b'<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-dasharray="3 2.5"><line x1="2" y1="14" x2="14" y2="2"/></svg>',
         'rect':  b'<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="3" width="12" height="9" rx="1"/></svg>',
         'circle':b'<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6"><ellipse cx="8" cy="8" rx="6" ry="5"/></svg>',
         'text':  b'<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 4h10M8 4v9M5 13h6"/></svg>',
@@ -11941,6 +12109,10 @@ class SnapshotEditorDialog(QDialog):
         self._color: QColor = QColor('#ff4444')
         self._line_width: int = 3
         self._font_size: int = 20
+        self._dashed: bool = False
+        self._text_edit_shape_idx: int = -1
+        self._text_edit_img_x: float = 0.0
+        self._text_edit_img_y: float = 0.0
 
         # Compute display scale so the canvas fits the available screen area
         screen = QApplication.desktop().availableGeometry(self)
@@ -12013,6 +12185,13 @@ class SnapshotEditorDialog(QDialog):
         self._width_spin.valueChanged.connect(lambda v: setattr(self, '_line_width', v))
         tb.addWidget(self._width_spin)
 
+        self._dash_cb = QCheckBox("Dash")
+        self._dash_cb.setChecked(self._dashed)
+        self._dash_cb.setToolTip("Dashed stroke for lines, arrows, rectangles, and circles")
+        self._dash_cb.setFixedHeight(_ICON_H)
+        self._dash_cb.toggled.connect(self._on_dash_toggled)
+        tb.addWidget(self._dash_cb)
+
         tb.addSpacing(8)
         tb.addWidget(QLabel("Font:"))
         self._font_spin = QSpinBox()
@@ -12028,11 +12207,17 @@ class SnapshotEditorDialog(QDialog):
 
         # ---- Canvas in a scroll area ----
         self._canvas = _AnnotationCanvas(self, self._disp_w, self._disp_h)
+        self._canvas.setFocusPolicy(Qt.ClickFocus)
         scroll = QScrollArea()
         scroll.setWidget(self._canvas)
         scroll.setWidgetResizable(False)
         scroll.setFrameShape(QFrame.NoFrame)
         main.addWidget(scroll, stretch=1)
+
+        self._text_input = QLineEdit(self._canvas)
+        self._text_input.hide()
+        self._text_input.returnPressed.connect(self._commit_text_edit)
+        self._text_input.installEventFilter(self)
 
         # ---- Bottom bar ----
         bot = QHBoxLayout()
@@ -12063,6 +12248,26 @@ class SnapshotEditorDialog(QDialog):
         for tid, btn in self._tool_btns.items():
             btn.setChecked(tid == tool)
 
+    def _on_dash_toggled(self, checked: bool) -> None:
+        self._dashed = checked
+        if 0 <= self._selected_idx < len(self._shapes):
+            shape = self._shapes[self._selected_idx]
+            if shape['type'] != 'text':
+                shape['dashed'] = checked
+                self._canvas.update()
+
+    def _sync_dash_from_shape(self, idx: int) -> None:
+        if idx < 0 or idx >= len(self._shapes):
+            return
+        shape = self._shapes[idx]
+        if shape['type'] == 'text':
+            return
+        dashed = bool(shape.get('dashed')) or shape['type'] == 'dash'
+        self._dashed = dashed
+        self._dash_cb.blockSignals(True)
+        self._dash_cb.setChecked(dashed)
+        self._dash_cb.blockSignals(False)
+
     def _pick_color(self) -> None:
         from PyQt5.QtWidgets import QColorDialog  # always available, import locally
         color = QColorDialog.getColor(self._color, self, "Pick Colour")
@@ -12078,11 +12283,217 @@ class SnapshotEditorDialog(QDialog):
         """Convert canvas display coordinates to image pixel coordinates."""
         return cx / self._scale, cy / self._scale
 
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if obj is self._text_input:
+            if event.type() == QEvent.KeyPress and event.key() == Qt.Key_Escape:
+                self._cancel_text_edit()
+                return True
+            if event.type() == QEvent.FocusOut:
+                QTimer.singleShot(0, self._deferred_commit_text_edit)
+        return super().eventFilter(obj, event)
+
+    def _deferred_commit_text_edit(self) -> None:
+        if not self._text_input.isVisible():
+            return
+        if QApplication.focusWidget() is self._text_input:
+            return
+        self._commit_text_edit()
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802
+        if event.key() == Qt.Key_Escape:
+            if self._text_edit_active():
+                self._cancel_text_edit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self._commit_text_edit()
+        super().closeEvent(event)
+
+    def _text_edit_active(self) -> bool:
+        return self._text_input.isVisible()
+
+    def _should_skip_text_shape_paint(self, idx: int, shape: dict) -> bool:
+        return (self._text_edit_active()
+                and idx == self._text_edit_shape_idx
+                and shape['type'] == 'text')
+
+    def _is_editing_shape_label(self, shape: dict) -> bool:
+        if not self._text_edit_active() or self._text_edit_shape_idx < 0:
+            return False
+        if self._text_edit_shape_idx >= len(self._shapes):
+            return False
+        ref = self._shapes[self._text_edit_shape_idx]
+        return ref is shape and shape.get('type') != 'text'
+
+    @staticmethod
+    def _shape_label_anchor(shape: dict, font_size: int) -> dict:
+        fs = shape.get('label_font_size', font_size)
+        col = shape['color']
+        t = shape['type']
+        if t in SnapshotEditorDialog._LINE_TOOLS:
+            return {
+                'x': (shape['x1'] + shape['x2']) / 2.0,
+                'y': (shape['y1'] + shape['y2']) / 2.0,
+                'angle': SnapshotEditorDialog._label_angle_for_line(
+                    shape['x1'], shape['y1'], shape['x2'], shape['y2']),
+                'font_size': fs,
+                'color': col,
+            }
+        if t in ('rect', 'circle'):
+            return {
+                'x': shape['x'] + shape['w'] / 2.0,
+                'y': shape['y'] + shape['h'] / 2.0,
+                'angle': 0.0,
+                'font_size': fs,
+                'color': col,
+            }
+        return {'x': 0.0, 'y': 0.0, 'angle': 0.0, 'font_size': fs, 'color': col}
+
+    def _hide_text_edit(self) -> None:
+        self._text_input.clearFocus()
+        self._text_input.hide()
+        self._text_edit_shape_idx = -1
+        self._canvas.setFocus()
+        self._canvas.update()
+
+    def _cancel_text_edit(self) -> None:
+        if not self._text_edit_active():
+            return
+        self._text_input.blockSignals(True)
+        self._text_input.clear()
+        self._text_input.blockSignals(False)
+        self._hide_text_edit()
+
+    def _commit_text_edit(self) -> None:
+        if not self._text_edit_active():
+            return
+        self._text_input.blockSignals(True)
+        try:
+            text = self._text_input.text().strip()
+            idx = self._text_edit_shape_idx
+            if idx >= 0:
+                shape = self._shapes[idx]
+                if shape['type'] == 'text':
+                    if text:
+                        shape['text'] = text
+                    else:
+                        self._shapes.pop(idx)
+                        if self._selected_idx == idx:
+                            self._selected_idx = -1
+                        elif self._selected_idx > idx:
+                            self._selected_idx -= 1
+                elif text:
+                    shape['label'] = text
+                    shape.setdefault('label_font_size', self._font_size)
+                else:
+                    shape.pop('label', None)
+                    shape.pop('label_font_size', None)
+            elif text:
+                self._shapes.append({
+                    'type': 'text',
+                    'color': QColor(self._color),
+                    'font_size': self._font_size,
+                    'x': self._text_edit_img_x,
+                    'y': self._text_edit_img_y,
+                    'text': text,
+                })
+                self._selected_idx = -1
+            self._text_input.clear()
+            self._hide_text_edit()
+        finally:
+            self._text_input.blockSignals(False)
+
+    def _position_text_edit(self, img_x: float, img_y: float, angle: float,
+                            color: QColor, font_size: int, initial: str,
+                            center: bool) -> None:
+        px = max(10, int(font_size * self._scale))
+        est_w = max(80, int(max(len(initial or 'M'), 4) * font_size * 0.65 * self._scale) + 16)
+        est_h = px + 10
+        dx = int(img_x * self._scale)
+        dy = int(img_y * self._scale)
+        if center:
+            x = dx - est_w // 2
+            y = dy - est_h // 2
+        else:
+            x = dx
+            y = dy
+        x = max(0, min(x, self._disp_w - est_w))
+        y = max(0, min(y, self._disp_h - est_h))
+        self._text_input.setStyleSheet(
+            "QLineEdit {"
+            f"  color: {color.name()};"
+            "  background: rgba(0, 0, 0, 90);"
+            "  border: 1px dashed rgba(255,255,255,180);"
+            "  font-weight: bold;"
+            f"  font-size: {px}px;"
+            "  padding: 2px 4px;"
+            "}")
+        self._text_input.setGeometry(x, y, est_w, est_h)
+        self._text_input.setText(initial)
+        self._text_input.show()
+        self._text_input.raise_()
+        self._text_input.setFocus(Qt.OtherFocusReason)
+        self._text_input.selectAll()
+
+    def _begin_text_edit(
+        self,
+        shape_idx: int = -1,
+        img_x: float = 0.0,
+        img_y: float = 0.0,
+        angle: float = 0.0,
+        initial: str = '',
+        color: Optional[QColor] = None,
+        font_size: Optional[int] = None,
+        center: bool = False,
+    ) -> None:
+        self._commit_text_edit()
+        col = color if color is not None else self._color
+        fs = font_size if font_size is not None else self._font_size
+        self._text_edit_shape_idx = shape_idx
+        self._text_edit_img_x = img_x
+        self._text_edit_img_y = img_y
+        self._position_text_edit(img_x, img_y, angle, col, fs, initial, center)
+        self._canvas.update()
+
+    def _begin_edit_shape_text(self, idx: int) -> None:
+        if idx < 0 or idx >= len(self._shapes):
+            return
+        self._selected_idx = idx
+        shape = self._shapes[idx]
+        if shape['type'] == 'text':
+            self._begin_text_edit(
+                shape_idx=idx,
+                img_x=shape['x'],
+                img_y=shape['y'],
+                angle=0.0,
+                initial=shape.get('text', ''),
+                color=shape['color'],
+                font_size=shape.get('font_size', self._font_size),
+                center=False,
+            )
+        else:
+            anchor = self._shape_label_anchor(shape, self._font_size)
+            self._begin_text_edit(
+                shape_idx=idx,
+                img_x=anchor['x'],
+                img_y=anchor['y'],
+                angle=anchor['angle'],
+                initial=shape.get('label', ''),
+                color=anchor['color'],
+                font_size=anchor['font_size'],
+                center=True,
+            )
+
     # ------------------------------------------------------------------
     # Undo
     # ------------------------------------------------------------------
 
     def _undo(self) -> None:
+        if self._text_edit_active():
+            self._cancel_text_edit()
+            return
         if self._shapes:
             self._shapes.pop()
             if self._selected_idx >= len(self._shapes):
@@ -12099,7 +12510,7 @@ class SnapshotEditorDialog(QDialog):
         for i in range(len(self._shapes) - 1, -1, -1):
             s = self._shapes[i]
             t = s['type']
-            if t in ('arrow', 'line', 'dash'):
+            if t in self._LINE_TOOLS:
                 d = _point_to_seg_dist(x, y, s['x1'], s['y1'], s['x2'], s['y2'])
                 if d < thr + s.get('width', 2):
                     return i
@@ -12113,7 +12524,7 @@ class SnapshotEditorDialog(QDialog):
                 fs = s['font_size']
                 approx_w = len(s['text']) * fs * 0.65
                 if (s['x'] - thr <= x <= s['x'] + approx_w + thr and
-                        s['y'] - fs - thr <= y <= s['y'] + thr):
+                        s['y'] - thr <= y <= s['y'] + fs + thr):
                     return i
         return -1
 
@@ -12121,7 +12532,7 @@ class SnapshotEditorDialog(QDialog):
         """Translate shape at *idx* by (dx, dy) in image coordinates."""
         s = self._shapes[idx]
         t = s['type']
-        if t in ('arrow', 'line', 'dash'):
+        if t in self._LINE_TOOLS:
             s['x1'] += dx;  s['y1'] += dy
             s['x2'] += dx;  s['y2'] += dy
         elif t in ('rect', 'circle'):
@@ -12129,9 +12540,40 @@ class SnapshotEditorDialog(QDialog):
         elif t == 'text':
             s['x'] += dx;  s['y'] += dy
 
+    def _duplicate_shape(self, idx: int) -> int:
+        """Append a copy of shape *idx* and return the new index."""
+        s = self._shapes[idx]
+        t = s['type']
+        dup: dict = {'type': t, 'color': QColor(s['color'])}
+        if t in self._LINE_TOOLS:
+            dup['width'] = s.get('width', 2)
+            dup['x1'] = s['x1']
+            dup['y1'] = s['y1']
+            dup['x2'] = s['x2']
+            dup['y2'] = s['y2']
+        elif t in ('rect', 'circle'):
+            dup['width'] = s.get('width', 2)
+            dup['x'] = s['x']
+            dup['y'] = s['y']
+            dup['w'] = s['w']
+            dup['h'] = s['h']
+        elif t == 'text':
+            dup['font_size'] = s['font_size']
+            dup['x'] = s['x']
+            dup['y'] = s['y']
+            dup['text'] = s['text']
+        if s.get('label'):
+            dup['label'] = s['label']
+        if s.get('label_font_size'):
+            dup['label_font_size'] = s['label_font_size']
+        if s.get('dashed') or t == 'dash':
+            dup['dashed'] = True
+        self._shapes.append(dup)
+        return len(self._shapes) - 1
+
     def _get_control_points(self, shape: dict) -> list:
         t = shape['type']
-        if t in ('line', 'arrow', 'dash'):
+        if t in self._LINE_TOOLS:
             return [
                 ('start', shape['x1'], shape['y1']),
                 ('end', shape['x2'], shape['y2']),
@@ -12183,7 +12625,7 @@ class SnapshotEditorDialog(QDialog):
         s = self._shapes[idx]
         t = s['type']
 
-        if t in ('line', 'arrow', 'dash'):
+        if t in self._LINE_TOOLS:
             if handle == 'start':
                 s['x1'], s['y1'] = _snap_line_end(s['x2'], s['y2'], x, y, force_snap)
             elif handle == 'end':
@@ -12239,7 +12681,7 @@ class SnapshotEditorDialog(QDialog):
         if t == 'text':
             fs = shape.get('font_size', 20)
             w = len(shape.get('text', '')) * fs * 0.65
-            return shape['x'], shape['y'] - fs, w, fs
+            return shape['x'], shape['y'], w, fs
         x1 = min(shape['x1'], shape['x2'])
         y1 = min(shape['y1'], shape['y2'])
         return x1, y1, abs(shape['x2'] - shape['x1']), abs(shape['y2'] - shape['y1'])
@@ -12266,6 +12708,25 @@ class SnapshotEditorDialog(QDialog):
     # Shape rendering
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _shape_is_dashed(shape: dict) -> bool:
+        return bool(shape.get('dashed')) or shape.get('type') == 'dash'
+
+    def _stroke_pen(
+        self,
+        col: QColor,
+        w: float,
+        dashed: bool = False,
+        cap=Qt.RoundCap,
+        join=Qt.RoundJoin,
+    ) -> QPen:
+        if dashed:
+            pen = QPen(col, w, Qt.CustomDashLine, cap, join)
+            pen.setDashPattern([20.0 / max(w, 1), 10.0 / max(w, 1)])
+        else:
+            pen = QPen(col, w, Qt.SolidLine, cap, join)
+        return pen
+
     def _paint_shapes(
         self,
         painter: QPainter,
@@ -12281,32 +12742,118 @@ class SnapshotEditorDialog(QDialog):
                 self._paint_text(painter, shape, override_color, extra_width)
             elif t == 'arrow':
                 self._paint_arrow(painter, shape, col, w, extra_width)
-            elif t in ('line', 'dash'):
-                if t == 'dash':
-                    # Use CustomDashLine with pixel-normalised values so that
-                    # both the white-outline pass (width+2) and the colour pass
-                    # (width) produce the same absolute dash/gap lengths and
-                    # therefore stay perfectly aligned.
-                    pen = QPen(col, w, Qt.CustomDashLine, Qt.RoundCap, Qt.RoundJoin)
-                    pen.setDashPattern([20.0 / max(w, 1), 10.0 / max(w, 1)])
-                else:
-                    pen = QPen(col, w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-                painter.setPen(pen)
+            elif t == 'dblarrow':
+                self._paint_dbl_arrow(painter, shape, col, w, extra_width)
+            elif t == 'line' or t == 'dash':
+                dashed = self._shape_is_dashed(shape)
+                painter.setPen(self._stroke_pen(col, w, dashed))
                 painter.setBrush(Qt.NoBrush)
-                painter.drawLine(QPointF(shape['x1'], shape['y1']),
-                                 QPointF(shape['x2'], shape['y2']))
+                self._draw_line_with_label_gap(
+                    painter,
+                    shape['x1'], shape['y1'], shape['x2'], shape['y2'],
+                    self._line_label_gap_half(shape),
+                )
             elif t == 'rect':
-                pen = QPen(col, w, Qt.SolidLine, Qt.SquareCap, Qt.MiterJoin)
+                dashed = self._shape_is_dashed(shape)
+                pen = self._stroke_pen(col, w, dashed, Qt.SquareCap, Qt.MiterJoin)
                 painter.setPen(pen)
                 painter.setBrush(Qt.NoBrush)
                 painter.drawRect(QRectF(shape['x'], shape['y'],
                                         shape['w'], shape['h']))
             elif t == 'circle':
-                pen = QPen(col, w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-                painter.setPen(pen)
+                dashed = self._shape_is_dashed(shape)
+                painter.setPen(self._stroke_pen(col, w, dashed))
                 painter.setBrush(Qt.NoBrush)
                 painter.drawEllipse(QRectF(shape['x'], shape['y'],
                                            shape['w'], shape['h']))
+            if t != 'text' and shape.get('label') and not self._is_editing_shape_label(shape):
+                self._paint_attached_label(painter, shape, override_color, extra_width)
+
+    @staticmethod
+    def _label_angle_for_line(x1: float, y1: float, x2: float, y2: float) -> float:
+        angle = math.atan2(y2 - y1, x2 - x1)
+        if angle > math.pi / 2:
+            angle -= math.pi
+        elif angle < -math.pi / 2:
+            angle += math.pi
+        return angle
+
+    def _line_label_gap_half(self, shape: dict) -> float:
+        label = shape.get('label')
+        if not label:
+            return 0.0
+        fs = shape.get('label_font_size', self._font_size)
+        return max(len(label) * fs * 0.65, fs) / 2.0 + 6.0
+
+    @staticmethod
+    def _draw_line_with_label_gap(
+        painter: QPainter,
+        x1: float, y1: float, x2: float, y2: float,
+        gap_half: float,
+    ) -> None:
+        if gap_half <= 0:
+            painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+            return
+        dx, dy = x2 - x1, y2 - y1
+        length = math.hypot(dx, dy)
+        if length < 1:
+            return
+        if gap_half * 2.2 >= length:
+            painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+            return
+        ux, uy = dx / length, dy / length
+        mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+        painter.drawLine(
+            QPointF(x1, y1), QPointF(mx - ux * gap_half, my - uy * gap_half))
+        painter.drawLine(
+            QPointF(mx + ux * gap_half, my + uy * gap_half), QPointF(x2, y2))
+
+    def _paint_attached_label(
+        self,
+        painter: QPainter,
+        shape: dict,
+        override_color: Optional[QColor] = None,
+        extra_width: int = 0,
+    ) -> None:
+        label = shape.get('label')
+        if not label or shape['type'] == 'text':
+            return
+        t = shape['type']
+        col = override_color if override_color is not None else shape['color']
+        fs = shape.get('label_font_size', self._font_size)
+        font = QFont()
+        font.setBold(True)
+        font.setPixelSize(fs)
+        fm = QFontMetrics(font)
+        tw = fm.horizontalAdvance(label)
+
+        if t in self._LINE_TOOLS:
+            cx = (shape['x1'] + shape['x2']) / 2.0
+            cy = (shape['y1'] + shape['y2']) / 2.0
+            angle = self._label_angle_for_line(
+                shape['x1'], shape['y1'], shape['x2'], shape['y2'])
+        elif t in ('rect', 'circle'):
+            cx = shape['x'] + shape['w'] / 2.0
+            cy = shape['y'] + shape['h'] / 2.0
+            angle = 0.0
+        else:
+            return
+
+        painter.save()
+        painter.translate(cx, cy)
+        if angle:
+            painter.rotate(math.degrees(angle))
+        path = QPainterPath()
+        path.addText(QPointF(-tw / 2.0, fm.ascent() / 2.0), font, label)
+        if override_color is not None:
+            stroke_w = 4 + extra_width * 2
+            painter.strokePath(
+                path,
+                QPen(col, stroke_w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        else:
+            painter.setPen(Qt.NoPen)
+            painter.fillPath(path, col)
+        painter.restore()
 
     def _paint_arrow(
         self,
@@ -12324,11 +12871,14 @@ class SnapshotEditorDialog(QDialog):
         angle = math.atan2(y2 - y1, x2 - x1)
         arrow_len = max(12.0, shape['width'] * 4.0)
         arrow_ang = math.pi / 6.0
+        tail_x = x2 - arrow_len * 0.6 * math.cos(angle)
+        tail_y = y2 - arrow_len * 0.6 * math.sin(angle)
 
         # Shaft
-        painter.setPen(QPen(col, w, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setPen(self._stroke_pen(col, w, self._shape_is_dashed(shape)))
         painter.setBrush(Qt.NoBrush)
-        painter.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+        self._draw_line_with_label_gap(
+            painter, x1, y1, tail_x, tail_y, self._line_label_gap_half(shape))
 
         # Arrowhead polygon
         tip = QPointF(x2, y2)
@@ -12342,6 +12892,44 @@ class SnapshotEditorDialog(QDialog):
         painter.setBrush(QBrush(col))
         painter.drawPolygon(poly)
 
+    def _paint_dbl_arrow(
+        self,
+        painter: QPainter,
+        shape: dict,
+        col: QColor,
+        w: int,
+        extra_width: int,
+    ) -> None:
+        x1, y1 = shape['x1'], shape['y1']
+        x2, y2 = shape['x2'], shape['y2']
+        length = math.hypot(x2 - x1, y2 - y1)
+        if length < 1:
+            return
+        angle = math.atan2(y2 - y1, x2 - x1)
+        arrow_len = max(12.0, shape['width'] * 4.0)
+        arrow_ang = math.pi / 6.0
+        inset = arrow_len * 0.6
+
+        sx = x1 + inset * math.cos(angle)
+        sy = y1 + inset * math.sin(angle)
+        ex = x2 - inset * math.cos(angle)
+        ey = y2 - inset * math.sin(angle)
+        painter.setPen(self._stroke_pen(col, w, self._shape_is_dashed(shape)))
+        painter.setBrush(Qt.NoBrush)
+        self._draw_line_with_label_gap(
+            painter, sx, sy, ex, ey, self._line_label_gap_half(shape))
+
+        stroke_w = max(1, extra_width)
+        painter.setPen(QPen(col, stroke_w, Qt.SolidLine))
+        painter.setBrush(QBrush(col))
+        for tip_x, tip_y, ang in ((x2, y2, angle), (x1, y1, angle + math.pi)):
+            tip = QPointF(tip_x, tip_y)
+            p1 = QPointF(tip_x - arrow_len * math.cos(ang - arrow_ang),
+                         tip_y - arrow_len * math.sin(ang - arrow_ang))
+            p2 = QPointF(tip_x - arrow_len * math.cos(ang + arrow_ang),
+                         tip_y - arrow_len * math.sin(ang + arrow_ang))
+            painter.drawPolygon(QPolygonF([tip, p1, p2]))
+
     def _paint_text(
         self,
         painter: QPainter,
@@ -12351,9 +12939,12 @@ class SnapshotEditorDialog(QDialog):
     ) -> None:
         col = override_color if override_color is not None else shape['color']
         font = QFont()
+        font.setBold(True)
         font.setPixelSize(shape['font_size'])
+        fm = QFontMetrics(font)
+        baseline_y = shape['y'] + fm.ascent()
         path = QPainterPath()
-        path.addText(shape['x'], shape['y'], font, shape['text'])
+        path.addText(shape['x'], baseline_y, font, shape['text'])
         if override_color is not None:
             # Outline pass: stroke path with a wider pen (4 px -> 2 px halo each side)
             stroke_w = 4 + extra_width * 2
@@ -12370,6 +12961,7 @@ class SnapshotEditorDialog(QDialog):
 
     def _render_final_pixmap(self) -> QPixmap:
         """Composite the original image and all annotations at full resolution."""
+        self._commit_text_edit()
         result = QPixmap(self._orig_pixmap)
         painter = QPainter(result)
         try:
@@ -14715,7 +15307,7 @@ class MainWindow(QMainWindow):
         self._stats_panel.task_clicked.connect(self._on_legend_task_clicked)
         self._stats_panel.segment_jump.connect(self._on_segment_jump)
         self._stats_panel.segment_select.connect(self._on_segment_select)
-        self._stats_panel._btn_compare_mig.clicked.connect(self._open_migration_compare)
+        self._stats_panel._btn_compare_mig.clicked.connect(self._open_trace_compare)
         stats_dock = QDockWidget("Statistics", self)
         stats_dock.setObjectName("dock_statistics")
         stats_dock.setWidget(self._stats_panel)
@@ -16486,13 +17078,13 @@ class MainWindow(QMainWindow):
             view._scene.set_migrated_only_filter(enabled)
 
     @_dialog_guard
-    def _open_migration_compare(self, _checked: bool = False) -> None:
+    def _open_trace_compare(self, _checked: bool = False) -> None:
         if len(self._tabs) < 2:
             QMessageBox.information(
-                self, "Compare Migrations",
-                "Open at least two trace tabs to compare migrations.")
+                self, "Trace Compare",
+                "Open at least two trace tabs to compare traces.")
             return
-        _exec_centred(_MigrationCompareDialog(self, parent=self), self)
+        _exec_centred(_TraceCompareDialog(self, parent=self), self)
 
     def _scroll_view_to_task(self, task: str) -> None:
         """Scroll the orthogonal axis to bring *task*'s row/column fully into view.

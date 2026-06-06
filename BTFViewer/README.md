@@ -30,17 +30,19 @@ Histogram of Execution Time:
 - **Viewport culling** — only visible rows/columns and segments are rendered; no slowdown on large traces
 - **Multi-tab traces** — open several `.btf` files at once (Desktop: closable tabs; Web: tab bar under the toolbar). Session tabs, active tab, and per-tab zoom/cursors are restored from `btf_viewer.rc` on launch (Desktop)
 - **Measurement cursors** — Desktop supports 2–8 cursors (default: 4); Web supports up to 4 cursors
-- **Core migration analysis** — tasks that run on multiple cores: **Core Migrations** stats table, **Migrated tasks only** legend filter, **Compare Tabs…** across open traces (Desktop + Web), and Find **Migrations** mode (Desktop)
+- **Trace compare** — with 2+ tabs open, **Trace Compare…** in the Statistics panel diffs **Summary**, **Top Tasks**, and **Core Migrations** side-by-side (Desktop + Web; full-trace metrics, not cursor scope)
+- **Core migration analysis** — detect tasks that run on multiple cores; **Core Migrations** stats table (ping-pong, STI correlation, gap-after vs other gaps), **Migrated tasks only** legend filter, and Find **Migrations** mode (Desktop)
 - **Cursor-scoped statistics** — with 2+ cursors, the Statistics panel can limit all metrics (CPU%, execution slices, blocking time, inter-arrival, scheduling summary, exports, and charts) to the window from C1 through the last cursor; toggle **Limit to cursor range (C1–Cn)** (Desktop + Web)
 - **Cursor range summary** — with 2+ cursors, Desktop also shows a quick min/max/avg segment summary in the status bar; Web shows range stats in the **Cursors** panel
 - **Task highlight** — hover or click any task label or Legend row to highlight all its segments
-- **Dockable Legend panel** — colour swatches for every task, with a search box and the same highlight interaction
+- **Dockable Legend panel** — colour swatches for every task, with a search box, **Migrated tasks only** filter, and the same highlight interaction
 - **Dockable Statistics panel** — per-core CPU utilisation, top tasks, scheduling summary (context switches, core-gap avg/max), and collapsible metric tables
 - **Tag View** — inspect tag channels/events (`tag_event`, `tag0_event` … `tag7_event`) alongside task/core activity
 - **Metrics tables** — Execution Time Per Slice, **Blocking Time** (off-CPU gap between activations), and Inter-Arrival (runs, min/avg/max/p95, CPU%); click **Min** / **Max** (dotted underline) to jump to the BCET / WCET slice or the shortest / longest gap (Desktop + Web)
 - **Metrics distribution charts** — click any row in the Execution Time, Blocking Time, or Inter-Arrival table to open a scatter-plot + histogram popup for that task; charts live-update when cursors move or cursor-range scope is toggled (Desktop + Web). On Desktop, each trace tab remembers its own open chart when you switch tabs
 - **Segment tooltips** — hover any segment bar for duration, slice index on core, previous/next task on that core, and gap before the slice
-- **CPU Load Graph** — bar chart below the timeline showing per-core CPU utilisation; row labels show the **visible-window average** and, with 2+ cursors, a cursor-range average (`· C:xx%`); toggle with the **Load** toolbar button
+- **CPU Load Graph** — bar chart below the timeline showing per-core CPU utilisation; row labels show the **visible-window average** and, with 2+ cursors, a cursor-range average (`· C:xx%`); toggle with the **Load** toolbar button; drag the divider between timeline and CPU load to resize (Desktop + Web)
+- **Resizable panels** — drag dividers between timeline and CPU load, dock panels (Desktop), the right-side panel (Web), and metric table sections in Statistics (Desktop + Web); splitter and table heights persist in `btf_viewer.rc` on Desktop
 - **STI event markers** — software trace items rendered as coloured diamond markers
 - **Find & Jump** — search for any task name; `F3` / `Shift+F3` steps through all matching segments
 - **Bookmarks & Annotations** — mark important timestamps and attach free-text notes; persisted per trace file in `btf_viewer.rc`
@@ -186,7 +188,20 @@ A bar chart below the timeline shows per-core (or total) CPU utilisation over th
 - **Row labels** — each row shows average load over the **currently visible** time window; with 2+ cursors placed, labels also show the average over the cursor range (`· C:xx%`), and the graph shades the C1–Cn window in blue.
 - **Expand / Collapse** — in Core View click a core row header to collapse it to a compact bar.
 - **Hover** — moving the pointer over the timeline projects a live cursor onto the load graph; a badge shows load % at the hover time.
+- **Resize** — drag the horizontal bar between the timeline and CPU load panel to change the CPU load height.
 - **Cursors, bookmarks & annotations** are also mirrored in the load graph at their exact time positions.
+
+### Right panel & layout
+
+The right side holds **Cursor / Bookmark** and **Statistics** pages (tab bar at the bottom of the panel).
+
+- **Resize** — drag the vertical bar between the timeline and the right panel to change panel width.
+- **Legend** — task colour swatches, search filter, and **Migrated tasks only** (hide tasks that never left their first core).
+- **Statistics** — same collapsible sections as the desktop viewer; click **Min** / **Max** in metric tables to jump to the corresponding slice; **Trace Compare…** when 2+ trace tabs are open.
+
+### Multi-tab traces (Web)
+
+Same tab bar behaviour as desktop: each `.btf` opens in its own tab with independent cursors, marks, zoom, and chart state. **Trace Compare…** uses any two loaded tabs — useful for before/after or build-to-build diffs.
 
 ### Statistics panel — cursor-scoped metrics
 
@@ -207,19 +222,23 @@ Uncheck the box to return to full-trace statistics.
 
 Below the scope checkbox, a **scheduling summary** line shows context-switch count and average/max core gap (idle time between consecutive slices on each core). Metric tables (**Core Utilisation**, **Top Tasks**, **Core Migrations**, **Execution Time**, **Blocking Time**, **Inter-Arrival**) are **collapsible** — click a section title to expand or collapse it. Drag the handle below a metric table to resize its height.
 
-**Core Migrations** lists tasks that ran on two or more cores (see [Core migration analysis](#core-migration-analysis)). **Compare Tabs…** (footer, next to Export) opens a dialog to diff migration metrics between two open trace tabs; it requires at least two loaded tabs and uses **full-trace** counts (not cursor scope).
+**Core Migrations** lists tasks that ran on two or more cores (see [Core migration analysis](#core-migration-analysis)). **Trace Compare…** (footer, next to Export) opens a dialog with **Summary**, **Top Tasks**, and **Core Migrations** tabs to diff two open trace tabs; it requires at least two loaded tabs and uses **full-trace** metrics (not cursor scope).
 
 ### Snapshot Editor
 
 Click the **Shot** toolbar button (or press `S` when focus is not in a text field) to capture the current timeline view and open the **Snapshot Editor**:
 
-- Annotate with arrows, lines, rectangles, circles, and text before exporting.
+- Annotate with arrows, lines, double arrows, rectangles, circles, and text before exporting.
+- Check **Dash** to draw dashed strokes (lines, arrows, rectangles, circles).
+- Click a shape to select and drag it; **Ctrl+click** (or **Cmd+click** on macOS) duplicates the shape so you can place the copy.
+- **Double-click** any shape to add or edit its label inline — text objects edit in place; lines and arrows place centered text aligned to the line; rectangles and circles place centered text.
+- Single-click with the **Text** tool places a standalone text label inline.
 - **Save PNG** or **Copy to Clipboard** from the editor footer.
 - When the **Load** graph is visible, the capture includes the CPU load panel below the timeline.
 
 ### Metrics Distribution Charts
 
-In the **Statistics** panel, the **Execution Time**, **Blocking Time**, and **Inter-Arrival** tables each have a small chart icon (📈) on every row. Click it to open a floating chart popup for that task:
+In the **Statistics** panel, click any row in the **Execution Time**, **Blocking Time**, or **Inter-Arrival** table to open a floating chart popup for that task:
 
 - **Scatter plot** — every individual slice duration, blocking gap, or inter-arrival gap plotted in arrival order, so you can spot trends or outliers.
 - **Histogram** — a bar chart showing the distribution of durations, revealing multimodal behaviour or long tails.
@@ -370,6 +389,7 @@ The Legend lists every task with its colour swatch and `Name[id]` label.
 - The panel is a dockable window; it can be detached, closed, and re-opened via its **✕** button.
 - Toggle visibility from **Settings → Display → Legend panel** (`Ctrl+,`).
 - A **Search** box at the top filters the displayed task list.
+- **Migrated tasks only** (Web: checkbox in Legend; Desktop: same filter in the legend dock) hides tasks that ran on a single core only — useful with [core migration analysis](#core-migration-analysis).
 - Hover and click Legend rows to highlight tasks using the same rules as the label column.
 
 ---
@@ -393,8 +413,12 @@ The Legend lists every task with its colour swatch and `Name[id]` label.
 
 **File → Save as Image (PNG)…** (`Ctrl+S`), the toolbar **Save PNG** / **Shot** buttons, and the plot-dialog **Export PNG** action all capture the current viewport and open the **Snapshot Editor** — they do **not** write a file immediately.
 
-In the editor you can draw annotation shapes (arrow, line, dashed line, rectangle, circle, text) and then:
+In the editor you can draw annotation shapes (arrow, double arrow, line, rectangle, circle, text) and then:
 
+- Check **Dash** to draw dashed strokes (lines, arrows, rectangles, circles).
+- Click a shape to select and drag it; **Ctrl+click** duplicates the shape (then drag to position the copy).
+- **Double-click** any shape to add or edit its label inline (lines/arrows: centered, aligned to the segment; rectangles/circles: centered).
+- Single-click with the **Text** tool adds a standalone text label inline.
 - **Save PNG…** — write the annotated image to disk (includes CPU load graph when **Load** is on).
 - **Copy to Clipboard** — copy the annotated image.
 
@@ -473,6 +497,8 @@ The **Statistics** dock appears at the bottom of the window. Toggle it from **Se
 
 At the top, **Limit to cursor range (C1–Cn)** restricts all statistics to the time window from the first placed cursor through the last (requires 2+ cursors). Section titles show **(cursor range)** when scoped. Clearing all cursors returns to full-trace statistics immediately.
 
+**Layout:** metric tables are **collapsible** (click a section title) and **resizable** (drag the thin handle below each table). On Desktop, drag the splitter between the timeline and CPU load graph to resize that pane; sizes are saved in `btf_viewer.rc`.
+
 It shows:
 
 - **Summary** — span, task/segment/STI counts (scoped when the checkbox is on)
@@ -484,11 +510,11 @@ It shows:
 - **Blocking Time** — off-CPU gap between consecutive activations of the same task (min/avg/max/p95); click a row for a distribution chart; click **Min** / **Max** to jump to the slice at the shortest / longest off-CPU gap (collapsible)
 - **Inter-Arrival Time** — same statistics for gaps between task activations; click **Min** / **Max** to jump to the activation at the shortest / longest inter-arrival gap (collapsible)
 
-**Export CSV** / **Export HTML** respect the current cursor scope. **Compare Tabs…** compares core-migration counts between two open trace tabs (full trace, not cursor scope). Open metrics charts update live when cursors move or scope is toggled; each trace tab remembers its own open chart when you switch tabs.
+**Export CSV** / **Export HTML** respect the current cursor scope. **Trace Compare…** compares summary, top tasks, and core migrations between two open tabs (full trace, not cursor scope). Open metrics charts update live when cursors move or scope is toggled; each trace tab remembers its own open chart when you switch tabs.
 
 ### Core migration analysis
 
-A **migration** is recorded when consecutive slices of the same task (merge-key) run on different cores. Migrations are detected at parse time from the segment timeline — there are no separate markers drawn on the timeline; use the statistics table, Find mode (Desktop), or **Compare Tabs…** to inspect them.
+A **migration** is recorded when consecutive slices of the same task (merge-key) run on different cores. Migrations are detected at parse time from the segment timeline — there are no separate markers drawn on the timeline; use the **Core Migrations** table, **Trace Compare…**, or Find **Migrations** mode (Desktop) to inspect them.
 
 | Feature | Desktop | Web |
 |---------|---------|-----|
@@ -496,9 +522,11 @@ A **migration** is recorded when consecutive slices of the same task (merge-key)
 | **Core Migrations** stats table | ✓ | ✓ |
 | Cursor-scoped migration stats | ✓ | ✓ |
 | Resizable metric table height (drag handle below table) | ✓ | ✓ |
+| Resizable timeline / CPU load divider | ✓ | ✓ |
+| Resizable right panel / dock width | ✓ (docks) | ✓ |
 | **Min** / **Max** slice links (execution / blocking / inter-arrival) | ✓ | ✓ |
 | Find bar **Migrations** mode | ✓ | — |
-| **Compare Tabs…** (2+ open traces) | ✓ | ✓ |
+| **Trace Compare…** (2+ open traces) | ✓ | ✓ |
 | Core View: dim other tasks when one is locked | ✓ | ✓ |
 
 **Legend panel:** the core-tint key explains Task View colouring by core. Check **Migrated tasks only** to hide tasks that never left their first core.
@@ -517,15 +545,32 @@ A **migration** is recorded when consecutive slices of the same task (merge-key)
 
 Click a row to highlight that task on the timeline. Drag the resize handle below the table to show more or fewer rows.
 
-#### Compare Tabs…
+#### Trace Compare…
 
-Compare migration metrics side-by-side for two traces you already have open:
+Compare two traces you already have open side-by-side:
 
 1. Open at least **two** `.btf` files (Desktop: **File → Open** adds a tab; Web: **Open** adds a tab in the bar under the toolbar).
-2. In the **Statistics** panel footer, click **Compare Tabs…** (enabled when two or more tabs are loaded).
+2. In the **Statistics** panel footer, click **Trace Compare…** (enabled when two or more tabs are loaded).
 3. Choose **Trace A** and **Trace B** from the dropdowns.
+4. Switch between **Summary**, **Top Tasks**, and **Core Migrations** tabs.
 
-The dialog lists every task that migrated in either trace (by merge-key / task name):
+All compare views use the **full trace** (not cursor scope).
+
+**Summary** — high-level diff:
+
+| Metric | Notes |
+|--------|--------|
+| Span | Total trace duration |
+| Tasks / Segments / STI events | Counts |
+| Context switches | Total across all cores |
+| Core gap avg / max | Idle time between consecutive slices on each core |
+| Migrations (total) / Migrated tasks | Core-migration counts |
+
+Each row shows Trace A, Trace B, and **Δ** (signed difference).
+
+**Top Tasks** — top 10 user tasks by CPU% from each trace, unioned by display name (`Name[id]`). Tasks present in only one trace show **—** for the missing side.
+
+**Core Migrations** — same table as before:
 
 | Column | Meaning |
 |--------|---------|
@@ -628,6 +673,8 @@ Settings, window layout, bookmarks, and multi-tab state are stored in `btf_viewe
 | `[files]` `last_file` | Path of the active tab (legacy; also used as fallback when `open_tabs_json` is empty) |
 | `[tab_view]` `trace_<hash>` | Per-trace zoom level, fit mode, and cursor positions |
 | `[trace_state]` `trace_<hash>` | Per-trace bookmarks and annotations |
+| `[view]` `cpu_splitter_bottom_h` / `cpu_splitter_user_sized` | Timeline vs CPU load splitter height (Desktop) |
+| `[stats]` `table_height_<section>` | Per-section metric table heights in Statistics (Desktop) |
 | `[zoom]` / `[cursors]` | Zoom and cursors for the last active tab (legacy compatibility) |
 
 ---

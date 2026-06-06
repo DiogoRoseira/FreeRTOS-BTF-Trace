@@ -530,15 +530,15 @@
       <button
         class="action-btn"
         :disabled="!canCompareTabs"
-        title="Compare core-migration statistics between two open trace tabs"
+        title="Compare summary, top tasks, and core migrations between two open trace tabs"
         @click="compareOpen = true"
       >
-        Compare Tabs…
+        Trace Compare…
       </button>
     </div>
   </div>
 
-  <MigrationCompareDialog
+  <TraceCompareDialog
     v-if="compareOpen && canCompareTabs"
     :tabs="loadedTabs"
     @close="compareOpen = false"
@@ -825,7 +825,7 @@ import {
   findExtremeInterArrivalSegment,
 } from '../utils/statsAnalysis.js'
 import { migrationRows } from '../utils/migrationAnalysis.js'
-import MigrationCompareDialog from './MigrationCompareDialog.vue'
+import TraceCompareDialog from './TraceCompareDialog.vue'
 
 const props = defineProps({
   trace:   { type: Object, required: true },
