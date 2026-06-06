@@ -13,6 +13,7 @@
       :scroll-y="viewport.scrollY"
       :highlight-key="options.highlightKey"
       :show-sti="options.showSti !== false"
+      :migrated-only-filter="!!options.migratedOnlyFilter"
       @expand-toggle="onExpandToggle"
       @highlight-change="(k) => emit('highlightChange', k)"
       @highlight-click="(k) => emit('highlightClick', k)"
@@ -373,6 +374,8 @@ function paint() {
     showSti:          props.options.showSti !== false,
     stiLogScale:      !!props.options.stiLogScale,
     darkMode:         props.options.darkMode,
+    migratedOnlyFilter: !!props.options.migratedOnlyFilter,
+    lockedTaskKey:    props.options.viewMode === 'core' ? (props.options.lockedTaskKey ?? null) : null,
   }
   if (orientation.value === 'v') {
     renderVertical(ctx, props.trace, viewport, renderOpts)
@@ -912,7 +915,7 @@ watch([() => props.options.orientation, () => props.options.viewMode], () => {
   scheduleRender()
 })
 // Other visual options that affect segment rendering → full repaint
-watch([() => props.options.highlightKey, () => props.options.highlightSegment, () => props.options.showGrid, () => props.options.showSti, () => props.options.darkMode, () => props.options.stiLogScale], () => {
+watch([() => props.options.highlightKey, () => props.options.highlightSegment, () => props.options.showGrid, () => props.options.showSti, () => props.options.darkMode, () => props.options.stiLogScale, () => props.options.migratedOnlyFilter, () => props.options.lockedTaskKey], () => {
   scheduleRender()
 })
 // Marks are on the overlay — no full repaint needed

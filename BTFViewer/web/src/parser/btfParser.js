@@ -15,6 +15,7 @@
 import { bisectLeft, bisectRight } from '../utils/bisect.js'
 import { makeLodSummary } from '../utils/lod.js'
 import { parseTaskName, taskMergeKey, taskSortKey, resetStiColors } from '../utils/colors.js'
+import { buildMigrationIndex } from '../utils/migrationAnalysis.js'
 
 // LOD bin counts (match Python constants).
 const LOD_SUMMARY_BINS       = 4096
@@ -305,6 +306,7 @@ export function parseBtf(text, progressCallback) {
   for (const [mk, segs] of segsByMkBuild) {
     segsByMk.set(mk, segs.sort((a, b) => a.start - b.start))
   }
+  const { migrations, migrationsByMk } = buildMigrationIndex(segsByMk)
 
   // STI channels
   const stiChannels = [...new Set(stiEvents.map(e => e.target))].sort()
@@ -504,6 +506,10 @@ export function parseBtf(text, progressCallback) {
 
     // ---- Other ----
     taskCreateTimes,
+
+    // ---- Core migrations ----
+    migrations,
+    migrationsByMk,
   }
 }
 

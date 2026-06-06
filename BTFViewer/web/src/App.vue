@@ -80,27 +80,39 @@
         </div>
       </div>
       <div ref="leftPaneRef" class="left-pane">
-        <TimelinePanel
-          ref="timelinePanelRef"
-          :trace="trace"
-          :options="timelineOptions"
-          :cursors="cursors"
-          @cursors-change="cursors = $event"
-          @hover-time-change="cpuLoadHoverTime = $event"
-          @viewport-change="onTimelineViewportChange"
-          @highlight-change="(k) => timelineOptions.highlightKey = k ?? pinnedHighlightKey"
-          @highlight-click="onHighlightClick"
-          @segment-click="onSegmentClick"
-          @clear-selection="clearCpuLoadSelection"
-          @add-bookmark="onAddBookmark"
-          @add-annotation="onAddAnnotation"
-          @mark-move="onMoveMark"
-          @copy-screenshot="onCopyScreenshot"
-          @export-svg="onExportSvg"
+        <div class="timeline-wrap">
+          <TimelinePanel
+            ref="timelinePanelRef"
+            :trace="trace"
+            :options="timelineOptions"
+            :cursors="cursors"
+            @cursors-change="cursors = $event"
+            @hover-time-change="cpuLoadHoverTime = $event"
+            @viewport-change="onTimelineViewportChange"
+            @highlight-change="(k) => timelineOptions.highlightKey = k ?? pinnedHighlightKey"
+            @highlight-click="onHighlightClick"
+            @segment-click="onSegmentClick"
+            @clear-selection="clearCpuLoadSelection"
+            @add-bookmark="onAddBookmark"
+            @add-annotation="onAddAnnotation"
+            @mark-move="onMoveMark"
+            @copy-screenshot="onCopyScreenshot"
+            @export-svg="onExportSvg"
+          />
+        </div>
+
+        <div
+          v-if="trace && timelineOptions.showCpuLoad"
+          class="panel-resizer-h"
+          role="separator"
+          aria-label="Resize CPU load panel"
+          aria-orientation="horizontal"
+          @mousedown.prevent="onCpuLoadResizeStart"
         />
 
         <CpuLoadPanel
           v-if="trace && timelineOptions.showCpuLoad"
+          :style="{ height: cpuLoadPaneHeight + 'px', flexShrink: 0 }"
           :trace="trace"
           :viewport="timelineViewport"
           :view-mode="timelineOptions.viewMode"
@@ -225,6 +237,7 @@
                 :highlight-key="timelineOptions.highlightKey"
                 @highlight-change="(k) => { timelineOptions.highlightKey = k ?? pinnedHighlightKey; scheduleRender() }"
                 @highlight-click="onHighlightClick"
+                @migrated-filter-change="onMigratedFilterChange"
               />
             </div>
           </div>
@@ -237,6 +250,7 @@
               <StatisticsPanel
                 :trace="trace"
                 :cursors="cursors"
+                :tabs="tabs"
                 @highlight-task="onHighlightClick"
                 @select-segment="onStatsSelectSegment"
               />
@@ -607,6 +621,11 @@ const RIGHT_PANEL_MIN_W = 180
 const RIGHT_PANEL_MAX_W = 520
 let _rightPanelResize = null
 
+const cpuLoadPaneHeight = ref(180)
+const CPU_LOAD_MIN_H = 60
+const CPU_LOAD_MAX_H = 480
+let _cpuLoadResize = null
+
 const toastMsg     = ref('')
 const toastType    = ref('info')
 const toastVisible = ref(false)
@@ -632,6 +651,8 @@ const timelineOptions = reactive({
   marks:           [],
   highlightSegment: null,
   selectedMarkId:  null,
+  migratedOnlyFilter: false,
+  lockedTaskKey:   null,
 })
 const cpuLoadHoverTime = ref(null)
 
@@ -769,6 +790,7 @@ watch(activeTabId, () => {
   const tab = activeTab.value
   timelineOptions.highlightKey = tab?.pinnedHighlightKey ?? null
   timelineOptions.highlightSegment = tab?.highlightSegment ?? null
+  timelineOptions.lockedTaskKey = tab?.pinnedHighlightKey ?? null
   _navCache = tab ? getNavCache(tab) : null
   nextTick(() => syncTimelineViewport())
 })
@@ -1067,6 +1089,12 @@ function clearCpuLoadSelection() {
   highlightSegment.value = null
   timelineOptions.highlightKey = null
   timelineOptions.highlightSegment = null
+  timelineOptions.lockedTaskKey = null
+  scheduleRender()
+}
+
+function onMigratedFilterChange(enabled) {
+  timelineOptions.migratedOnlyFilter = !!enabled
   scheduleRender()
 }
 
@@ -1080,6 +1108,7 @@ function onHighlightClick(key) {
   timelineOptions.highlightSegment = null
   pinnedHighlightKey.value = nextKey
   timelineOptions.highlightKey = nextKey
+  timelineOptions.lockedTaskKey = nextKey
   // Scroll & center the task row in the timeline
   if (nextKey) timelinePanelRef.value?.scrollToTask(nextKey)
   scheduleRender()
@@ -1118,6 +1147,30 @@ function onRightPanelResizeEnd() {
   document.body.classList.remove('col-resizing')
   document.removeEventListener('mousemove', onRightPanelResizeMove)
   document.removeEventListener('mouseup', onRightPanelResizeEnd)
+}
+
+function onCpuLoadResizeStart(e) {
+  _cpuLoadResize = { startY: e.clientY, startH: cpuLoadPaneHeight.value }
+  document.body.classList.add('row-resizing')
+  document.addEventListener('mousemove', onCpuLoadResizeMove)
+  document.addEventListener('mouseup', onCpuLoadResizeEnd)
+}
+
+function onCpuLoadResizeMove(e) {
+  if (!_cpuLoadResize) return
+  const dy = _cpuLoadResize.startY - e.clientY
+  cpuLoadPaneHeight.value = Math.max(
+    CPU_LOAD_MIN_H,
+    Math.min(CPU_LOAD_MAX_H, _cpuLoadResize.startH + dy),
+  )
+  scheduleRender()
+}
+
+function onCpuLoadResizeEnd() {
+  _cpuLoadResize = null
+  document.body.classList.remove('row-resizing')
+  document.removeEventListener('mousemove', onCpuLoadResizeMove)
+  document.removeEventListener('mouseup', onCpuLoadResizeEnd)
 }
 
 function isTypingTarget(el) {
@@ -1267,6 +1320,7 @@ onBeforeUnmount(() => {
     _parseWorker = null
   }
   onRightPanelResizeEnd()
+  onCpuLoadResizeEnd()
   window.removeEventListener('keydown', onGlobalKeydown)
   document.removeEventListener('wheel', _onDocWheel, { capture: true })
 })
@@ -1494,6 +1548,42 @@ body {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+}
+
+.timeline-wrap {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.panel-resizer-h {
+  height: 8px;
+  flex-shrink: 0;
+  cursor: row-resize;
+  position: relative;
+  background: transparent;
+}
+
+.panel-resizer-h::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 3px;
+  height: 2px;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+
+.panel-resizer-h:hover::before {
+  background: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+body.row-resizing,
+body.row-resizing * {
+  cursor: row-resize !important;
+  user-select: none;
 }
 
 .loading-overlay {

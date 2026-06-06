@@ -478,6 +478,19 @@ class TaskSegment:
     core: str           # e.g. "Core_0"
 
 @dataclass
+class MigrationEvent:
+    """Core change between consecutive slices of the same logical task."""
+    ns: int
+    merge_key: str
+    from_core: str
+    to_core: str
+    gap_ns: int = 0
+
+# Ping-pong / STI-correlation windows in trace time units (~1 ms / 0.5 ms for us-scale).
+_MIGRATION_PING_PONG_WINDOW = 1000
+_MIGRATION_STI_WINDOW         = 500
+
+@dataclass
 class StiEvent:
     """An RTOS software trace item (mutex/semaphore/queue event, etc.)."""
     time: int
@@ -578,6 +591,9 @@ class BtfTrace:
     task_create_times: Dict[str, int]                                       = field(default_factory=dict)
     # Sorted timestamps from STI TICK events - rendered as ruler marks.
     tick_sti_times: List[int]                                               = field(default_factory=list)
+    # Core migrations: consecutive slices of the same merge-key on different cores.
+    migrations: List[MigrationEvent]                                        = field(default_factory=list)
+    migrations_by_mk: Dict[str, List[MigrationEvent]]                       = field(default_factory=dict)
 
 # ---------------------------------------------------------------------------
 # Task-name helpers
@@ -735,6 +751,126 @@ def _scheduling_stats(trace: "BtfTrace",
             gap = curr.start - prev.end
             gaps.append(gap if gap > 0 else 0)
     return ctx_switches, gaps
+
+def _task_cores_used(trace: "BtfTrace", merge_key: str) -> set:
+    return {s.core for s in trace.seg_map_by_merge_key.get(merge_key, ())}
+
+def _is_migrated_task(trace: "BtfTrace", merge_key: str) -> bool:
+    return len(_task_cores_used(trace, merge_key)) >= 2
+
+def _build_migration_index(
+    segs_by_mk: Dict[str, list],
+) -> Tuple[List[MigrationEvent], Dict[str, List[MigrationEvent]]]:
+    """Detect core changes between consecutive slices per merge-key."""
+    migrations: List[MigrationEvent] = []
+    by_mk: Dict[str, List[MigrationEvent]] = {}
+    for mk, segs in segs_by_mk.items():
+        if len(segs) < 2:
+            continue
+        raw = segs[0].task
+        _cid, _tid, tname = _parse_task_name(raw)
+        if _is_idle_task_name(tname) or tname == "TICK":
+            continue
+        for i in range(1, len(segs)):
+            prev, nxt = segs[i - 1], segs[i]
+            if prev.core == nxt.core:
+                continue
+            gap = max(0, nxt.start - prev.end)
+            ev = MigrationEvent(
+                ns=prev.end,
+                merge_key=mk,
+                from_core=prev.core,
+                to_core=nxt.core,
+                gap_ns=gap,
+            )
+            migrations.append(ev)
+            by_mk.setdefault(mk, []).append(ev)
+    migrations.sort(key=lambda m: m.ns)
+    return migrations, by_mk
+
+def _count_ping_pong(migs: List[MigrationEvent],
+                     window: int = _MIGRATION_PING_PONG_WINDOW) -> int:
+    """Count A→B→A core hops within *window* trace time units."""
+    if len(migs) < 3:
+        return 0
+    count = 0
+    for i in range(2, len(migs)):
+        a, b, c = migs[i - 2], migs[i - 1], migs[i]
+        if (b.ns - a.ns > window) or (c.ns - b.ns > window):
+            continue
+        if a.to_core == b.from_core and b.to_core == c.from_core and a.from_core == c.to_core:
+            count += 1
+    return count
+
+def _migration_sti_near_count(trace: "BtfTrace", migs: List[MigrationEvent],
+                              window: int = _MIGRATION_STI_WINDOW) -> int:
+    if not migs or not trace.sti_events:
+        return 0
+    sti_times = sorted(e.time for e in trace.sti_events)
+    count = 0
+    for m in migs:
+        lo = m.ns - window
+        hi = m.ns + window
+        i0 = bisect_left(sti_times, lo)
+        i1 = bisect_right(sti_times, hi)
+        if i1 > i0:
+            count += 1
+    return count
+
+def _migration_rows(trace: "BtfTrace",
+                    lo: Optional[int] = None, hi: Optional[int] = None
+                    ) -> List[tuple]:
+    """Rows for the Core Migrations stats table."""
+    scale = trace.time_scale
+    rows: List[tuple] = []
+    for mk in trace.tasks:
+        if not _is_migrated_task(trace, mk):
+            continue
+        segs = trace.seg_map_by_merge_key.get(mk, [])
+        migs = list(trace.migrations_by_mk.get(mk, ()))
+        if lo is not None and hi is not None:
+            migs = [m for m in migs if lo <= m.ns <= hi]
+            if not migs and not any(_seg_overlaps_range(s, lo, hi) for s in segs):
+                continue
+        cores = _task_cores_used(trace, mk)
+        core_time: Dict[str, int] = defaultdict(int)
+        for s in segs:
+            if lo is not None and hi is not None:
+                if not _seg_overlaps_range(s, lo, hi):
+                    continue
+                ov_lo = max(s.start, lo)
+                ov_hi = min(s.end, hi)
+            else:
+                ov_lo, ov_hi = s.start, s.end
+            core_time[s.core] += max(0, ov_hi - ov_lo)
+        total = sum(core_time.values())
+        if total <= 0:
+            continue
+        primary = max(core_time, key=core_time.get)
+        primary_pct = 100.0 * core_time[primary] / total
+        ping = _count_ping_pong(migs)
+        sti_near = _migration_sti_near_count(trace, migs)
+        gaps_after = [m.gap_ns for m in migs if m.gap_ns > 0]
+        all_gaps = _blocking_time_samples(segs, lo, hi)
+        avg_after = (sum(gaps_after) / len(gaps_after)) if gaps_after else 0
+        avg_other = (sum(all_gaps) / len(all_gaps)) if all_gaps else 0
+        raw = trace.task_repr.get(mk, mk)
+        disp = _task_display_name(raw)
+        cores_str = ", ".join(sorted(cores, key=_core_sort_key_tuple))
+        rows.append((
+            mk, disp, len(migs), len(cores), cores_str, primary, primary_pct,
+            ping, sti_near,
+            _format_time(int(avg_after), scale) if avg_after else "-",
+            _format_time(int(avg_other), scale) if avg_other else "-",
+        ))
+    rows.sort(key=lambda r: (-r[2], r[1].lower()))
+    return rows
+
+def _core_sort_key_tuple(c: str) -> tuple:
+    if c.startswith("Core_"):
+        tail = c[5:]
+        return (0, int(tail) if tail.isdigit() else sys.maxsize, c)
+    return (1, sys.maxsize, c)
 
 def _find_wcet_segment(segs: list,
                        lo: Optional[int] = None, hi: Optional[int] = None
@@ -1067,6 +1203,7 @@ def _parse_btf(filepath: str,
     segs_by_mk: Dict[str, list] = dict(segs_by_mk_build)
     for _lst in segs_by_mk.values():
         _lst.sort(key=_seg_start_key)
+    _migrations, _migrations_by_mk = _build_migration_index(segs_by_mk)
     def _core_sort_key(c: str):
         if c.startswith("Core_"):
             tail = c[5:]
@@ -1246,6 +1383,8 @@ def _parse_btf(filepath: str,
         core_task_seg_lod_ultra_starts=dict(_core_task_lod_ultra_starts),
         task_create_times=_task_create_times,
         tick_sti_times=sorted(tick_sti_times),
+        migrations=_migrations,
+        migrations_by_mk=dict(_migrations_by_mk),
     )
 
 # Timeline Widget
@@ -1880,6 +2019,7 @@ class TimelineScene(QGraphicsScene):
         self._row_gap:    int = ROW_GAP                 # gap between rows (px)
         self._hover_highlight: bool = _HOVER_HIGHLIGHT_ENABLED
         self._task_filter_q: str = ""
+        self._migrated_only_filter: bool = False
         # -- Viewport time bounds (updated at each rebuild for segment clipping) --
         # Set to None initially; _update_viewport_bounds() fills them from the
         # attached QGraphicsView, or falls back to the full trace time range.
@@ -2301,6 +2441,14 @@ class TimelineScene(QGraphicsScene):
             self.addItem(line)
             self._find_hit_items.append(line)
 
+    def _dim_brush_if_follow(self, brush: QBrush, merge_key: str) -> QBrush:
+        """Dim segments of other tasks when one task is locked in core view."""
+        if (self._view_mode != "core" or not self._locked_task
+                or self._locked_task == merge_key):
+            return brush
+        c = brush.color()
+        return QBrush(QColor(c.red(), c.green(), c.blue(), 45))
+
     # ------------------------------------------------------------------
     # Filtering
     # ------------------------------------------------------------------
@@ -2311,6 +2459,14 @@ class TimelineScene(QGraphicsScene):
         if q == self._task_filter_q:
             return
         self._task_filter_q = q
+        self.rebuild()
+
+    def set_migrated_only_filter(self, enabled: bool) -> None:
+        """When enabled, show only tasks that ran on 2+ cores."""
+        enabled = bool(enabled)
+        if enabled == self._migrated_only_filter:
+            return
+        self._migrated_only_filter = enabled
         self.rebuild()
 
     def set_timescale_per_px_default(self, v: float) -> None:
@@ -2704,12 +2860,12 @@ class TimelineScene(QGraphicsScene):
             line_col = QColor(0, 102, 204, 200)
             lbl_bg   = QColor(0, 102, 204, 230)
             lbl_txt  = QColor("#FFFFFF")
-        pen = QPen(line_col, 1.2 if not self._is_dark_ui else 1.0, Qt.DashLine)
-        pen.setDashPattern([3, 3])
+        hover_pen = QPen(line_col, 1.2 if not self._is_dark_ui else 1.0, Qt.DashLine)
+        hover_pen.setDashPattern([3, 3])
         if self._horizontal:
             x = self._label_width + self._ns_to_px(self._hover_ns)
             line = QGraphicsLineItem(x, 0, x, scene_r.height())
-            line.setPen(pen)
+            line.setPen(hover_pen)
             line.setZValue(25)
             self.addItem(line)
             self._hover_items.append(line)
@@ -2730,7 +2886,7 @@ class TimelineScene(QGraphicsScene):
             label_row_h = self._label_width
             y = label_row_h + self._ns_to_px(self._hover_ns)
             line = QGraphicsLineItem(0, y, scene_r.width(), y)
-            line.setPen(pen)
+            line.setPen(hover_pen)
             line.setZValue(25)
             self.addItem(line)
             self._hover_items.append(line)
@@ -3010,6 +3166,7 @@ class TimelineScene(QGraphicsScene):
         self._task_row_rects = {}
         self._hover_overlay_items = []   # clear() removed them from the scene
         self._hover_items = []             # clear() removed them from the scene
+        self._find_hit_items = []
         if self._trace is None:
             return
         if self._view_mode == "core":
@@ -3042,9 +3199,12 @@ class TimelineScene(QGraphicsScene):
     # ------------------------------------------------------------------
 
     def _task_merge_key_matches_filter(self, merge_key: str) -> bool:
+        tr = self._trace
+        if tr is not None and self._migrated_only_filter:
+            if not _is_migrated_task(tr, merge_key):
+                return False
         if not self._task_filter_q:
             return True
-        tr = self._trace
         if tr is None:
             return True
         raw = tr.task_repr.get(merge_key, merge_key)
@@ -3970,7 +4130,7 @@ class TimelineScene(QGraphicsScene):
 
                 pen_hl       = _complementary_pen(_row_color)
                 _task_pen_cs = _task_pen_dark(task_name)
-                _task_br_cs  = _task_brush(task_name)
+                _task_br_cs  = self._dim_brush_if_follow(_task_brush(task_name), _tmk)
                 seg_data: list = []
                 xs:       list = []
                 for i_s, seg in enumerate(_visible_segs(
@@ -4304,7 +4464,7 @@ class TimelineScene(QGraphicsScene):
 
                 pen_hl       = _complementary_pen(_row_color)
                 _task_pen_cs = _task_pen_dark(task_name)
-                _task_br_cs  = _task_brush(task_name)
+                _task_br_cs  = self._dim_brush_if_follow(_task_brush(task_name), _tmk)
                 seg_data: list = []
                 xs:       list = []
                 for i_s, seg in enumerate(_visible_segs(
@@ -7979,6 +8139,7 @@ class _LegendWidget(QWidget):
     task_clicked     = pyqtSignal(str)   # click: task merge key
     cancel_highlight = pyqtSignal()      # click on background -> cancel highlight
     filter_changed   = pyqtSignal(str)   # search text changed
+    migrated_filter_changed = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -8009,6 +8170,11 @@ class _LegendWidget(QWidget):
         )
         self._search.textChanged.connect(self._on_search_text_changed)
         outer.addWidget(self._search)
+        self._migrated_only_cb = QCheckBox("Migrated tasks only")
+        self._migrated_only_cb.setToolTip(
+            "Show only tasks that executed on two or more CPU cores")
+        self._migrated_only_cb.toggled.connect(self._on_migrated_only_toggled)
+        outer.addWidget(self._migrated_only_cb)
 
         # Sticky-search layout: only the legend rows scroll.
         self._list_host = QWidget()
@@ -8096,6 +8262,11 @@ class _LegendWidget(QWidget):
             header.setTextFormat(Qt.RichText)
             self._list_layout.addWidget(header)
 
+            tint_lbl = QLabel(self._core_tint_legend_html(is_dark))
+            tint_lbl.setTextFormat(Qt.RichText)
+            tint_lbl.setWordWrap(True)
+            self._list_layout.addWidget(tint_lbl)
+
             # trace.tasks contains merge keys; task_repr maps each to its raw name.
             for _mk in trace.tasks:
                 _rep_raw = trace.task_repr.get(_mk, _mk)
@@ -8113,6 +8284,10 @@ class _LegendWidget(QWidget):
         finally:
             self.setUpdatesEnabled(True)
 
+    def _on_migrated_only_toggled(self, checked: bool) -> None:
+        self.migrated_filter_changed.emit(bool(checked))
+        self._filter_tasks(self._search.text())
+
     def _on_search_text_changed(self, text: str) -> None:
         """Apply legend filter immediately, debounce expensive timeline rebuild."""
         self._filter_tasks(text)
@@ -8121,10 +8296,31 @@ class _LegendWidget(QWidget):
     def _filter_tasks(self, text: str) -> None:
         """Show / hide task and STI rows in the legend based on the search filter."""
         q = text.strip().lower()
+        trace = self._trace_ref
         for mk, row in self._task_rows.items():
-            row.setVisible(row.matches_filter(q))
+            visible = row.matches_filter(q)
+            if visible and self._migrated_only_cb.isChecked() and trace is not None:
+                visible = _is_migrated_task(trace, mk)
+            row.setVisible(visible)
         for key_lc, row_w in self._sti_rows:
             row_w.setVisible((not q) or (q in key_lc))
+
+    @staticmethod
+    def _core_tint_legend_html(is_dark: bool) -> str:
+        lines = ["<b>Core tints (Task View)</b>"]
+        tint_desc = {
+            "Core_0": "base colour",
+            "Core_1": "blue tint",
+            "Core_2": "green tint",
+            "Core_3": "red tint",
+        }
+        for core, desc in tint_desc.items():
+            col = _core_color(core)
+            lines.append(
+                f"<span style='color:{col};'>\u25a0</span> {core}: {desc}")
+        lines.append("<span style='color:#888888;'>\u25a0</span> Core_4+: grey tint")
+        color = "#AAAAAA" if is_dark else "#555555"
+        return f"<span style='color:{color}; font-size:8pt;'>" + "<br>".join(lines) + "</span>"
 
 # ===========================================================================
 # Metrics Plot Dialog
@@ -8719,6 +8915,140 @@ class _StatsTableHoverFilter(QObject):
         return False
 
 
+class _StatsSectionGrip(QWidget):
+    """Horizontal drag handle below a stats table to adjust its max height."""
+
+    height_changed = pyqtSignal(int)
+
+    _MIN_H = 80
+    _MAX_H = 480
+
+    def __init__(self, is_dark: bool, get_height_fn, parent=None) -> None:
+        super().__init__(parent)
+        self._is_dark = is_dark
+        self._get_height = get_height_fn
+        self._dragging = False
+        self._start_y = 0
+        self._start_h = 220
+        self.setFixedHeight(8)
+        self.setCursor(Qt.SizeVerCursor)
+        self.setToolTip("Drag to resize table height")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMouseTracking(True)
+
+    def set_dark(self, is_dark: bool) -> None:
+        self._is_dark = is_dark
+        self.update()
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton:
+            self._dragging = True
+            self._start_y = int(event.globalY())
+            self._start_h = self._get_height()
+            self.grabMouse()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._dragging:
+            delta = int(event.globalY()) - self._start_y
+            self.height_changed.emit(
+                max(self._MIN_H, min(self._MAX_H, self._start_h + delta)))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton and self._dragging:
+            self._dragging = False
+            if self.mouseGrabber() is self:
+                self.releaseMouse()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        p = QPainter(self)
+        c = QColor("#6688CC" if self.underMouse()
+                   else ("#555568" if self._is_dark else "#BBBBBB"))
+        y = self.height() // 2
+        p.setPen(QPen(c, 2))
+        p.drawLine(4, y, self.width() - 4, y)
+        p.end()
+
+
+class _MigrationCompareDialog(QDialog):
+    """Compare core-migration metrics between two open trace tabs."""
+
+    def __init__(self, win: "MainWindow", parent=None) -> None:
+        super().__init__(parent or win)
+        self.setWindowTitle("Compare Core Migrations")
+        self.setModal(True)
+        self.resize(720, 420)
+        lay = QVBoxLayout(self)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Trace A:"))
+        self._combo_a = QComboBox()
+        row.addWidget(self._combo_a, 1)
+        row.addWidget(QLabel("Trace B:"))
+        self._combo_b = QComboBox()
+        row.addWidget(self._combo_b, 1)
+        lay.addLayout(row)
+        self._table = QTableWidget(0, 6)
+        self._table.setHorizontalHeaderLabels(
+            ["Task", "Migrations A", "Migrations B", "Δ", "Ping-pong A", "Ping-pong B"])
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        self._table.horizontalHeader().setStretchLastSection(True)
+        lay.addWidget(self._table, 1)
+        btns = QDialogButtonBox(QDialogButtonBox.Close)
+        btns.rejected.connect(self.reject)
+        btns.accepted.connect(self.accept)
+        lay.addWidget(btns)
+        self._win = win
+        for i, tab in enumerate(win._tabs):
+            label = os.path.basename(tab.path)
+            self._combo_a.addItem(label, i)
+            self._combo_b.addItem(label, i)
+        if win._tabs:
+            self._combo_b.setCurrentIndex(min(1, len(win._tabs) - 1))
+        self._combo_a.currentIndexChanged.connect(self._refresh)
+        self._combo_b.currentIndexChanged.connect(self._refresh)
+        self._refresh()
+
+    def _trace_for_combo(self, combo: QComboBox) -> Optional[BtfTrace]:
+        idx = combo.currentData()
+        if idx is None or idx < 0 or idx >= len(self._win._tabs):
+            return None
+        return self._win._tabs[idx].trace
+
+    def _refresh(self) -> None:
+        ta = self._trace_for_combo(self._combo_a)
+        tb = self._trace_for_combo(self._combo_b)
+        rows_a = {r[0]: r for r in (_migration_rows(ta) if ta else [])}
+        rows_b = {r[0]: r for r in (_migration_rows(tb) if tb else [])}
+        keys = sorted(set(rows_a) | set(rows_b), key=lambda k: rows_a.get(k, rows_b.get(k))[1].lower())
+        self._table.setRowCount(len(keys))
+        for ri, mk in enumerate(keys):
+            ra = rows_a.get(mk)
+            rb = rows_b.get(mk)
+            name = (ra or rb)[1]
+            ma = ra[2] if ra else 0
+            mb = rb[2] if rb else 0
+            pa = ra[7] if ra else 0
+            pb = rb[7] if rb else 0
+            vals = [name, ma, mb, ma - mb, pa, pb]
+            for ci, val in enumerate(vals):
+                item = QTableWidgetItem(str(val))
+                if ci == 0:
+                    item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+                else:
+                    item.setTextAlignment(Qt.AlignVCenter | Qt.AlignRight)
+                self._table.setItem(ri, ci, item)
+
+
 class _StatsPanel(QWidget):
     """Dock panel showing trace statistics (span, core utilisation, top tasks)."""
 
@@ -8739,10 +9069,18 @@ class _StatsPanel(QWidget):
         self._section_collapsed: Dict[str, bool] = {
             "cores": False,
             "tasks": False,
+            "migrations": False,
             "exec": False,
             "block": False,
             "inter": False,
         }
+        self._section_table_heights: Dict[str, int] = {
+            "migrations": 220,
+            "exec": 220,
+            "block": 220,
+            "inter": 220,
+        }
+        self._table_grips: List[_StatsSectionGrip] = []
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         scope_row = QHBoxLayout()
@@ -8782,13 +9120,61 @@ class _StatsPanel(QWidget):
         self._btn_export_html.clicked.connect(self._export_html)
         self._btn_export_html.setEnabled(False)
         exp_row.addWidget(self._btn_export_html)
+        self._btn_compare_mig = QPushButton("Compare Tabs…")
+        self._btn_compare_mig.setToolTip(
+            "Compare core-migration statistics between two open trace tabs")
+        self._btn_compare_mig.setEnabled(False)
+        exp_row.addWidget(self._btn_compare_mig)
         outer.addLayout(exp_row)
 
     def _clear(self) -> None:
+        self._table_grips.clear()
         while self._ilay.count():
             item = self._ilay.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+
+    def apply_section_table_heights(self, heights: Dict[str, int]) -> None:
+        """Apply persisted max heights for collapsible stats tables."""
+        for key, val in heights.items():
+            if key in self._section_table_heights:
+                self._section_table_heights[key] = max(
+                    _StatsSectionGrip._MIN_H,
+                    min(_StatsSectionGrip._MAX_H, int(val)),
+                )
+
+    def section_table_heights(self) -> Dict[str, int]:
+        return dict(self._section_table_heights)
+
+    def _apply_table_display_height(self, table: QTableWidget, h: int) -> int:
+        """Set an explicit pixel height so drag-resize is visible (scroll inside table)."""
+        h = max(_StatsSectionGrip._MIN_H, min(_StatsSectionGrip._MAX_H, int(h)))
+        table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        table.setMinimumHeight(h)
+        table.setMaximumHeight(h)
+        table.updateGeometry()
+        host = table.parentWidget()
+        if host is not None:
+            host.updateGeometry()
+        return h
+
+    def _wrap_table_with_resizer(self, lay: QVBoxLayout, table: QTableWidget,
+                                 section_id: str) -> None:
+        """Add *table* plus a drag grip; height is stored in *_section_table_heights*."""
+        h = self._section_table_heights.get(section_id, 220)
+        h = self._apply_table_display_height(table, h)
+        self._section_table_heights[section_id] = h
+
+        grip = _StatsSectionGrip(self._is_dark, lambda: table.height())
+        self._table_grips.append(grip)
+
+        def _on_height(new_h: int) -> None:
+            self._section_table_heights[section_id] = self._apply_table_display_height(
+                table, new_h)
+
+        grip.height_changed.connect(_on_height)
+        lay.addWidget(table)
+        lay.addWidget(grip)
 
     def _lbl(self, text: str, color: str = "", bold: bool = False,
               ui_fs: str = "") -> QLabel:
@@ -8865,6 +9251,8 @@ class _StatsPanel(QWidget):
 
     def set_dark(self, is_dark: bool) -> None:
         self._is_dark = is_dark
+        for grip in self._table_grips:
+            grip.set_dark(is_dark)
         if self._plot_dlg is not None:
             self._plot_dlg.set_dark(is_dark)
 
@@ -9366,9 +9754,90 @@ class _StatsPanel(QWidget):
         rows.sort(key=lambda r: (-r[2], r[1].lower()))
         return rows
 
+    def _build_migration_table(self, rows: List[tuple], ui_fs: str,
+                               empty_hint: str,
+                               on_row_click=None) -> QWidget:
+        host = QWidget()
+        lay = QVBoxLayout(host)
+        lay.setContentsMargins(0, 0, 0, 0)
+        if not rows:
+            lay.addWidget(self._lbl(empty_hint, color="#888888", ui_fs=ui_fs))
+            return host
+        headers = ["Task", "Migr", "Cores", "Primary", "Ping", "STI±",
+                   "Gap after", "Gap other"]
+        table = QTableWidget(len(rows), len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.NoSelection)
+        table.setFocusPolicy(Qt.NoFocus)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setShowGrid(False)
+        table.setFrameShape(QFrame.NoFrame)
+        table.verticalHeader().setDefaultSectionSize(16)
+        table.verticalHeader().setMinimumSectionSize(14)
+        table.horizontalHeader().setFixedHeight(18)
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        table.setStyleSheet(
+            f"font-size:{ui_fs};"
+            "QTableWidget::item{border:none; padding:0px 3px;}"
+            "QHeaderView::section{border:none; background:transparent; color:#9A9A9A; padding:0px 3px;}"
+        )
+        _hover_bg = QBrush(QColor("#3A3A50") if self._is_dark else QColor("#E0E0EC"))
+        _default_bg = QBrush()
+        _hovered_row = [-1]
+
+        def _clear_row_hover() -> None:
+            row = _hovered_row[0]
+            if row < 0:
+                return
+            for c in range(len(headers)):
+                item = table.item(row, c)
+                if item is not None:
+                    item.setBackground(_default_bg)
+            _hovered_row[0] = -1
+
+        def _set_row_hover(row: int) -> None:
+            if not on_row_click or row < 0 or row == _hovered_row[0]:
+                return
+            _clear_row_hover()
+            _hovered_row[0] = row
+            for c in range(len(headers)):
+                item = table.item(row, c)
+                if item is not None:
+                    item.setBackground(_hover_bg)
+
+        for r, row in enumerate(rows):
+            mk, name, n_mig, n_cores, _cores, primary, primary_pct, ping, sti, g_after, g_other = row
+            vals = [
+                name, str(n_mig), str(n_cores),
+                f"{primary} ({primary_pct:.0f}%)",
+                str(ping), str(sti), g_after, g_other,
+            ]
+            for c, val in enumerate(vals):
+                item = QTableWidgetItem(val)
+                item.setData(Qt.UserRole, mk)
+                table.setItem(r, c, item)
+        if on_row_click:
+            def _on_cell(_row: int, _col: int) -> None:
+                item = table.item(_row, 0)
+                if item is not None:
+                    on_row_click(item.data(Qt.UserRole))
+            table.cellClicked.connect(_on_cell)
+            table.setMouseTracking(True)
+            table.viewport().setMouseTracking(True)
+            _hover_filter = _StatsTableHoverFilter(_clear_row_hover)
+            table.viewport().installEventFilter(_hover_filter)
+            table.cellEntered.connect(_set_row_hover)
+        self._wrap_table_with_resizer(lay, table, "migrations")
+        return host
+
     def _build_stats_table(self, rows: List[tuple], ui_fs: str, empty_hint: str,
                            include_cpu: bool = False,
                            count_header: str = "Runs",
+                           section_id: str = "exec",
                            on_row_click=None, on_min_click=None,
                            on_max_click=None) -> QWidget:
         host = QWidget()
@@ -9393,7 +9862,6 @@ class _StatsPanel(QWidget):
         table.horizontalHeader().setStretchLastSection(False)
         table.setShowGrid(False)
         table.setFrameShape(QFrame.NoFrame)
-        table.setMaximumHeight(180)
         table.verticalHeader().setDefaultSectionSize(16)
         table.verticalHeader().setMinimumSectionSize(14)
         table.horizontalHeader().setFixedHeight(18)
@@ -9494,14 +9962,12 @@ class _StatsPanel(QWidget):
             table.viewport().installEventFilter(_hover_filter)
             host._stats_hover_filter = _hover_filter  # prevent GC
 
-        table.setMinimumHeight(min(180, 20 + (len(rows) * 16)))
-        table.setMaximumHeight(220)
         table.setWordWrap(False)
 
         table.horizontalHeader().setStyleSheet("QHeaderView::section { border: none; }")
         table.verticalHeader().setStyleSheet("QHeaderView::section { border: none; }")
 
-        lay.addWidget(table)
+        self._wrap_table_with_resizer(lay, table, section_id)
         return host
 
     def _export_html(self) -> None:
@@ -9542,6 +10008,7 @@ class _StatsPanel(QWidget):
         exec_rows = self._exec_slice_rows_export(trace, lo, hi)
         inter_rows = self._inter_arrival_rows_export(trace, lo, hi)
         block_rows = self._blocking_time_rows_export(trace, lo, hi)
+        mig_rows = _migration_rows(trace, lo, hi)
         ctx_count, core_gaps = _scheduling_stats(trace, lo, hi)
 
         def _esc(v: object) -> str:
@@ -9739,6 +10206,17 @@ class _StatsPanel(QWidget):
     </table>
   </section>
     {_render_exec_table(exec_rows)}
+    <section class=\"report-card\">
+    <h2>Core Migrations{_esc(scope_title)}</h2>
+    <table>
+      <thead><tr><th>Task</th><th>Migr</th><th>Cores</th><th>Primary</th><th>Ping</th><th>STI±</th><th>Gap after</th><th>Gap other</th></tr></thead>
+      <tbody>{"".join(
+        f"<tr><td>{_esc(r[1])}</td><td>{r[2]}</td><td>{r[3]}</td>"
+        f"<td>{_esc(r[5])} ({r[6]:.0f}%)</td><td>{r[7]}</td><td>{r[8]}</td>"
+        f"<td>{_esc(r[9])}</td><td>{_esc(r[10])}</td></tr>"
+        for r in mig_rows) or '<tr><td colspan="8" class="empty">No data</td></tr>'}</tbody>
+    </table>
+  </section>
     {_render_stats_table(f'Blocking Time (off-CPU gap){scope_title}', block_rows)}
     {_render_stats_table(f'Inter-Arrival Time{scope_title}', inter_rows)}
         <div class=\"report-foot\">Generated by BTF Viewer</div>
@@ -9805,6 +10283,7 @@ class _StatsPanel(QWidget):
         exec_rows = self._exec_slice_rows_export(trace, lo, hi)
         inter_rows = self._inter_arrival_rows_export(trace, lo, hi)
         block_rows = self._blocking_time_rows_export(trace, lo, hi)
+        mig_rows = _migration_rows(trace, lo, hi)
         ctx_count, core_gaps = _scheduling_stats(trace, lo, hi)
 
         def _us(v: object) -> str:
@@ -9856,6 +10335,18 @@ class _StatsPanel(QWidget):
                     writer.writerow(["No data", "", "", "", "", "", "", "", ""])
 
                 writer.writerow([])
+                writer.writerow([f"Core Migrations{scope_suffix}"])
+                writer.writerow(["Task", "Migrations", "Core count", "Primary core",
+                                 "Primary %", "Ping-pong", "STI near",
+                                 "Avg gap after", "Avg gap other"])
+                if mig_rows:
+                    for _mk, name, n_mig, n_cores, _cs, primary, pct, ping, sti, ga, go in mig_rows:
+                        writer.writerow([name, n_mig, n_cores, primary, f"{pct:.1f}",
+                                         ping, sti, _us(ga), _us(go)])
+                else:
+                    writer.writerow(["No data", "", "", "", "", "", "", "", ""])
+
+                writer.writerow([])
                 writer.writerow([f"Blocking Time (off-CPU gap){scope_suffix}"])
                 writer.writerow(["Task", "Gaps", "Min", "Avg", "TrimMean(5%)", "Max", "p50", "p95"])
                 if block_rows:
@@ -9883,6 +10374,9 @@ class _StatsPanel(QWidget):
         self._trace = trace
         self._btn_export_csv.setEnabled(True)
         self._btn_export_html.setEnabled(True)
+        wnd = self.window()
+        self._btn_compare_mig.setEnabled(
+            isinstance(wnd, QMainWindow) and len(getattr(wnd, "_tabs", ())) >= 2)
         self._clear()
         self._update_scope_header()
 
@@ -9974,6 +10468,32 @@ class _StatsPanel(QWidget):
             _populate_tasks,
         )
 
+        # -- Core migrations ----------------------------------------------
+        _mig_rows = _migration_rows(trace, lo, hi)
+        empty_mig = ("No multi-core tasks in cursor range" if scope
+                     else "No tasks ran on more than one core")
+
+        def _on_mig_row(mk: str) -> None:
+            migs = trace.migrations_by_mk.get(mk, [])
+            if lo is not None and hi is not None:
+                scoped = [m for m in migs if lo <= m.ns <= hi]
+            else:
+                scoped = migs
+            if scoped:
+                self.segment_jump.emit(scoped[0].ns)
+            self.task_clicked.emit(mk)
+
+        def _populate_mig(blay: QVBoxLayout) -> None:
+            blay.addWidget(self._build_migration_table(
+                _mig_rows, _fs, empty_mig, on_row_click=_on_mig_row))
+
+        self._add_collapsible_section(
+            "migrations",
+            f"Core Migrations{scope}",
+            _fs,
+            _populate_mig,
+        )
+
         # -- Execution time per slice -------------------------------------
         _exec_rows = self._exec_slice_rows(trace, lo, hi)
         empty_exec = ("No slices fully inside cursor range" if scope
@@ -9985,6 +10505,7 @@ class _StatsPanel(QWidget):
                 _fs,
                 empty_exec,
                 include_cpu=True,
+                section_id="exec",
                 on_row_click=lambda mk: self._open_plot(trace, mk, "exec"),
                 on_min_click=lambda mk: self._on_bcet_click(trace, mk, lo, hi),
                 on_max_click=lambda mk: self._on_wcet_click(trace, mk, lo, hi),
@@ -10008,6 +10529,7 @@ class _StatsPanel(QWidget):
                 _fs,
                 empty_block,
                 count_header="Gaps",
+                section_id="block",
                 on_row_click=lambda mk: self._open_plot(trace, mk, "block"),
                 on_min_click=lambda mk: self._on_blocking_extreme_click(
                     trace, mk, lo, hi, False),
@@ -10030,6 +10552,7 @@ class _StatsPanel(QWidget):
                 _inter_rows,
                 _fs,
                 "Need at least 2 activations per task",
+                section_id="inter",
                 on_row_click=lambda mk: self._open_plot(trace, mk, "inter"),
                 on_min_click=lambda mk: self._on_inter_extreme_click(
                     trace, mk, lo, hi, False),
@@ -12650,7 +13173,10 @@ class _TraceTab:
         self.cpu_splitter.setStretchFactor(0, 1)
         self.cpu_splitter.setStretchFactor(1, 0)
         self.cpu_splitter.setSizes([600, CPU_LOAD_ROW_H])
+        self.cpu_splitter.setHandleWidth(6)
         self.cpu_splitter.setCollapsible(0, False)
+        self.cpu_splitter.setCollapsible(1, False)
+        self.cpu_splitter.splitterMoved.connect(win._on_cpu_splitter_moved)
         if not win._show_cpu_load:
             self.cpu_load_scroll.hide()
 
@@ -12681,6 +13207,8 @@ class MainWindow(QMainWindow):
         self._show_legend:           bool  = True
         self._show_stats:            bool  = True
         self._show_cpu_load:         bool  = True
+        self._cpu_splitter_user_sized: bool = False
+        self._cpu_splitter_bottom_h: Optional[int] = None
         self._show_marks:            bool  = True
         self._font_size_val:         int   = FONT_SIZE
         self._ui_font_size_val:      int   = UI_FONT_SIZE
@@ -13024,7 +13552,10 @@ class MainWindow(QMainWindow):
         self._update_status_for_active_tab()
         self._update_tab_actions()
         if self._show_cpu_load:
-            self._autofit_cpu_load_height()
+            if self._cpu_splitter_user_sized:
+                self._apply_saved_cpu_splitter(tab)
+            else:
+                self._autofit_cpu_load_height()
 
     def _update_status_for_active_tab(self) -> None:
         trace = self._trace
@@ -13147,6 +13678,7 @@ class MainWindow(QMainWindow):
         idx = self._tab_widget.addTab(tab.cpu_splitter, os.path.basename(path))
         self._tab_widget.setTabToolTip(idx, path)
         self._central_stack.setCurrentIndex(1)
+        QTimer.singleShot(0, lambda t=tab: self._apply_saved_cpu_splitter(t))
         self._tab_switch_guard = True
         try:
             self._tab_widget.setCurrentIndex(idx)
@@ -13297,6 +13829,21 @@ class MainWindow(QMainWindow):
         if saved_clrh != CPU_LOAD_ROW_H:
             self._cpu_load_row_h_val = saved_clrh
             self._cpu_load_graph.set_row_h(saved_clrh)
+
+        saved_cpu_bottom = s.get_int("view", "cpu_splitter_bottom_h", 0)
+        if saved_cpu_bottom > 0:
+            self._cpu_splitter_bottom_h = saved_cpu_bottom
+            self._cpu_splitter_user_sized = s.get_bool(
+                "view", "cpu_splitter_user_sized", False)
+            for tab in self._tabs:
+                self._apply_saved_cpu_splitter(tab)
+
+        if hasattr(self, "_stats_panel"):
+            _stats_heights: Dict[str, int] = {}
+            for _sid in ("migrations", "exec", "block", "inter"):
+                _h = s.get_int("stats", f"table_height_{_sid}", 220)
+                _stats_heights[_sid] = _h
+            self._stats_panel.apply_section_table_heights(_stats_heights)
 
         # STI row heights and line style
         saved_srh = s.get_int("view", "sti_row_h", STI_ROW_H)
@@ -13498,6 +14045,16 @@ class MainWindow(QMainWindow):
             "timescale_per_px_default": str(self._timescale_per_px_default_val),
             "hover_highlight":   str(self._hover_highlight_val).lower(),
         }, flush=False)
+
+        if self._cpu_splitter_bottom_h is not None and self._cpu_splitter_bottom_h > 0:
+            s.set_many("view", {
+                "cpu_splitter_bottom_h": str(self._cpu_splitter_bottom_h),
+                "cpu_splitter_user_sized": str(self._cpu_splitter_user_sized).lower(),
+            }, flush=False)
+
+        if hasattr(self, "_stats_panel"):
+            for _sid, _h in self._stats_panel.section_table_heights().items():
+                s.set("stats", f"table_height_{_sid}", str(_h), flush=False)
 
         # Dock layout - serialise the full QMainWindow state (all dock sizes,
         # positions, tabbing) as a base64 string so it survives restarts.
@@ -13829,6 +14386,18 @@ class MainWindow(QMainWindow):
             QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width:0; }}
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical   {{ background:none; }}
             QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background:none; }}
+            QSplitter::handle {{
+                background:{c['sep']};
+            }}
+            QSplitter::handle:hover {{
+                background:{c['accent']};
+            }}
+            QSplitter::handle:vertical {{
+                height:6px;
+            }}
+            QSplitter::handle:horizontal {{
+                width:6px;
+            }}
         """)
 
         # --- Per-widget overrides not reachable via app-wide QSS ----------
@@ -14063,11 +14632,11 @@ class MainWindow(QMainWindow):
         find_v.setContentsMargins(6, 6, 6, 6)
         find_v.setSpacing(6)
         self._find_input = QLineEdit()
-        self._find_input.setPlaceholderText("Find task or annotation text...")
+        self._find_input.setPlaceholderText("Find task, annotation, or migration…")
         self._find_input.textChanged.connect(self._recompute_find_hits)
         find_v.addWidget(self._find_input)
         self._find_mode_combo = QComboBox()
-        self._find_mode_combo.addItems(["Contains", "Exact", "Regex"])
+        self._find_mode_combo.addItems(["Contains", "Exact", "Regex", "Migrations"])
         self._find_mode_combo.setCurrentIndex(0)
         self._find_mode_combo.currentIndexChanged.connect(self._recompute_find_hits)
         find_v.addWidget(self._find_mode_combo)
@@ -14115,6 +14684,7 @@ class MainWindow(QMainWindow):
 
         # --- Signal wiring: legend <-> scene highlight sync (bound per active tab) ---
         self._legend.task_clicked.connect(self._on_legend_task_clicked)
+        self._legend.migrated_filter_changed.connect(self._on_legend_migrated_filter)
 
     def _on_close_tab_action(self) -> None:
         idx = self._tab_widget.currentIndex()
@@ -14145,6 +14715,7 @@ class MainWindow(QMainWindow):
         self._stats_panel.task_clicked.connect(self._on_legend_task_clicked)
         self._stats_panel.segment_jump.connect(self._on_segment_jump)
         self._stats_panel.segment_select.connect(self._on_segment_select)
+        self._stats_panel._btn_compare_mig.clicked.connect(self._open_migration_compare)
         stats_dock = QDockWidget("Statistics", self)
         stats_dock.setObjectName("dock_statistics")
         stats_dock.setWidget(self._stats_panel)
@@ -14559,10 +15130,35 @@ class MainWindow(QMainWindow):
             self._view.set_view_mode(mode)
             self._cpu_load_graph.set_view_mode(mode)
         self._refresh_find_marker()
-        self._autofit_cpu_load_height()
+        if self._cpu_splitter_user_sized:
+            self._apply_saved_cpu_splitter()
+        else:
+            self._autofit_cpu_load_height()
+
+    def _on_cpu_splitter_moved(self, pos: int = 0, index: int = 0) -> None:
+        """Remember manual timeline / CPU load split so autofit does not override it."""
+        self._cpu_splitter_user_sized = True
+        sizes = self._cpu_splitter.sizes()
+        if len(sizes) >= 2 and sizes[1] > 0:
+            self._cpu_splitter_bottom_h = sizes[1]
+
+    def _apply_saved_cpu_splitter(self, tab: Optional[_TraceTab] = None) -> None:
+        """Restore a user-resized CPU load pane height on *tab*."""
+        tab = tab or self._active_tab
+        if tab is None or not self._cpu_splitter_user_sized:
+            return
+        bottom = self._cpu_splitter_bottom_h
+        if bottom is None or bottom <= 0:
+            return
+        splitter = tab.cpu_splitter
+        total = max(splitter.height(), bottom + 120)
+        bottom = min(bottom, total - 100)
+        splitter.setSizes([total - bottom, bottom])
 
     def _autofit_cpu_load_height(self) -> None:
         """Resize the CPU load splitter pane to fit the graph's preferred height."""
+        if self._cpu_splitter_user_sized:
+            return
         if not self._show_cpu_load or not self._cpu_load_scroll.isVisible():
             return
         preferred = self._cpu_load_graph.sizeHint().height()
@@ -14586,7 +15182,10 @@ class MainWindow(QMainWindow):
         for tab in self._tabs:
             tab.cpu_load_scroll.setVisible(visible)
         if visible and self._active_tab is not None:
-            self._autofit_cpu_load_height()
+            if self._cpu_splitter_user_sized:
+                self._apply_saved_cpu_splitter()
+            else:
+                self._autofit_cpu_load_height()
 
     def _sync_toolbar_to_active_tab(self) -> None:
         """Refresh toolbar toggles that reflect per-tab view state."""
@@ -15003,6 +15602,22 @@ class MainWindow(QMainWindow):
             self._view._scene.set_find_hits([])
             return
         mode = self._find_mode_combo.currentText().lower()
+        if mode == "migrations":
+            q_lower = query.lower()
+            for m in getattr(self._trace, "migrations", ()):
+                raw = self._trace.task_repr.get(m.merge_key, m.merge_key)
+                disp = _task_display_name(raw)
+                hay = f"{m.merge_key} {raw} {disp} {m.from_core} {m.to_core}"
+                if (not q_lower or q_lower in hay.lower()
+                        or q_lower in m.from_core.lower()
+                        or q_lower in m.to_core.lower()):
+                    self._find_hits.append(m.ns)
+            self._find_hits = sorted(set(self._find_hits))
+            self._find_status.setText(f"{len(self._find_hits)} migration matches")
+            self._view._scene.set_find_hits(self._find_hits)
+            if not self._find_hits:
+                self._set_find_marker_ns(None)
+            return
         regex_obj = None
         if mode == "regex":
             try:
@@ -15865,6 +16480,19 @@ class MainWindow(QMainWindow):
         else:
             sc.set_highlighted_task(task, locked=True)
             self._scroll_view_to_task(task)
+
+    def _on_legend_migrated_filter(self, enabled: bool) -> None:
+        for view in self._iter_tab_views():
+            view._scene.set_migrated_only_filter(enabled)
+
+    @_dialog_guard
+    def _open_migration_compare(self, _checked: bool = False) -> None:
+        if len(self._tabs) < 2:
+            QMessageBox.information(
+                self, "Compare Migrations",
+                "Open at least two trace tabs to compare migrations.")
+            return
+        _exec_centred(_MigrationCompareDialog(self, parent=self), self)
 
     def _scroll_view_to_task(self, task: str) -> None:
         """Scroll the orthogonal axis to bring *task*'s row/column fully into view.

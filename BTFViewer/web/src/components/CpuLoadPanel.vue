@@ -553,8 +553,7 @@ watch(() => props.trace, () => {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  max-height: min(36vh, 360px);
-  border-top: 1px solid var(--border);
+  overflow: hidden;
   background: color-mix(in srgb, var(--panel-bg) 88%, var(--bg));
 }
 
@@ -600,6 +599,7 @@ watch(() => props.trace, () => {
   gap: 0;
   padding: 6px 0 0;
   overflow: auto;
+  flex: 1;
   min-height: 0;
 }
 

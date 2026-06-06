@@ -112,6 +112,43 @@ export function parseTaskName(raw) {
 }
 
 /**
+ * Look up the representative raw BTF name for a merge key.
+ * taskRepr may be a Map (parser) or plain object (legacy).
+ */
+export function taskReprGet(traceOrRepr, mk) {
+  const repr = traceOrRepr?.taskRepr ?? traceOrRepr
+  if (!repr) return null
+  if (typeof repr.get === 'function') return repr.get(mk) ?? null
+  return repr[mk] ?? null
+}
+
+/**
+ * Display label from an internal merge key when no taskRepr entry exists.
+ * Merge keys use the encoding \\0taskId\\0name (see taskMergeKey).
+ */
+export function displayNameFromMergeKey(mergeKey) {
+  if (!mergeKey) return ''
+  if (mergeKey.charCodeAt(0) === 0) {
+    const sep = mergeKey.indexOf('\x00', 1)
+    if (sep > 0) {
+      const taskId = mergeKey.slice(1, sep)
+      const name = mergeKey.slice(sep + 1)
+      if (name === 'TICK') return name
+      if (isIdleTaskName(name)) return normalizeIdleName(name)
+      return `${name}[${taskId}]`
+    }
+  }
+  return taskDisplayName(mergeKey)
+}
+
+/** Human-readable task label from trace + merge key. */
+export function taskLabelForMergeKey(trace, mk) {
+  const raw = taskReprGet(trace, mk)
+  if (raw) return taskDisplayName(raw)
+  return displayNameFromMergeKey(mk)
+}
+
+/**
  * Short display name: 'Name[id]' for regular tasks; bare name for IDLE/TICK.
  */
 export function taskDisplayName(raw) {

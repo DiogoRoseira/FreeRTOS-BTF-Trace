@@ -3,7 +3,7 @@
  */
 
 import { bisectLeft, bisectRight } from './bisect.js'
-import { parseTaskName, taskDisplayName } from './colors.js'
+import { parseTaskName, taskLabelForMergeKey, taskReprGet } from './colors.js'
 import { blockingTimeSamples } from './statsAnalysis.js'
 import { segFullyInRange, segOverlapsRange } from './statsRange.js'
 
@@ -110,10 +110,9 @@ export function migrationRows(trace, lo, hi, formatTimeFn) {
     const allGaps = blockingTimeSamples(segs, lo, hi)
     const avgAfter = gapsAfter.length ? gapsAfter.reduce((a, b) => a + b, 0) / gapsAfter.length : 0
     const avgOther = allGaps.length ? allGaps.reduce((a, b) => a + b, 0) / allGaps.length : 0
-    const raw = trace.taskRepr?.[mk] || mk
     rows.push({
       mk,
-      name: taskDisplayName(raw),
+      name: taskLabelForMergeKey(trace, mk),
       migrations: migs.length,
       coreCount: coreTime.size,
       primary,
@@ -132,8 +131,8 @@ export function migrationFindHits(trace, query) {
   const q = (query || '').trim().toLowerCase()
   const hits = []
   for (const m of trace.migrations || []) {
-    const raw = trace.taskRepr?.[m.mergeKey] || m.mergeKey
-    const disp = taskDisplayName(raw)
+    const raw = taskReprGet(trace, m.mergeKey) || m.mergeKey
+    const disp = taskLabelForMergeKey(trace, m.mergeKey)
     const hay = `${m.mergeKey} ${raw} ${disp} ${m.fromCore} ${m.toCore}`.toLowerCase()
     if (!q || hay.includes(q)) hits.push(m.ns)
   }

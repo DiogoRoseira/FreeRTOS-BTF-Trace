@@ -30,13 +30,14 @@ Histogram of Execution Time:
 - **Viewport culling** — only visible rows/columns and segments are rendered; no slowdown on large traces
 - **Multi-tab traces** — open several `.btf` files at once (Desktop: closable tabs; Web: tab bar under the toolbar). Session tabs, active tab, and per-tab zoom/cursors are restored from `btf_viewer.rc` on launch (Desktop)
 - **Measurement cursors** — Desktop supports 2–8 cursors (default: 4); Web supports up to 4 cursors
+- **Core migration analysis** — tasks that run on multiple cores: **Core Migrations** stats table, **Migrated tasks only** legend filter, **Compare Tabs…** across open traces (Desktop + Web), and Find **Migrations** mode (Desktop)
 - **Cursor-scoped statistics** — with 2+ cursors, the Statistics panel can limit all metrics (CPU%, execution slices, blocking time, inter-arrival, scheduling summary, exports, and charts) to the window from C1 through the last cursor; toggle **Limit to cursor range (C1–Cn)** (Desktop + Web)
 - **Cursor range summary** — with 2+ cursors, Desktop also shows a quick min/max/avg segment summary in the status bar; Web shows range stats in the **Cursors** panel
 - **Task highlight** — hover or click any task label or Legend row to highlight all its segments
 - **Dockable Legend panel** — colour swatches for every task, with a search box and the same highlight interaction
 - **Dockable Statistics panel** — per-core CPU utilisation, top tasks, scheduling summary (context switches, core-gap avg/max), and collapsible metric tables
 - **Tag View** — inspect tag channels/events (`tag_event`, `tag0_event` … `tag7_event`) alongside task/core activity
-- **Metrics tables** — Execution Time Per Slice, **Blocking Time** (off-CPU gap between activations), and Inter-Arrival (runs, min/avg/max/p95, CPU%); click **Max** in Execution Time to jump to the WCET slice
+- **Metrics tables** — Execution Time Per Slice, **Blocking Time** (off-CPU gap between activations), and Inter-Arrival (runs, min/avg/max/p95, CPU%); click **Min** / **Max** (dotted underline) to jump to the BCET / WCET slice or the shortest / longest gap (Desktop + Web)
 - **Metrics distribution charts** — click any row in the Execution Time, Blocking Time, or Inter-Arrival table to open a scatter-plot + histogram popup for that task; charts live-update when cursors move or cursor-range scope is toggled (Desktop + Web). On Desktop, each trace tab remembers its own open chart when you switch tabs
 - **Segment tooltips** — hover any segment bar for duration, slice index on core, previous/next task on that core, and gap before the slice
 - **CPU Load Graph** — bar chart below the timeline showing per-core CPU utilisation; row labels show the **visible-window average** and, with 2+ cursors, a cursor-range average (`· C:xx%`); toggle with the **Load** toolbar button
@@ -198,12 +199,15 @@ When **2 or more cursors** are placed, check **Limit to cursor range (C1–Cn)**
 | Execution time per slice | Only slices **fully inside** the range |
 | Blocking time | Off-CPU gap between consecutive slices; only pairs where **both** slices are fully inside the range |
 | Inter-arrival | Activations whose start time falls inside the range |
+| Core migrations | Migration events and per-core active time with overlap in the range |
 
 <img src="../images/statistics.png" alt="Statistics panel with cursor-scoped metrics">
 
 Uncheck the box to return to full-trace statistics.
 
-Below the scope checkbox, a **scheduling summary** line shows context-switch count and average/max core gap (idle time between consecutive slices on each core). Metric tables (**Core Utilisation**, **Top Tasks**, **Execution Time**, **Blocking Time**, **Inter-Arrival**) are **collapsible** — click a section title to expand or collapse it.
+Below the scope checkbox, a **scheduling summary** line shows context-switch count and average/max core gap (idle time between consecutive slices on each core). Metric tables (**Core Utilisation**, **Top Tasks**, **Core Migrations**, **Execution Time**, **Blocking Time**, **Inter-Arrival**) are **collapsible** — click a section title to expand or collapse it. Drag the handle below a metric table to resize its height.
+
+**Core Migrations** lists tasks that ran on two or more cores (see [Core migration analysis](#core-migration-analysis)). **Compare Tabs…** (footer, next to Export) opens a dialog to diff migration metrics between two open trace tabs; it requires at least two loaded tabs and uses **full-trace** counts (not cursor scope).
 
 ### Snapshot Editor
 
@@ -475,17 +479,70 @@ It shows:
 - **Scheduling summary** — context-switch count and average/max core gap between consecutive slices on each core
 - **Core utilisation** — percentage of active (non-IDLE, non-TICK) CPU time per core (collapsible)
 - **Top tasks by CPU** — ranked list of worker tasks by total CPU time consumed (collapsible)
-- **Execution Time Per Slice** — per-task min/avg/max/p95, run count, and CPU%; click a row for a scatter + histogram popup; click **Max** to jump to the WCET slice
-- **Blocking Time** — off-CPU gap between consecutive activations of the same task (min/avg/max/p95); click a row for a distribution chart (collapsible)
-- **Inter-Arrival Time** — same statistics for gaps between task activations (collapsible)
+- **Core Migrations** — per-task migration count, core count, primary core (% time), ping-pong count, STI events near migrations, and average off-CPU gap after migration vs other gaps; click a row to highlight the task (collapsible)
+- **Execution Time Per Slice** — per-task min/avg/max/p95, run count, and CPU%; click a row for a scatter + histogram popup; click **Min** / **Max** to jump to the BCET / WCET slice
+- **Blocking Time** — off-CPU gap between consecutive activations of the same task (min/avg/max/p95); click a row for a distribution chart; click **Min** / **Max** to jump to the slice at the shortest / longest off-CPU gap (collapsible)
+- **Inter-Arrival Time** — same statistics for gaps between task activations; click **Min** / **Max** to jump to the activation at the shortest / longest inter-arrival gap (collapsible)
 
-**Export CSV** / **Export HTML** respect the current cursor scope. Open metrics charts update live when cursors move or scope is toggled; each trace tab remembers its own open chart when you switch tabs.
+**Export CSV** / **Export HTML** respect the current cursor scope. **Compare Tabs…** compares core-migration counts between two open trace tabs (full trace, not cursor scope). Open metrics charts update live when cursors move or scope is toggled; each trace tab remembers its own open chart when you switch tabs.
+
+### Core migration analysis
+
+A **migration** is recorded when consecutive slices of the same task (merge-key) run on different cores. Migrations are detected at parse time from the segment timeline — there are no separate markers drawn on the timeline; use the statistics table, Find mode (Desktop), or **Compare Tabs…** to inspect them.
+
+| Feature | Desktop | Web |
+|---------|---------|-----|
+| Core tint legend + **Migrated tasks only** filter | ✓ | ✓ |
+| **Core Migrations** stats table | ✓ | ✓ |
+| Cursor-scoped migration stats | ✓ | ✓ |
+| Resizable metric table height (drag handle below table) | ✓ | ✓ |
+| **Min** / **Max** slice links (execution / blocking / inter-arrival) | ✓ | ✓ |
+| Find bar **Migrations** mode | ✓ | — |
+| **Compare Tabs…** (2+ open traces) | ✓ | ✓ |
+| Core View: dim other tasks when one is locked | ✓ | ✓ |
+
+**Legend panel:** the core-tint key explains Task View colouring by core. Check **Migrated tasks only** to hide tasks that never left their first core.
+
+**Statistics → Core Migrations** (collapsible section):
+
+| Column | Meaning |
+|--------|---------|
+| **Migr** | Migration count in the current scope (full trace, or cursor range when **Limit to cursor range** is on) |
+| **Cores** | Number of distinct cores the task ran on |
+| **Primary** | Core with the most active time in scope, with its share (%) |
+| **Ping** | Ping-pong migrations — three consecutive migrations A→B→A within 1 µs |
+| **STI±** | Migrations with an STI event within ±500 ns |
+| **Gap after** | Average off-CPU gap immediately after a migration |
+| **Gap other** | Average blocking gap elsewhere for the same task |
+
+Click a row to highlight that task on the timeline. Drag the resize handle below the table to show more or fewer rows.
+
+#### Compare Tabs…
+
+Compare migration metrics side-by-side for two traces you already have open:
+
+1. Open at least **two** `.btf` files (Desktop: **File → Open** adds a tab; Web: **Open** adds a tab in the bar under the toolbar).
+2. In the **Statistics** panel footer, click **Compare Tabs…** (enabled when two or more tabs are loaded).
+3. Choose **Trace A** and **Trace B** from the dropdowns.
+
+The dialog lists every task that migrated in either trace (by merge-key / task name):
+
+| Column | Meaning |
+|--------|---------|
+| **Task** | Display name (`Name[id]`) |
+| **Migrations A** / **B** | Total migration count in that trace (full trace, not cursor scope) |
+| **Δ** | Difference (A − B) |
+| **Ping-pong A** / **B** | Ping-pong count in each trace |
+
+Use this to compare builds, configurations, or runs of the same workload without merging traces manually.
+
+**Find → Migrations** (Desktop only): lists migration boundary times; `F3` / `Shift+F3` jump between them.
 
 ---
 
 ## Find & Jump
 
-The **Find** bar (at the bottom of the window; also reachable via **Navigate → Find Task…** or `Ctrl+F`) searches for task names within the loaded trace.
+The **Find** bar (at the bottom of the window; also reachable via **Navigate → Find Task…** or `Ctrl+F`) searches for task names within the loaded trace. Set the mode dropdown to **Migrations** to jump between core-migration boundaries instead.
 
 | Action | Effect |
 |--------|--------|

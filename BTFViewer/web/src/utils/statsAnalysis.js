@@ -97,6 +97,64 @@ export function findWcetSegment(segs, lo, hi) {
   return best
 }
 
+/** Shortest-duration slice in segs (respecting cursor scope). */
+export function findBcetSegment(segs, lo, hi) {
+  let best = null
+  let bestD = null
+  for (const s of segs || []) {
+    const d = s.end - s.start
+    if (d <= 0) continue
+    if (lo != null && hi != null && !segFullyInRange(s, lo, hi)) continue
+    if (bestD == null || d < bestD) {
+      bestD = d
+      best = s
+    }
+  }
+  return best
+}
+
+/** Resume slice for min/max off-CPU gap between activations. */
+export function findExtremeBlockingSegment(segs, lo, hi, findMax = true) {
+  if (!segs || segs.length < 2) return null
+  const ordered = [...segs].sort((a, b) => a.start - b.start)
+  let bestSeg = null
+  let bestGap = null
+  for (let i = 1; i < ordered.length; i++) {
+    const prev = ordered[i - 1]
+    const nxt = ordered[i]
+    if (lo != null && hi != null) {
+      if (!segFullyInRange(prev, lo, hi) || !segFullyInRange(nxt, lo, hi)) continue
+    }
+    const gap = nxt.start - prev.end
+    if (gap <= 0) continue
+    if (bestGap == null || (findMax ? gap > bestGap : gap < bestGap)) {
+      bestGap = gap
+      bestSeg = nxt
+    }
+  }
+  return bestSeg
+}
+
+/** Activation slice for min/max inter-arrival gap. */
+export function findExtremeInterArrivalSegment(segs, lo, hi, findMax = true) {
+  if (!segs || segs.length < 2) return null
+  const ordered = [...segs].sort((a, b) => a.start - b.start)
+  let bestSeg = null
+  let bestGap = null
+  for (let i = 1; i < ordered.length; i++) {
+    const prev = ordered[i - 1]
+    const nxt = ordered[i]
+    const gap = nxt.start - prev.start
+    if (gap <= 0) continue
+    if (lo != null && hi != null && (nxt.start < lo || nxt.start > hi)) continue
+    if (bestGap == null || (findMax ? gap > bestGap : gap < bestGap)) {
+      bestGap = gap
+      bestSeg = nxt
+    }
+  }
+  return bestSeg
+}
+
 /** Build multi-line tooltip text for a segment hover. */
 export function segmentTooltipLines(trace, seg, formatTimeFn, taskDisplayNameFn) {
   if (!seg) return []

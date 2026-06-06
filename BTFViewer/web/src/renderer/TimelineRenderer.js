@@ -13,6 +13,7 @@
  */
 
 import { taskColor, taskDisplayName, taskMergeKey, parseTaskName, coreTint, coreColor, stiNoteColor, lighterColor, complementaryColor } from '../utils/colors.js'
+import { isMigratedTask } from '../utils/migrationAnalysis.js'
 import { bisectLeft, bisectRight } from '../utils/bisect.js'
 import { lodReduce } from '../utils/lod.js'
 import { visibleSegs } from '../parser/btfParser.js'
@@ -102,12 +103,13 @@ function niceStep(span) {
  * @param {number}  yStart     Top Y coordinate of the first row (after ruler).
  * @returns {{ rows: Array, totalHeight: number }}
  */
-export function buildRowLayout(trace, viewMode, expanded, yStart, showSti = true, stiExpanded = new Set()) {
+export function buildRowLayout(trace, viewMode, expanded, yStart, showSti = true, stiExpanded = new Set(), migratedOnlyFilter = false) {
   const rows = []
   let y = yStart
 
   if (viewMode === 'task') {
     for (const mk of trace.tasks) {
+      if (migratedOnlyFilter && !isMigratedTask(trace, mk)) continue
       const repr = trace.taskRepr.get(mk)
       const label = taskDisplayName(repr || mk)
       const color = taskColor(mk, repr)
@@ -125,8 +127,10 @@ export function buildRowLayout(trace, viewMode, expanded, yStart, showSti = true
         const taskOrder = (trace.coreTaskOrder.get(coreName) || [])
           .filter(t => parseTaskName(t).name !== 'TICK')
         for (const rawTask of taskOrder) {
+          const mk = taskMergeKey(rawTask)
+          if (migratedOnlyFilter && !isMigratedTask(trace, mk)) continue
           const label = taskDisplayName(rawTask)
-          const color = taskColor(taskMergeKey(rawTask), rawTask)
+          const color = taskColor(mk, rawTask)
           rows.push({ type: 'core-task', key: `${coreName}__${rawTask}`, coreKey: coreName, taskKey: rawTask, label, color, y })
           y += ROW_H + ROW_GAP
         }
@@ -172,6 +176,8 @@ export function render(ctx, trace, viewport, options = {}) {
     showSti     = true,
     stiExpanded = new Set(),
     stiLogScale = false,
+    migratedOnlyFilter = false,
+    lockedTaskKey = null,
   } = options
   const highlightSegment = options.highlightSegment ?? null
 
@@ -194,7 +200,7 @@ export function render(ctx, trace, viewport, options = {}) {
   ctx.fillRect(0, 0, canvasW, RULER_H)
 
   // ---- Row layout ----
-  const { rows } = buildRowLayout(trace, viewMode, expanded, RULER_H - scrollY, showSti, stiExpanded)
+  const { rows } = buildRowLayout(trace, viewMode, expanded, RULER_H - scrollY, showSti, stiExpanded, migratedOnlyFilter)
 
   // ---- Grid lines (optional) ----
   if (showGrid) {
@@ -231,7 +237,7 @@ export function render(ctx, trace, viewport, options = {}) {
     } else if (row.type === 'core') {
       drawCoreRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, canvasW, darkMode)
     } else if (row.type === 'core-task') {
-      drawCoreTaskRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasW, darkMode, highlightSegment)
+      drawCoreTaskRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasW, darkMode, highlightSegment, lockedTaskKey)
     } else if (row.type === 'sti') {
       drawStiRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, canvasW, darkMode, stiLogScale)
     }
@@ -645,7 +651,7 @@ function drawCoreRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, canv
   }
 }
 
-function drawCoreTaskRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasW, darkMode, hlSeg) {
+function drawCoreTaskRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasW, darkMode, hlSeg, lockedTaskKey = null) {
   const ld = coreTaskLodData(trace, row.coreKey, row.taskKey)
   const segs = visibleSegs(ld, timeStart, timeEnd, nsPerPx, trace.lodTimescalePerPx, trace.lodUltraTimescalePerPx)
 
@@ -653,8 +659,12 @@ function drawCoreTaskRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, 
   ctx.fillRect(0, row.y, canvasW, ROW_H)
 
   const mk = taskMergeKey(row.taskKey)
+  const dim = lockedTaskKey && mk !== lockedTaskKey
+  if (dim) ctx.save()
+  if (dim) ctx.globalAlpha = 45 / 255
   paintSegments(ctx, segs, timeStart, timeEnd, pxPerNs, nsPerPx,
     row.y + 1, ROW_H - 2, row.color, trace, false, highlightKey, mk, darkMode, row.label, hlSeg)
+  if (dim) ctx.restore()
 }
 
 function drawStiRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, canvasW, darkMode, logScale = false) {
@@ -1224,13 +1234,14 @@ export function drawMarksHorizontal(ctx, marks, trace, timeStart, pxPerNs, canva
  * @param {Set}    stiExpanded   Set of expanded STI channel names
  * @returns {{ cols: Array, totalWidth: number }}
  */
-export function buildColumnLayout(trace, viewMode, expanded, scrollX = 0, showSti = true, stiExpanded = new Set()) {
+export function buildColumnLayout(trace, viewMode, expanded, scrollX = 0, showSti = true, stiExpanded = new Set(), migratedOnlyFilter = false) {
   const cols = []
   let rawIdx = 0
   let xAcc   = 0  // accumulated pixel offset from RULER_W (before scrollX)
 
   if (viewMode === 'task') {
     for (const mk of trace.tasks) {
+      if (migratedOnlyFilter && !isMigratedTask(trace, mk)) continue
       const repr = trace.taskRepr.get(mk)
       const label = taskDisplayName(repr || mk)
       const color = taskColor(mk, repr)
@@ -1252,8 +1263,9 @@ export function buildColumnLayout(trace, viewMode, expanded, scrollX = 0, showSt
         const taskOrder = (trace.coreTaskOrder.get(coreName) || [])
           .filter(t => parseTaskName(t).name !== 'TICK')
         for (const rawTask of taskOrder) {
-          const lbl = taskDisplayName(rawTask)
           const mk = taskMergeKey(rawTask)
+          if (migratedOnlyFilter && !isMigratedTask(trace, mk)) continue
+          const lbl = taskDisplayName(rawTask)
           const col = taskColor(mk, rawTask)
           const cx = RULER_W + xAcc - scrollX
           cols.push({
@@ -1568,7 +1580,7 @@ function drawCoreColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, c
   }
 }
 
-function drawCoreTaskColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasH, darkMode, hlSeg) {
+function drawCoreTaskColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasH, darkMode, hlSeg, lockedTaskKey = null) {
   const ld = coreTaskLodData(trace, col.coreKey, col.taskKey)
   const segs = visibleSegs(ld, timeStart, timeEnd, nsPerPx, trace.lodTimescalePerPx, trace.lodUltraTimescalePerPx)
 
@@ -1578,8 +1590,12 @@ function drawCoreTaskColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerP
   ctx.fillRect(col.x, HEADER_H, COL_W, canvasH)
 
   const mk = taskMergeKey(col.taskKey)
+  const dim = lockedTaskKey && mk !== lockedTaskKey
+  if (dim) ctx.save()
+  if (dim) ctx.globalAlpha = 45 / 255
   paintSegmentsVertical(ctx, segs, timeStart, pxPerNs, nsPerPx,
     col.x, COL_W, HEADER_H, col.color, trace, false, highlightKey, mk, darkMode, col.label, hlSeg, canvasH)
+  if (dim) ctx.restore()
 }
 
 function drawStiColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, canvasH, darkMode) {
@@ -1943,6 +1959,8 @@ export function renderVertical(ctx, trace, viewport, options = {}) {
     marks        = [],
     showSti      = true,
     stiExpanded  = new Set(),
+    migratedOnlyFilter = false,
+    lockedTaskKey = null,
   } = options
   const highlightSegment = options.highlightSegment ?? null
 
@@ -1969,7 +1987,7 @@ export function renderVertical(ctx, trace, viewport, options = {}) {
   ctx.fillRect(RULER_W, 0, canvasW - RULER_W, HEADER_H)
 
   // Build column layout
-  const { cols } = buildColumnLayout(trace, viewMode, expanded, scrollX, showSti, stiExpanded)
+  const { cols } = buildColumnLayout(trace, viewMode, expanded, scrollX, showSti, stiExpanded, migratedOnlyFilter)
 
   // Grid lines (horizontal, optional)
   if (showGrid) {
@@ -2002,7 +2020,7 @@ export function renderVertical(ctx, trace, viewport, options = {}) {
     } else if (col.type === 'core') {
       drawCoreColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, canvasH, darkMode)
     } else if (col.type === 'core-task') {
-      drawCoreTaskColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasH, darkMode, highlightSegment)
+      drawCoreTaskColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasH, darkMode, highlightSegment, lockedTaskKey)
     } else if (col.type === 'sti') {
       drawStiColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, canvasH, darkMode)
     }

@@ -180,8 +180,12 @@
       </div>
       <div
         v-else
-        class="stats-table-wrap"
+        class="stats-table-block"
       >
+        <div
+          class="stats-table-wrap"
+          :style="{ maxHeight: tableHeight('exec') + 'px' }"
+        >
         <table class="stats-table">
           <thead>
             <tr>
@@ -208,12 +212,18 @@
               <td class="task-col">{{ row.name }}</td>
               <td>{{ row.runs }}</td>
               <td>{{ row.cpuPct.toFixed(1) }}%</td>
-              <td>{{ row.min }}</td>
+              <td
+                class="extreme-col"
+                :title="`Jump to shortest slice for ${row.name}`"
+                @click.stop="jumpToSegment(row.mk, 'exec', false)"
+              >
+                {{ row.min }}
+              </td>
               <td>{{ row.avg }}</td>
               <td
-                class="wcet-col"
+                class="extreme-col"
                 :title="`Jump to longest slice for ${row.name}`"
-                @click.stop="jumpToWcet(row.mk)"
+                @click.stop="jumpToSegment(row.mk, 'exec', true)"
               >
                 {{ row.max }}
               </td>
@@ -221,6 +231,99 @@
             </tr>
           </tbody>
         </table>
+        </div>
+        <div
+          class="stats-section-resizer"
+          role="separator"
+          aria-label="Resize execution time table"
+          aria-orientation="horizontal"
+          @mousedown.prevent="onTableResizeStart('exec', $event)"
+        />
+      </div>
+    </template>
+
+    <!-- Core migrations -->
+    <div class="stats-sep" />
+    <div
+      class="stats-section-title collapsible"
+      @click="migrationCollapsed = !migrationCollapsed"
+    >
+      <svg
+        class="chevron"
+        :class="{ collapsed: migrationCollapsed }"
+        viewBox="0 0 10 10"
+        width="10"
+        height="10"
+      >
+        <polyline
+          points="2,3 5,7 8,3"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
+      Core Migrations{{ scopeSuffixStr }}
+    </div>
+    <template v-if="!migrationCollapsed">
+      <div
+        v-if="migrationStats.length === 0"
+        class="range-hint"
+      >
+        {{ statsRange ? 'No migrated tasks in cursor range' : 'No tasks ran on multiple cores' }}
+      </div>
+      <div
+        v-else
+        class="stats-table-block"
+      >
+        <div
+          class="stats-table-wrap"
+          :style="{ maxHeight: tableHeight('migrations') + 'px' }"
+        >
+          <table class="stats-table stats-table-migration">
+          <thead>
+            <tr>
+              <th>Task</th>
+              <th>Migr</th>
+              <th>Cores</th>
+              <th>Primary</th>
+              <th>Ping</th>
+              <th>STI±</th>
+              <th>Gap after</th>
+              <th>Gap other</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="row in migrationStats"
+              :key="row.mk"
+              class="stats-table-row clickable"
+              :title="`Highlight ${row.name}`"
+              tabindex="0"
+              @click="emit('highlightTask', row.mk)"
+              @keydown.enter.prevent="emit('highlightTask', row.mk)"
+              @keydown.space.prevent="emit('highlightTask', row.mk)"
+            >
+              <td class="task-col">{{ row.name }}</td>
+              <td>{{ row.migrations }}</td>
+              <td>{{ row.coreCount }}</td>
+              <td>{{ row.primary }} ({{ row.primaryPct.toFixed(0) }}%)</td>
+              <td>{{ row.pingPong }}</td>
+              <td>{{ row.stiNear }}</td>
+              <td>{{ row.gapAfter }}</td>
+              <td>{{ row.gapOther }}</td>
+            </tr>
+          </tbody>
+        </table>
+        </div>
+        <div
+          class="stats-section-resizer"
+          role="separator"
+          aria-label="Resize core migrations table"
+          aria-orientation="horizontal"
+          @mousedown.prevent="onTableResizeStart('migrations', $event)"
+        />
       </div>
     </template>
 
@@ -257,8 +360,12 @@
       </div>
       <div
         v-else
-        class="stats-table-wrap"
+        class="stats-table-block"
       >
+        <div
+          class="stats-table-wrap"
+          :style="{ maxHeight: tableHeight('block') + 'px' }"
+        >
         <table class="stats-table">
           <thead>
             <tr>
@@ -283,13 +390,33 @@
             >
               <td class="task-col">{{ row.name }}</td>
               <td>{{ row.gaps }}</td>
-              <td>{{ row.min }}</td>
+              <td
+                class="extreme-col"
+                :title="`Jump to shortest blocking gap for ${row.name}`"
+                @click.stop="jumpToSegment(row.mk, 'block', false)"
+              >
+                {{ row.min }}
+              </td>
               <td>{{ row.avg }}</td>
-              <td>{{ row.max }}</td>
+              <td
+                class="extreme-col"
+                :title="`Jump to longest blocking gap for ${row.name}`"
+                @click.stop="jumpToSegment(row.mk, 'block', true)"
+              >
+                {{ row.max }}
+              </td>
               <td>{{ row.p95 }}</td>
             </tr>
           </tbody>
         </table>
+        </div>
+        <div
+          class="stats-section-resizer"
+          role="separator"
+          aria-label="Resize blocking time table"
+          aria-orientation="horizontal"
+          @mousedown.prevent="onTableResizeStart('block', $event)"
+        />
       </div>
     </template>
 
@@ -326,8 +453,12 @@
       </div>
       <div
         v-else
-        class="stats-table-wrap"
+        class="stats-table-block"
       >
+        <div
+          class="stats-table-wrap"
+          :style="{ maxHeight: tableHeight('inter') + 'px' }"
+        >
         <table class="stats-table">
           <thead>
             <tr>
@@ -352,13 +483,33 @@
             >
               <td class="task-col">{{ row.name }}</td>
               <td>{{ row.runs }}</td>
-              <td>{{ row.min }}</td>
+              <td
+                class="extreme-col"
+                :title="`Jump to shortest inter-arrival for ${row.name}`"
+                @click.stop="jumpToSegment(row.mk, 'inter', false)"
+              >
+                {{ row.min }}
+              </td>
               <td>{{ row.avg }}</td>
-              <td>{{ row.max }}</td>
+              <td
+                class="extreme-col"
+                :title="`Jump to longest inter-arrival for ${row.name}`"
+                @click.stop="jumpToSegment(row.mk, 'inter', true)"
+              >
+                {{ row.max }}
+              </td>
               <td>{{ row.p95 }}</td>
             </tr>
           </tbody>
         </table>
+        </div>
+        <div
+          class="stats-section-resizer"
+          role="separator"
+          aria-label="Resize inter-arrival table"
+          aria-orientation="horizontal"
+          @mousedown.prevent="onTableResizeStart('inter', $event)"
+        />
       </div>
     </template>
 
@@ -376,8 +527,22 @@
       >
         Export HTML
       </button>
+      <button
+        class="action-btn"
+        :disabled="!canCompareTabs"
+        title="Compare core-migration statistics between two open trace tabs"
+        @click="compareOpen = true"
+      >
+        Compare Tabs…
+      </button>
     </div>
   </div>
+
+  <MigrationCompareDialog
+    v-if="compareOpen && canCompareTabs"
+    :tabs="loadedTabs"
+    @close="compareOpen = false"
+  />
 
   <div
     v-if="openPlotRef"
@@ -637,7 +802,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { toBlob as domToBlob, toSvg as domToSvg } from 'html-to-image'
 import { formatTime, isStiTagChannel } from '../renderer/TimelineRenderer.js'
 import { taskDisplayName, parseTaskName, taskMergeKey, isIdleTaskName, taskColor } from '../utils/colors.js'
@@ -655,11 +820,17 @@ import {
   blockingTimePlotPoints,
   schedulingStats,
   findWcetSegment,
+  findBcetSegment,
+  findExtremeBlockingSegment,
+  findExtremeInterArrivalSegment,
 } from '../utils/statsAnalysis.js'
+import { migrationRows } from '../utils/migrationAnalysis.js'
+import MigrationCompareDialog from './MigrationCompareDialog.vue'
 
 const props = defineProps({
   trace:   { type: Object, required: true },
   cursors: { type: Array, default: () => [] },
+  tabs:    { type: Array, default: () => [] },
 })
 
 const emit = defineEmits(['highlightTask', 'selectSegment'])
@@ -668,13 +839,56 @@ const coresCollapsed = ref(false)
 const tasksCollapsed = ref(false)
 const execSliceCollapsed = ref(false)
 const blockingCollapsed = ref(false)
+const migrationCollapsed = ref(false)
 const interArrivalCollapsed = ref(false)
 const scopeToCursors = ref(true)
+const sectionHeights = ref({
+  migrations: 220,
+  exec: 220,
+  block: 220,
+  inter: 220,
+})
+const TABLE_MIN_H = 80
+const TABLE_MAX_H = 480
+let _tableResize = null
 const openPlotRef = ref(null)   // { mk, kind } when plot dialog is open
 const plotContentRef = ref(null)
 const selectedPlotPoint = ref(-1)
+const compareOpen = ref(false)
+
+const loadedTabs = computed(() => props.tabs.filter(t => t.trace))
+const canCompareTabs = computed(() => loadedTabs.value.length >= 2)
 
 function clampPct(v) { return Math.max(0, Math.min(100, v)).toFixed(1) }
+
+function tableHeight(id) {
+  return sectionHeights.value[id] ?? 220
+}
+
+function onTableResizeStart(id, e) {
+  _tableResize = { id, startY: e.clientY, startH: tableHeight(id) }
+  document.body.classList.add('row-resizing')
+  document.addEventListener('mousemove', onTableResizeMove)
+  document.addEventListener('mouseup', onTableResizeEnd)
+}
+
+function onTableResizeMove(e) {
+  if (!_tableResize) return
+  const delta = e.clientY - _tableResize.startY
+  sectionHeights.value[_tableResize.id] = Math.max(
+    TABLE_MIN_H,
+    Math.min(TABLE_MAX_H, _tableResize.startH + delta),
+  )
+}
+
+function onTableResizeEnd() {
+  _tableResize = null
+  document.body.classList.remove('row-resizing')
+  document.removeEventListener('mousemove', onTableResizeMove)
+  document.removeEventListener('mouseup', onTableResizeEnd)
+}
+
+onBeforeUnmount(onTableResizeEnd)
 
 const placedCursorCount = computed(() => getPlacedCursors(props.cursors).length)
 
@@ -883,14 +1097,31 @@ const blockingStats = computed(() => {
   return rows.sort((a, b) => b.gaps - a.gaps || a.name.localeCompare(b.name))
 })
 
-function jumpToWcet(mk) {
+const migrationStats = computed(() => {
+  if (migrationCollapsed.value) return []
+  const tr = props.trace
+  if (!tr) return []
+  const r = statsRange.value
+  const lo = r?.lo ?? null
+  const hi = r?.hi ?? null
+  return migrationRows(tr, lo, hi, formatTime)
+})
+
+function jumpToSegment(mk, kind, findMax) {
   const tr = props.trace
   if (!tr) return
   const r = statsRange.value
   const lo = r?.lo ?? null
   const hi = r?.hi ?? null
   const segs = tr.segByMergeKey?.get(mk) || []
-  const seg = findWcetSegment(segs, lo, hi)
+  let seg = null
+  if (kind === 'exec') {
+    seg = findMax ? findWcetSegment(segs, lo, hi) : findBcetSegment(segs, lo, hi)
+  } else if (kind === 'block') {
+    seg = findExtremeBlockingSegment(segs, lo, hi, findMax)
+  } else if (kind === 'inter') {
+    seg = findExtremeInterArrivalSegment(segs, lo, hi, findMax)
+  }
   if (seg) emit('selectSegment', seg)
 }
 
@@ -1305,6 +1536,24 @@ function exportCsv() {
   }
 
   lines.push('')
+  lines.push(`Core Migrations${suffix}`)
+  lines.push('Task,Migrations,Core count,Primary core,Primary %,Ping-pong,STI near,Gap after avg,Gap other avg')
+  const migReportRows = migrationRows(tr, lo, hi, formatTime)
+  for (const r of migReportRows) {
+    lines.push([
+      _csvCell(r.name),
+      _csvCell(r.migrations),
+      _csvCell(r.coreCount),
+      _csvCell(r.primary),
+      _csvCell(`${r.primaryPct.toFixed(1)}%`),
+      _csvCell(r.pingPong),
+      _csvCell(r.stiNear),
+      _csvCell(r.gapAfter),
+      _csvCell(r.gapOther),
+    ].join(','))
+  }
+
+  lines.push('')
   lines.push(`Blocking Time (off-CPU gap)${suffix}`)
   lines.push('Task,Gaps,Min,Avg,TrimMean(5%),Max,p50,p95')
   for (const r of blockReportRows) {
@@ -1551,6 +1800,7 @@ function exportHtml() {
   const taskRows = _taskCpuRows(tr, r)
   const lo = r?.lo ?? null
   const hi = r?.hi ?? null
+  const migReportRows = migrationRows(tr, lo, hi, formatTime)
   const { contextSwitches, coreGaps } = schedulingStats(tr, lo, hi)
   const schedKpi = schedulingSummary.value
   const range = !r ? rangeStats.value : null
@@ -1574,6 +1824,10 @@ function exportHtml() {
   const taskHtml = `<section class="report-card"><h2>Top Tasks by CPU (excl. IDLE/TICK)${_htmlCell(suffix)}</h2><table><thead><tr><th>Task</th><th>CPU %</th></tr></thead><tbody>${taskRows.length
     ? taskRows.map(r => `<tr><td>${_htmlCell(r.name)}</td><td>${_htmlCell(r.pct)}%</td></tr>`).join('')
     : '<tr><td colspan="2" class="empty">No data</td></tr>'
+  }</tbody></table></section>`
+  const migHtml = `<section class="report-card"><h2>Core Migrations${_htmlCell(suffix)}</h2><table><thead><tr><th>Task</th><th>Migr</th><th>Cores</th><th>Primary</th><th>Ping</th><th>STI±</th><th>Gap after</th><th>Gap other</th></tr></thead><tbody>${migReportRows.length
+    ? migReportRows.map(r => `<tr><td>${_htmlCell(r.name)}</td><td>${_htmlCell(r.migrations)}</td><td>${_htmlCell(r.coreCount)}</td><td>${_htmlCell(`${r.primary} (${r.primaryPct.toFixed(0)}%)`)}</td><td>${_htmlCell(r.pingPong)}</td><td>${_htmlCell(r.stiNear)}</td><td>${_htmlCell(r.gapAfter)}</td><td>${_htmlCell(r.gapOther)}</td></tr>`).join('')
+    : '<tr><td colspan="8" class="empty">No migrated tasks</td></tr>'
   }</tbody></table></section>`
 
   const html = `<!doctype html>
@@ -1688,6 +1942,7 @@ function exportHtml() {
     ${rangeHtml}
     ${coreHtml}
     ${taskHtml}
+    ${migHtml}
     ${_renderHtmlTableReport(`Execution Time Per Slice${suffix}`, execReportRows, true)}
     ${_renderHtmlTableReport(`Blocking Time (off-CPU gap)${suffix}`, blockReportRows)}
     ${_renderHtmlTableReport(`Inter-Arrival Time${suffix}`, interReportRows)}
@@ -1956,11 +2211,42 @@ watch(plotData, () => {
   flex-shrink: 0;
 }
 
+.stats-table-block {
+  display: flex;
+  flex-direction: column;
+}
+
 .stats-table-wrap {
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow: auto;
-  max-height: 220px;
+}
+
+.stats-section-resizer {
+  height: 6px;
+  flex-shrink: 0;
+  cursor: row-resize;
+  position: relative;
+  margin-top: 2px;
+}
+
+.stats-section-resizer::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 2px;
+  height: 2px;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+
+.stats-section-resizer:hover::before {
+  background: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+.stats-table-migration {
+  min-width: 520px;
 }
 
 .stats-table {
@@ -2014,6 +2300,7 @@ watch(plotData, () => {
   outline: none;
 }
 
+.stats-table td.extreme-col,
 .stats-table td.wcet-col {
   color: var(--accent);
   cursor: pointer;
@@ -2022,6 +2309,7 @@ watch(plotData, () => {
   text-underline-offset: 2px;
 }
 
+.stats-table td.extreme-col:hover,
 .stats-table td.wcet-col:hover {
   color: var(--fg);
 }
