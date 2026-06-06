@@ -28,11 +28,30 @@
 #define portGET_RUN_TIME_COUNTER_VALUE() ({uint32_t cycles; asm volatile ("rdcycle %0" : "=r"(cycles)); cycles; })
 #endif
 
-// get time in nano seconds
-#define xGetTime() (uint32_t)((uint64_t)portGET_RUN_TIME_COUNTER_VALUE()*1000000/configCPU_CLOCK_HZ)
+// get runtime cycles
+#define xGetCycles() portGET_RUN_TIME_COUNTER_VALUE()
 
 #define HAVE_SYS_DUMP
 //#define PRINT_BTF_DUMP
+
+/*
+ * Live stdout BTF dump: uncomment PRINT_BTF_DUMP to call btf_dump() at traceEND().
+ * Output is BTF 2.2.0 CSV on stdout (redirect to a file or pipe to a viewer).
+ *
+ * TIMESCALE_US — only used when PRINT_BTF_DUMP is defined. Selects the unit written
+ * in the #timeScale header and used when converting raw CPU cycles to timestamps:
+ *   1 (default) → microseconds  (#timeScale us)
+ *   0           → nanoseconds   (#timeScale ns)
+ * Conversion uses configCPU_CLOCK_HZ from FreeRTOSConfig.h. Override before including
+ * this header if needed, e.g. in FreeRTOSConfig.h:
+ *   #define TIMESCALE_US 0
+ *   #include "FreeRTOS-Trace/FreeRTOS-Trace.h"
+ */
+#ifdef PRINT_BTF_DUMP
+#ifndef TIMESCALE_US
+#define TIMESCALE_US  1
+#endif
+#endif
 
 // This is only for srv32 simulator
 // syscall for memory dumping
@@ -47,9 +66,9 @@ static inline void sys_dump(uintptr_t start_addr, int size) {
 
 #else
 
-#error "needs to implement the xGetTime() API"
+#error "needs to implement the xGetCycles() API"
 
-#define xGetTime() 0
+#define xGetCycles() 0
 #undef HAVE_SYS_DUMP
 #undef PRINT_BTF_DUMP
 

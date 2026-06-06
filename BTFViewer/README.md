@@ -87,6 +87,8 @@ Produces a single self-contained `dist/index.html` that can be opened directly i
 
 ```bash
 cd BTFViewer/web
+# Demo trace embedded in the build (required for Demo button and fresh builds):
+ln -sf ../../tracedata/example.btf example.btf   # once, or copy the file
 make          # installs deps and builds dist/index.html
 # or manually:
 npm install
@@ -205,12 +207,25 @@ Same tab bar behaviour as desktop: each `.btf` opens in its own tab with indepen
 
 ### Session restore (Web)
 
-The web viewer persists session state in browser `localStorage` (key `btf-viewer-session-v1`). Saved per trace **name**:
+The web viewer persists session state in browser `localStorage` (key `btf-viewer-session-v1`). State is saved automatically (debounced ~400 ms) when you change cursors, marks, zoom/pan, or view options.
 
-- Cursors, bookmarks/annotations, viewport (zoom/pan), pinned task highlight, and selected segment
-- Global view options: task/core mode, orientation, grid, STI, CPU load panel, dark mode, migrated-only filter
+**Saved per trace name** (basename of the opened file, e.g. `example.btf`):
 
-Re-open the same `.btf` file (same tab name) to restore that tab's layout. Unlike the desktop viewer, the web app does not auto-reopen file paths on page load — you still choose **Open** or **Demo** after refreshing the browser.
+| Per tab | Global |
+|---------|--------|
+| Cursors | Task / Core view mode |
+| Bookmarks & annotations | Horizontal / Vertical orientation |
+| Viewport (`timeStart`, `timeEnd`, scroll offsets) | Grid, STI, CPU load, dark mode |
+| Pinned task highlight & selected segment | Migrated-only filter |
+
+**How to restore:** re-open the same `.btf` file (same tab name) after a page refresh. Zoom is stored as the visible time window (`timeStart`–`timeEnd`), not a separate scale factor — pan/zoom once more before closing if you want to be sure the latest view is saved.
+
+**Limitations:**
+
+- Does **not** auto-reopen files on page load — choose **Open** or **Demo** after refreshing the browser.
+- Tab identity is the **filename only**; two different paths with the same basename share one saved slot.
+- Trace data is never stored — only layout and UI state.
+- `localStorage` may be unavailable in strict private browsing modes.
 
 ### Statistics panel — cursor-scoped metrics
 
@@ -741,8 +756,8 @@ python3 gen_trace.py
 # 4 cores, 50 tasks, 500 K events
 python3 gen_trace.py -c 4 -t 50 -e 500000 -o my_trace.btf
 
-# 16 cores, 200 tasks, 2 M events, 500 Hz tick, reproducible seed
-python3 gen_trace.py -c 16 -t 200 -e 2000000 --tick-hz 500 --seed 7
+# 16 cores, 200 tasks, 2 M events, 500 Hz tick
+python3 gen_trace.py -c 16 -t 200 -e 2000000 --tick-hz 500
 
 # Disable STI events; pin every task to one core
 python3 gen_trace.py --no-sti --no-migration
@@ -761,7 +776,6 @@ python3 gen_trace.py --no-sti --no-migration
 | `--sti-interval-us` | `30 000` | Approximate µs between STI tag events |
 | `--idle-prob` | `0.20` | Probability [0–1] that a core picks its IDLE task |
 | `--max-burst-ticks` | `5` | Maximum ticks a task runs before being preempted |
-| `--seed` | `42` | Random seed for reproducibility |
 | `--no-sti` | off | Suppress all STI software-trace events |
 | `--no-migration` | off | Pin each task to one core (disable migration) |
 
@@ -991,6 +1005,22 @@ timestamp, Core_N, 0, C, Core_N, 0, set_frequency, freq_hz
 1050000, Core_0, 0, STI, Mutex_Lock,   0, trigger, Mutex_Lock
 1120000, Core_1, 0, STI, Queue_Send,   0, trigger, Queue_Send
 ```
+
+---
+
+## Implementation notes
+
+| Component | Location | Notes |
+|-----------|----------|-------|
+| **Desktop viewer** | `btf_viewer.py` (~17k lines) | PyQt5 monolith: parser, `TimelineScene` rebuild, stats, trace compare |
+| **Web parser** | `web/src/parser/btfParser.js` | Mirrors Python parser; runs in Web Worker with `file://` fallback |
+| **Web renderer** | `web/src/renderer/TimelineRenderer.js` | Canvas 2D, viewport culling, LOD binning |
+| **Session store** | `web/src/utils/sessionStore.js` | `localStorage` key `btf-viewer-session-v1` |
+| **Trace compare** | `traceCompare.js` / `_TraceCompareDialog` | Optional per-tab C1–Cn scope (Desktop + Web) |
+
+Desktop session persistence uses `btf_viewer.rc` (tab paths, zoom, cursors). Web session uses `localStorage` keyed by filename — see [Session restore (Web)](#session-restore-web).
+
+There is no shared automated test suite; validate parser changes against `tracedata/example.btf` and synthetic traces from `gen_trace.py`.
 
 ---
 

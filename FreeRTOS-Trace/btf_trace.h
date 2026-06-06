@@ -25,7 +25,7 @@
 #include <string.h>
 
 #define TRACE_VER_MAJOR     1
-#define TRACE_VER_MINOR     2
+#define TRACE_VER_MINOR     3
 #define TRACE_VERSION       ((TRACE_VER_MAJOR<<16)|TRACE_VER_MINOR)
 
 #ifndef configMAX_TRACE_TASKS
@@ -72,7 +72,7 @@ typedef enum {
 #define QUEUE_TYPE_RECURSIVE_MUTEX 4U  // recursive mutex
 
 typedef struct {
-    uint32_t    time;
+    uint32_t    timestamp;
     uint32_t    value;
     event_t     types;
 } EVENT;
