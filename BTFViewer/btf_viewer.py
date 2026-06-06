@@ -143,7 +143,7 @@ from typing import Dict, List, Optional, Tuple
 
 from PyQt5.QtCore import (
     QBuffer, QByteArray, QEasingCurve, QEvent, QEventLoop, QIODevice, QLineF, QMimeData,
-    QPoint, QPointF, QRect, QRectF, QSize, Qt, QThread, QTimer,
+    QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, QThread, QTimer,
     QPropertyAnimation, pyqtSignal,
 )
 from PyQt5.QtGui import (
@@ -195,6 +195,9 @@ STI_ROW_H                =  18  # Height of a collapsed STI row (px)
 CPU_LOAD_ROW_H           =  60  # CPU load graph row height (px) - independent of timeline rows.
 CPU_LOAD_ROW_GAP         =   2  # Gap between CPU load rows (px).
 CPU_LOAD_COLLAPSED_H     =  20  # Height of a collapsed CPU load row (px - enough to show label).
+STATS_UTIL_BAR_H         =   8  # Core/task CPU % bar height in Statistics panel (px).
+STATS_UTIL_ROW_H         =  16  # Row height; matches stats-table row size (px).
+STATS_UTIL_ROW_GAP       =   1  # Vertical gap between utilisation rows (px).
 STI_WAVEFORM_H           =  80  # Height of an expanded STI waveform row (px).
 STI_LINE_STYLE           = "linear"  # Default STI waveform draw style: "step" or "linear".
 
@@ -264,6 +267,21 @@ _CURSOR_COLORS = [
     "#FFFF44",  # 7 yellow
     "#CC44FF",  # 8 purple
 ]
+# Darker, saturated variants for light backgrounds (timeline rows are white/light gray).
+_CURSOR_COLORS_LIGHT = [
+    "#C62828",  # 1 red
+    "#2E7D32",  # 2 green
+    "#1565C0",  # 3 blue
+    "#E65100",  # 4 amber
+    "#8E24AA",  # 5 magenta
+    "#00838F",  # 6 cyan
+    "#F9A825",  # 7 yellow
+    "#6A1B9A",  # 8 purple
+]
+
+
+def _cursor_colors(is_dark: bool = True) -> list:
+    return _CURSOR_COLORS if is_dark else _CURSOR_COLORS_LIGHT
 
 # ---- Task colour palette --------------------------------------------------
 # 16-colour cycle used to distinguish tasks (hex RGB strings).
@@ -734,6 +752,66 @@ def _find_wcet_segment(segs: list,
             best_d = d
             best = s
     return best
+
+def _find_bcet_segment(segs: list,
+                       lo: Optional[int] = None, hi: Optional[int] = None
+                       ) -> Optional[TaskSegment]:
+    """Return the shortest-duration slice in *segs* (respecting cursor scope)."""
+    best: Optional[TaskSegment] = None
+    best_d: Optional[int] = None
+    for s in segs:
+        d = s.end - s.start
+        if d <= 0:
+            continue
+        if lo is not None and hi is not None and not _seg_fully_in_range(s, lo, hi):
+            continue
+        if best_d is None or d < best_d:
+            best_d = d
+            best = s
+    return best
+
+def _find_extreme_blocking_segment(segs: list,
+                                   lo: Optional[int] = None, hi: Optional[int] = None,
+                                   find_max: bool = True) -> Optional[TaskSegment]:
+    """Return the resume slice for the min/max off-CPU gap between activations."""
+    if len(segs) < 2:
+        return None
+    ordered = sorted(segs, key=lambda s: s.start)
+    best_seg: Optional[TaskSegment] = None
+    best_gap: Optional[int] = None
+    for i in range(1, len(ordered)):
+        prev, nxt = ordered[i - 1], ordered[i]
+        if lo is not None and hi is not None:
+            if not (_seg_fully_in_range(prev, lo, hi) and _seg_fully_in_range(nxt, lo, hi)):
+                continue
+        gap = nxt.start - prev.end
+        if gap <= 0:
+            continue
+        if best_gap is None or (gap > best_gap if find_max else gap < best_gap):
+            best_gap = gap
+            best_seg = nxt
+    return best_seg
+
+def _find_extreme_inter_arrival_segment(segs: list,
+                                        lo: Optional[int] = None, hi: Optional[int] = None,
+                                        find_max: bool = True) -> Optional[TaskSegment]:
+    """Return the activation slice for the min/max inter-arrival gap."""
+    if len(segs) < 2:
+        return None
+    ordered = sorted(segs, key=lambda s: s.start)
+    best_seg: Optional[TaskSegment] = None
+    best_gap: Optional[int] = None
+    for i in range(1, len(ordered)):
+        prev, nxt = ordered[i - 1], ordered[i]
+        gap = nxt.start - prev.start
+        if gap <= 0:
+            continue
+        if lo is not None and hi is not None and (nxt.start < lo or nxt.start > hi):
+            continue
+        if best_gap is None or (gap > best_gap if find_max else gap < best_gap):
+            best_gap = gap
+            best_seg = nxt
+    return best_seg
 
 class _ParseCancelledError(Exception):
     """Internal control-flow exception used to abort _parse_btf cleanly."""
@@ -2613,13 +2691,21 @@ class TimelineScene(QGraphicsScene):
         _views  = self.views()
         _scene_top  = _views[0].mapToScene(QPoint(0, 0)).y()  if _views else 0.0
         _scene_left = _views[0].mapToScene(QPoint(0, 0)).x()  if _views else 0.0
-        pen = QPen(QColor(255, 255, 255, 80), 1.0, Qt.DashLine)
-        pen.setDashPattern([3, 3])
         font = _monospace_font(max(8, self._font_size - 1))
         fm   = QFontMetrics(font)
         t_str = _format_time(self._hover_ns, self._trace.time_scale, decimals=3)
         tw = fm.horizontalAdvance(t_str) + 8
         th = fm.height()
+        if self._is_dark_ui:
+            line_col = QColor(255, 255, 255, 80)
+            lbl_bg   = QColor(40, 90, 200, 170)
+            lbl_txt  = QColor("#AAC8FF")
+        else:
+            line_col = QColor(0, 102, 204, 200)
+            lbl_bg   = QColor(0, 102, 204, 230)
+            lbl_txt  = QColor("#FFFFFF")
+        pen = QPen(line_col, 1.2 if not self._is_dark_ui else 1.0, Qt.DashLine)
+        pen.setDashPattern([3, 3])
         if self._horizontal:
             x = self._label_width + self._ns_to_px(self._hover_ns)
             line = QGraphicsLineItem(x, 0, x, scene_r.height())
@@ -2633,10 +2719,10 @@ class TimelineScene(QGraphicsScene):
             lbl_y = _scene_top + RULER_HEIGHT - th - 4
             bg = self.addRect(
                 QRectF(lbl_x, lbl_y, tw, th + 2),
-                QPen(Qt.NoPen), QBrush(QColor(40, 90, 200, 170)))
+                QPen(Qt.NoPen), QBrush(lbl_bg))
             bg.setZValue(26)
             lbl = self.addSimpleText(t_str, font)
-            lbl.setBrush(QBrush(QColor("#AAC8FF")))
+            lbl.setBrush(QBrush(lbl_txt))
             lbl.setZValue(27)
             lbl.setPos(lbl_x + 4, lbl_y + 1)
             self._hover_items.extend([bg, lbl])
@@ -2653,10 +2739,10 @@ class TimelineScene(QGraphicsScene):
             lbl_y = y - (th + 2) / 2
             bg = self.addRect(
                 QRectF(lbl_x, lbl_y, tw, th + 2),
-                QPen(Qt.NoPen), QBrush(QColor(40, 90, 200, 170)))
+                QPen(Qt.NoPen), QBrush(lbl_bg))
             bg.setZValue(26)
             lbl = self.addSimpleText(t_str, font)
-            lbl.setBrush(QBrush(QColor("#AAC8FF")))
+            lbl.setBrush(QBrush(lbl_txt))
             lbl.setZValue(27)
             lbl.setPos(lbl_x + 4, lbl_y + 1)
             self._hover_items.extend([bg, lbl])
@@ -2706,9 +2792,10 @@ class TimelineScene(QGraphicsScene):
         _scene_left = _views[0].mapToScene(QPoint(0, 0)).x() if _views else 0.0
 
         sorted_cursors = sorted(enumerate(self._cursor_times), key=lambda x: x[1])
+        cursor_palette = _cursor_colors(self._is_dark_ui)
 
         for order, (orig_idx, ns) in enumerate(sorted_cursors):
-            color = QColor(_CURSOR_COLORS[orig_idx % len(_CURSOR_COLORS)])
+            color = QColor(cursor_palette[orig_idx % len(cursor_palette)])
             pen   = QPen(color, 1.2, Qt.DashLine)
 
             if self._horizontal:
@@ -5623,8 +5710,8 @@ class TimelineView(QGraphicsView):
         self._frozen_last_scene_top: Optional[float] = None
         # Remember the last viewport position for each orientation.
         # key=True  -> horizontal mode, key=False -> vertical mode
-        # value=(center_ns, orth_center_coord)
-        self._view_pos_by_orientation: Dict[bool, Tuple[int, float]] = {}
+        # value=(center_ns, orth_center_coord, timescale_per_px)
+        self._view_pos_by_orientation: Dict[bool, Tuple[int, float, float]] = {}
 
         # -- Navigator popup overlay ------------------------------------
         # A 260x130 thumbnail that appears at the top-left of the canvas
@@ -5651,6 +5738,27 @@ class TimelineView(QGraphicsView):
             return max(self.viewport().width(), 800)
         else:
             return max(self.viewport().height(), 600)
+
+    def _time_axis_viewport_px(self) -> int:
+        """Actual time-axis pixel extent of the viewport (no fit-time floor)."""
+        vp = self.viewport().rect()
+        if self._scene._horizontal:
+            return max(vp.width(), 1)
+        return max(vp.height(), 1)
+
+    def _visible_time_span_ns(self) -> int:
+        """Timestamp span currently visible along the time axis."""
+        avail = max(self._time_axis_viewport_px() - self._scene._label_width, 100)
+        return max(1, int(avail * self._scene._timescale_per_px))
+
+    def _refresh_fit_limit(self) -> None:
+        """Recompute fit-to-window timescale clamp for the current orientation."""
+        trace = self._scene._trace
+        if trace is None:
+            return
+        time_span = max(trace.time_max - trace.time_min, 1)
+        avail = max(self._time_axis_viewport_px() - self._scene._label_width, 100)
+        self._scene._timescale_per_px_fit = time_span / avail
 
     def load_trace(self, trace: BtfTrace) -> None:
         self._fit_mode = True   # new trace always starts in fit mode
@@ -5733,25 +5841,49 @@ class TimelineView(QGraphicsView):
         old_time_coord = old_scene_pt.x() if old_h else old_scene_pt.y()
         old_ns = self._scene.scene_to_ns(old_time_coord)
         old_orth = old_scene_pt.y() if old_h else old_scene_pt.x()
-        self._view_pos_by_orientation[old_h] = (old_ns, old_orth)
+        old_tpp = self._scene._timescale_per_px
+        visible_span = self._visible_time_span_ns()
+        self._view_pos_by_orientation[old_h] = (old_ns, old_orth, old_tpp)
 
-        target_ns, target_orth = self._view_pos_by_orientation.get(horizontal, (old_ns, old_orth))
+        self._scene._horizontal = horizontal
+        self._scene._skip_orth_culling = True
 
-        _span = max(trace.time_max - trace.time_min, 1)
-        _vp_half = int(self._fit_viewport_size() * 10 * self._scene._timescale_per_px)
-        _half = max(_vp_half, _span // 100)
+        if self._fit_mode:
+            self._scene._skip_orth_culling = True
+            self.zoom_fit()
+            return
+
+        saved = self._view_pos_by_orientation.get(horizontal)
+        if saved is not None:
+            target_ns, target_orth, target_tpp = saved
+            self._scene._timescale_per_px = target_tpp
+        else:
+            target_ns, target_orth = old_ns, old_orth
+            avail = max(self._time_axis_viewport_px() - self._scene._label_width, 100)
+            self._scene._timescale_per_px = visible_span / avail
+
+        self._refresh_fit_limit()
+        self._scene._timescale_per_px = min(
+            self._scene._timescale_per_px, self._scene._timescale_per_px_fit)
+
+        time_span = max(trace.time_max - trace.time_min, 1)
+        half_span = max(self._visible_time_span_ns() // 2, time_span // 100)
         self._scene._ns_range_hint = (
-            max(trace.time_min, target_ns - _half),
-            min(trace.time_max, target_ns + _half),
+            max(trace.time_min, target_ns - half_span),
+            min(trace.time_max, target_ns + half_span),
         )
 
-        self._scene.set_horizontal(horizontal)
+        self._scene.rebuild()
+
         new_time_coord = self._scene.ns_to_scene_coord(target_ns)
         if horizontal:
             self.centerOn(new_time_coord, target_orth)
         else:
             self.centerOn(target_orth, new_time_coord)
+        self.resetTransform()
+        self.zoom_changed.emit(self._scene._timescale_per_px)
         self.viewport().update()
+        self._show_nav()
 
     def set_show_sti(self, show: bool) -> None:
         self._scene.set_show_sti(show)
@@ -7698,7 +7830,7 @@ class _CursorBarWidget(QWidget):
             return
 
         ts     = trace.time_scale
-        colors = ["#FF6666", "#66FF99", "#6699FF", "#FFBB44"]
+        colors = _cursor_colors(self._is_dark)
         sorted_pairs = sorted(enumerate(times), key=lambda x: x[1])
 
         if len(sorted_pairs) != len(self._pills):
@@ -8514,6 +8646,79 @@ class _MetricsPlotDialog(QDialog):
 # Statistics dock panel
 # ---------------------------------------------------------------------------
 
+class _StatsHoverRow(QWidget):
+    """Progress-bar stat row that highlights on mouse-over."""
+
+    def __init__(self, is_dark: bool, on_click=None, parent=None) -> None:
+        super().__init__(parent)
+        self._on_click = on_click
+        self._hover_bg = "#3A3A50" if is_dark else "#E0E0EC"
+        self._hovered = False
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setMouseTracking(True)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        if on_click is not None:
+            self.setCursor(Qt.PointingHandCursor)
+
+    def _apply_hover(self, hovered: bool) -> None:
+        if hovered == self._hovered:
+            return
+        self._hovered = hovered
+        if hovered:
+            self.setStyleSheet(
+                f"background-color: {self._hover_bg}; border-radius: 2px;")
+        else:
+            self.setStyleSheet("background: transparent; border-radius: 2px;")
+
+    def track_widget(self, w: QWidget) -> None:
+        """Track *w* so hover works when the pointer is over child controls."""
+        w.setMouseTracking(True)
+        w.installEventFilter(self)
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._apply_hover(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._apply_hover(False)
+        super().leaveEvent(event)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        et = event.type()
+        if et in (QEvent.Enter, QEvent.HoverEnter):
+            self._apply_hover(True)
+        elif et in (QEvent.Leave, QEvent.HoverLeave):
+            QTimer.singleShot(0, self._sync_hover)
+        elif (et == QEvent.MouseButtonPress and event.button() == Qt.LeftButton
+              and self._on_click is not None):
+            self._on_click()
+            return True
+        return False
+
+    def _sync_hover(self) -> None:
+        self._apply_hover(self.underMouse())
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.LeftButton and self._on_click is not None:
+            self._on_click()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
+class _StatsTableHoverFilter(QObject):
+    """Clear stats-table row hover highlight when the pointer leaves the table."""
+
+    def __init__(self, clear_fn) -> None:
+        super().__init__()
+        self._clear_fn = clear_fn
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if event.type() == QEvent.Leave:
+            self._clear_fn()
+        return False
+
+
 class _StatsPanel(QWidget):
     """Dock panel showing trace statistics (span, core utilisation, top tasks)."""
 
@@ -8597,6 +8802,61 @@ class _StatsPanel(QWidget):
             parts.append(f"font-size:{ui_fs};")
         w.setStyleSheet(" ".join(parts))
         return w
+
+    def _add_utilisation_row(self, blay: QVBoxLayout, ui_fs: str,
+                             label: str, pct: float, *,
+                             chunk_color: str, pct_color: str,
+                             label_min_width: int = 72,
+                             on_click=None, click_tip: str = "") -> None:
+        """Add a core/task CPU bar row (progress bar + %), with hover highlight."""
+        row = _StatsHoverRow(self._is_dark, on_click=on_click)
+        row.setFixedHeight(STATS_UTIL_ROW_H)
+        hlay = QHBoxLayout(row)
+        hlay.setContentsMargins(0, 0, 0, 0)
+        hlay.setSpacing(6)
+        hlay.setAlignment(Qt.AlignVCenter)
+
+        name_lbl = self._lbl(label, ui_fs=ui_fs)
+        name_lbl.setMinimumWidth(label_min_width)
+        if on_click is None:
+            name_lbl.setMaximumWidth(label_min_width + 88)
+        else:
+            name_lbl.setMaximumWidth(160)
+            _fm = name_lbl.fontMetrics()
+            name_lbl.setText(_fm.elidedText(label, Qt.ElideRight, 160))
+        if click_tip:
+            name_lbl.setToolTip(click_tip)
+        hlay.addWidget(name_lbl)
+        row.track_widget(name_lbl)
+
+        pbar = QProgressBar()
+        pbar.setRange(0, 1000)
+        pbar.setValue(int(round(max(0.0, min(100.0, pct)) * 10.0)))
+        pbar.setTextVisible(False)
+        pbar.setFixedHeight(STATS_UTIL_BAR_H)
+        pbar.setStyleSheet(f"""
+            QProgressBar {{
+                border: 1px solid #888888;
+                border-radius: 3px;
+                background: palette(alternateBase);
+                max-height: {STATS_UTIL_BAR_H}px;
+                min-height: {STATS_UTIL_BAR_H}px;
+            }}
+            QProgressBar::chunk {{
+                background-color: {chunk_color};
+                border-radius: 2px;
+            }}
+        """)
+        hlay.addWidget(pbar, 1)
+        row.track_widget(pbar)
+
+        pct_lbl = self._lbl(f"{pct:.1f}%", color=pct_color, ui_fs=ui_fs)
+        pct_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        hlay.addWidget(pct_lbl)
+        row.track_widget(pct_lbl)
+        hlay.addStretch(1)
+
+        blay.addWidget(row)
 
     def rebuild_with_font(self, trace: "BtfTrace", ui_font_size: int) -> None:
         """Re-build using the given *ui_font_size* so labels pick it up."""
@@ -9029,12 +9289,33 @@ class _StatsPanel(QWidget):
         rows.sort(key=lambda r: (-r[2], r[1].lower()))
         return rows
 
+    def _emit_segment_select(self, seg: Optional[TaskSegment]) -> None:
+        if seg is not None:
+            self.segment_select.emit(seg)
+
     def _on_wcet_click(self, trace: "BtfTrace", mk: str,
                        lo: Optional[int], hi: Optional[int]) -> None:
         segs = trace.seg_map_by_merge_key.get(mk, [])
-        seg = _find_wcet_segment(segs, lo, hi)
-        if seg is not None:
-            self.segment_select.emit(seg)
+        self._emit_segment_select(_find_wcet_segment(segs, lo, hi))
+
+    def _on_bcet_click(self, trace: "BtfTrace", mk: str,
+                       lo: Optional[int], hi: Optional[int]) -> None:
+        segs = trace.seg_map_by_merge_key.get(mk, [])
+        self._emit_segment_select(_find_bcet_segment(segs, lo, hi))
+
+    def _on_blocking_extreme_click(self, trace: "BtfTrace", mk: str,
+                                   lo: Optional[int], hi: Optional[int],
+                                   find_max: bool) -> None:
+        segs = trace.seg_map_by_merge_key.get(mk, [])
+        self._emit_segment_select(
+            _find_extreme_blocking_segment(segs, lo, hi, find_max=find_max))
+
+    def _on_inter_extreme_click(self, trace: "BtfTrace", mk: str,
+                                lo: Optional[int], hi: Optional[int],
+                                find_max: bool) -> None:
+        segs = trace.seg_map_by_merge_key.get(mk, [])
+        self._emit_segment_select(
+            _find_extreme_inter_arrival_segment(segs, lo, hi, find_max=find_max))
 
     def _exec_slice_rows_export(self, trace: "BtfTrace",
                                 lo: Optional[int] = None, hi: Optional[int] = None) -> List[Tuple[str, int, float, str, str, str, str, str, str]]:
@@ -9087,7 +9368,9 @@ class _StatsPanel(QWidget):
 
     def _build_stats_table(self, rows: List[tuple], ui_fs: str, empty_hint: str,
                            include_cpu: bool = False,
-                           on_row_click=None, on_max_click=None) -> QWidget:
+                           count_header: str = "Runs",
+                           on_row_click=None, on_min_click=None,
+                           on_max_click=None) -> QWidget:
         host = QWidget()
         lay = QVBoxLayout(host)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -9098,9 +9381,10 @@ class _StatsPanel(QWidget):
             return host
 
         cols = 7 if include_cpu else 6
+        headers = (["Task", count_header, "CPU%", "Min", "Avg", "Max", "p95"]
+                   if include_cpu
+                   else ["Task", count_header, "Min", "Avg", "Max", "p95"])
         table = QTableWidget(len(rows), cols)
-        headers = ["Task", "Runs", "CPU%", "Min", "Avg", "Max", "p95"] if include_cpu \
-            else ["Task", "Runs", "Min", "Avg", "Max", "p95"]
         table.setHorizontalHeaderLabels(headers)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         table.setSelectionMode(QAbstractItemView.NoSelection)
@@ -9119,6 +9403,37 @@ class _StatsPanel(QWidget):
             "QHeaderView::section{border:none; background:transparent; color:#9A9A9A; padding:0px 3px;}"
         )
 
+        _min_col = 3 if include_cpu else 2
+        _max_col = 5 if include_cpu else 4
+        _link_color = QBrush(QColor("#88AAFF"))
+        _hover_bg = QBrush(QColor("#3A3A50") if self._is_dark else QColor("#E0E0EC"))
+        _default_bg = QBrush()
+        _hovered_row = [-1]
+        _interactive = bool(on_row_click or on_min_click or on_max_click)
+        _row_tip = "Click to view distribution chart"
+
+        def _clear_row_hover() -> None:
+            row = _hovered_row[0]
+            if row < 0:
+                return
+            for c in range(cols):
+                item = table.item(row, c)
+                if item is not None:
+                    item.setBackground(_default_bg)
+            _hovered_row[0] = -1
+
+        def _set_row_hover(row: int) -> None:
+            if not _interactive or row < 0:
+                return
+            if row == _hovered_row[0]:
+                return
+            _clear_row_hover()
+            _hovered_row[0] = row
+            for c in range(cols):
+                item = table.item(row, c)
+                if item is not None:
+                    item.setBackground(_hover_bg)
+
         for r, row in enumerate(rows):
             if include_cpu:
                 mk_r, name, runs, cpu, mn, avg, mx, p95 = row
@@ -9129,21 +9444,25 @@ class _StatsPanel(QWidget):
 
             for c, v in enumerate(vals):
                 item = QTableWidgetItem(str(v))
-                item.setToolTip(str(name) if c == 0 else "")
                 if c == 0:
+                    tip = (f"{_row_tip} for {name}"
+                           if on_row_click is not None else str(name))
+                    item.setToolTip(tip)
                     item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 else:
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                if on_max_click is not None and c == (5 if include_cpu else 4):
-                    item.setToolTip("Click to jump to longest slice (WCET)")
-                    item.setForeground(QBrush(QColor("#88AAFF")))
+                if c == _min_col and on_min_click is not None:
+                    item.setToolTip(f"Click to jump to shortest slice for {name}")
+                    item.setForeground(_link_color)
+                elif c == _max_col and on_max_click is not None:
+                    item.setToolTip(
+                        f"Click to jump to longest slice (WCET) for {name}"
+                        if include_cpu else
+                        f"Click to jump to longest sample for {name}")
+                    item.setForeground(_link_color)
+                elif on_row_click is not None:
+                    item.setToolTip(f"{_row_tip} for {name}")
                 table.setItem(r, c, item)
-
-            if on_row_click is not None or on_max_click is not None:
-                for c in range(cols):
-                    item = table.item(r, c)
-                    if item and on_row_click is not None and on_max_click is None:
-                        item.setToolTip("Click to view distribution chart")
 
         table.resizeColumnsToContents()
         table.horizontalHeader().setStretchLastSection(False)
@@ -9154,16 +9473,27 @@ class _StatsPanel(QWidget):
         table.setAlternatingRowColors(False)
         table.setShowGrid(False)
         table.setSortingEnabled(False)
-        _max_col = 5 if include_cpu else 4
-        if on_row_click is not None or on_max_click is not None:
+
+        if _interactive:
             def _cell_clicked(r: int, c: int, _rows=rows) -> None:
                 mk = _rows[r][0]
-                if on_max_click is not None and c == _max_col:
+                if on_min_click is not None and c == _min_col:
+                    on_min_click(mk)
+                elif on_max_click is not None and c == _max_col:
                     on_max_click(mk)
                 elif on_row_click is not None:
                     on_row_click(mk)
+
             table.cellClicked.connect(_cell_clicked)
             table.setCursor(Qt.PointingHandCursor)
+            table.setMouseTracking(True)
+            table.viewport().setMouseTracking(True)
+            table.itemEntered.connect(
+                lambda item: _set_row_hover(item.row()) if item is not None else None)
+            _hover_filter = _StatsTableHoverFilter(_clear_row_hover)
+            table.viewport().installEventFilter(_hover_filter)
+            host._stats_hover_filter = _hover_filter  # prevent GC
+
         table.setMinimumHeight(min(180, 20 + (len(rows) * 16)))
         table.setMaximumHeight(220)
         table.setWordWrap(False)
@@ -9606,40 +9936,13 @@ class _StatsPanel(QWidget):
         # -- Core utilisation (excl. IDLE) ---------------------------------
         if trace.core_names:
             def _populate_cores(blay: QVBoxLayout) -> None:
+                blay.setSpacing(STATS_UTIL_ROW_GAP)
                 for core, pct in self._core_util_rows(trace, lo, hi):
-                    row = QWidget()
-                    hlay = QHBoxLayout(row)
-                    hlay.setContentsMargins(0, 0, 0, 0)
-                    hlay.setSpacing(8)
-
-                    core_lbl = self._lbl(f"  {core}:", ui_fs=_fs)
-                    core_lbl.setMinimumWidth(72)
-                    hlay.addWidget(core_lbl)
-
-                    pbar = QProgressBar()
-                    pbar.setRange(0, 1000)
-                    pbar.setValue(int(round(max(0.0, min(100.0, pct)) * 10.0)))
-                    pbar.setTextVisible(False)
-                    pbar.setFixedHeight(14)
-                    pbar.setStyleSheet("""
-                        QProgressBar {
-                            border: 1px solid #888888;
-                            border-radius: 4px;
-                            background: palette(alternateBase);
-                        }
-                        QProgressBar::chunk {
-                            background-color: #5FCF6F;
-                            border-radius: 3px;
-                        }
-                    """)
-                    hlay.addWidget(pbar, 1)
-
-                    pct_lbl = self._lbl(f"{pct:.1f}%", color="#77BB77", ui_fs=_fs)
-                    pct_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                    hlay.addWidget(pct_lbl)
-                    hlay.addStretch(1)
-
-                    blay.addWidget(row)
+                    self._add_utilisation_row(
+                        blay, _fs, f"  {core}:", pct,
+                        chunk_color="#5FCF6F", pct_color="#77BB77",
+                        label_min_width=72,
+                    )
 
             self._add_collapsible_section(
                 "cores",
@@ -9650,56 +9953,19 @@ class _StatsPanel(QWidget):
 
         # -- Top tasks by CPU time (excl. IDLE, top 10) -------------------
         def _populate_tasks(blay: QVBoxLayout) -> None:
+            blay.setSpacing(STATS_UTIL_ROW_GAP)
             task_rows = self._task_cpu_rows(trace, lo=lo, hi=hi)
             if not task_rows:
                 blay.addWidget(self._lbl("No user tasks found", color="#888888", ui_fs=_fs))
                 return
             for mk, disp, pct in task_rows:
-                row = QWidget()
-                hlay = QHBoxLayout(row)
-                hlay.setContentsMargins(0, 0, 0, 0)
-                hlay.setSpacing(8)
-
-                name_btn = QPushButton(f"  {disp}")
-                name_btn.setFlat(True)
-                name_btn.setCursor(Qt.PointingHandCursor)
-                name_btn.setMinimumWidth(100)
-                name_btn.setMaximumWidth(160)
-                name_btn.setToolTip(f"Click to highlight \u2018{disp}\u2019 in the timeline")
-                name_btn.setStyleSheet(
-                    f"text-align:left; padding:0 2px; background:transparent;"
-                    f" border:none; font-size:{_fs};"
+                self._add_utilisation_row(
+                    blay, _fs, f"  {disp}", pct,
+                    chunk_color="#5B9BD5", pct_color="#6AAADD",
+                    label_min_width=100,
+                    on_click=lambda key=mk: self.task_clicked.emit(key),
+                    click_tip=f"Click to highlight \u2018{disp}\u2019 in the timeline",
                 )
-                _fm = name_btn.fontMetrics()
-                elided = _fm.elidedText(f"  {disp}", Qt.ElideRight, 160)
-                name_btn.setText(elided)
-                name_btn.clicked.connect(lambda checked=False, key=mk: self.task_clicked.emit(key))
-                hlay.addWidget(name_btn)
-
-                pbar = QProgressBar()
-                pbar.setRange(0, 1000)
-                pbar.setValue(int(round(max(0.0, min(100.0, pct)) * 10.0)))
-                pbar.setTextVisible(False)
-                pbar.setFixedHeight(14)
-                pbar.setStyleSheet("""
-                    QProgressBar {
-                        border: 1px solid #888888;
-                        border-radius: 4px;
-                        background: palette(alternateBase);
-                    }
-                    QProgressBar::chunk {
-                        background-color: #5B9BD5;
-                        border-radius: 3px;
-                    }
-                """)
-                hlay.addWidget(pbar, 1)
-
-                pct_lbl = self._lbl(f"{pct:.1f}%", color="#6AAADD", ui_fs=_fs)
-                pct_lbl.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                hlay.addWidget(pct_lbl)
-                hlay.addStretch(1)
-
-                blay.addWidget(row)
 
         self._add_collapsible_section(
             "tasks",
@@ -9720,6 +9986,7 @@ class _StatsPanel(QWidget):
                 empty_exec,
                 include_cpu=True,
                 on_row_click=lambda mk: self._open_plot(trace, mk, "exec"),
+                on_min_click=lambda mk: self._on_bcet_click(trace, mk, lo, hi),
                 on_max_click=lambda mk: self._on_wcet_click(trace, mk, lo, hi),
             ))
 
@@ -9740,7 +10007,12 @@ class _StatsPanel(QWidget):
                 _block_rows,
                 _fs,
                 empty_block,
+                count_header="Gaps",
                 on_row_click=lambda mk: self._open_plot(trace, mk, "block"),
+                on_min_click=lambda mk: self._on_blocking_extreme_click(
+                    trace, mk, lo, hi, False),
+                on_max_click=lambda mk: self._on_blocking_extreme_click(
+                    trace, mk, lo, hi, True),
             ))
 
         self._add_collapsible_section(
@@ -9759,6 +10031,10 @@ class _StatsPanel(QWidget):
                 _fs,
                 "Need at least 2 activations per task",
                 on_row_click=lambda mk: self._open_plot(trace, mk, "inter"),
+                on_min_click=lambda mk: self._on_inter_extreme_click(
+                    trace, mk, lo, hi, False),
+                on_max_click=lambda mk: self._on_inter_extreme_click(
+                    trace, mk, lo, hi, True),
             ))
 
         self._add_collapsible_section(
@@ -11924,6 +12200,13 @@ class _CpuLoadGraph(QWidget):
             return None
         return lo, hi
 
+    def _plot_right_x(self) -> int:
+        """Right edge of the timeline plot area (excludes timeline v-scrollbar)."""
+        return max(1, self._view.viewport().width())
+
+    def _plot_axis_span(self, lw: int) -> int:
+        return max(1, self._plot_right_x() - lw - 1)
+
     def _row_at_y(self, y: int) -> Optional[Tuple[str, str, int, int]]:
         """Return (kind, key, row_y, row_h) for plot row at widget *y*, or None."""
         _TITLE_H = 22
@@ -11941,7 +12224,7 @@ class _CpuLoadGraph(QWidget):
         fm = painter.fontMetrics()
         tw = fm.horizontalAdvance(text) + 8
         bx = max(self._view._scene._label_width + 2,
-                 min(self.width() - tw - 2, x - tw // 2))
+                 min(self._plot_right_x() - tw - 2, x - tw // 2))
         by = row_y + 2
         bg = QColor(40, 40, 40, 210) if dark else QColor(255, 255, 255, 230)
         fg = QColor("#FFFFFF") if dark else QColor("#111111")
@@ -11982,8 +12265,10 @@ class _CpuLoadGraph(QWidget):
         axis_start = scene._label_width
         if scene._timescale_per_px <= 0 or axis_px < axis_start:
             return None
+        if axis_px >= self._plot_right_x():
+            return None
         ns_lo, ns_hi = self._visible_time_ns_range(scene)
-        span_px = max(1, self.width() - axis_start - 1)
+        span_px = self._plot_axis_span(axis_start)
         frac = (axis_px - axis_start) / span_px
         ns = int(ns_lo + frac * (ns_hi - ns_lo))
         return max(self._trace.time_min, min(self._trace.time_max, ns))
@@ -11992,7 +12277,7 @@ class _CpuLoadGraph(QWidget):
         lw = scene._label_width
         span = max(1, ns_hi - ns_lo)
         frac = (ns - ns_lo) / span
-        return int(lw + frac * max(1, self.width() - lw - 1))
+        return int(lw + frac * self._plot_axis_span(lw))
 
     def _draw_time_overlay_line(self, painter: QPainter, scene, x: int,
                                 title_h: int, width_limit: int, color: QColor,
@@ -12105,6 +12390,7 @@ class _CpuLoadGraph(QWidget):
 
         rows = self._get_rows()
         w    = self.width()
+        plot_right = self._plot_right_x()
         h    = self.height()
 
         dark = self._is_dark
@@ -12124,9 +12410,10 @@ class _CpuLoadGraph(QWidget):
         scale = self._trace.time_scale
 
         # Pre-compute pixel->bin mapping once (reused for every row)
+        axis_span = self._plot_axis_span(lw)
         sx_to_bi: Dict[int, int] = {}
-        for sx in range(lw, w):
-            frac = (sx - lw) / max(1, w - lw - 1)
+        for sx in range(lw, min(w, plot_right)):
+            frac = (sx - lw) / axis_span
             t = vis_ns_lo + frac * vis_span
             if t_min <= t <= t_max:
                 sx_to_bi[sx] = min(n - 1, max(0, int((t - t_min) / bin_w)))
@@ -12211,7 +12498,7 @@ class _CpuLoadGraph(QWidget):
                 for pct in (0.25, 0.5, 0.75, 1.0):
                     gy = ry + effective_h - 1 - int(pct * effective_h)
                     p.setPen(QPen(grdc, 1, Qt.DotLine))
-                    p.drawLine(lw + 1, gy, w, gy)
+                    p.drawLine(lw + 1, gy, plot_right, gy)
                     if pct < 1.0:   # skip "100" - would overflow into row above
                         p.setPen(pct_muted)
                         p.drawText(QRect(lw + 3, gy - 12, 28, 12),
@@ -12241,18 +12528,19 @@ class _CpuLoadGraph(QWidget):
                 sx = self._time_overlay_x(m_ns, scene, vis_ns_lo, vis_ns_hi)
                 col = QColor(m_color_hex)
                 self._draw_time_overlay_line(
-                    p, scene, sx, _TITLE_H, w, col,
+                    p, scene, sx, _TITLE_H, plot_right, col,
                     dashed=(m_kind != "bookmark"),
                     width=1.2 if m_kind == "bookmark" else 1.0,
                 )
 
         # -- Overlay: placed cursors ------------------------------------
         if hasattr(scene, '_cursor_times') and tpp > 0:
+            cursor_palette = _cursor_colors(dark)
             for c_idx, c_ns in enumerate(scene._cursor_times):
                 sx = self._time_overlay_x(c_ns, scene, vis_ns_lo, vis_ns_hi)
-                cur_col = QColor(_CURSOR_COLORS[c_idx % len(_CURSOR_COLORS)])
+                cur_col = QColor(cursor_palette[c_idx % len(cursor_palette)])
                 self._draw_time_overlay_line(
-                    p, scene, sx, _TITLE_H, w, cur_col,
+                    p, scene, sx, _TITLE_H, plot_right, cur_col,
                     dashed=True, width=1.2,
                 )
 
@@ -12261,16 +12549,17 @@ class _CpuLoadGraph(QWidget):
         hover_row = self._row_at_y(self._hover_y) if self._hover_y >= 0 else None
         if hover_ns is not None and tpp > 0:
             sx = self._time_overlay_x(hover_ns, scene, vis_ns_lo, vis_ns_hi)
-            hov_col = QColor(255, 255, 255, 80) if dark else QColor(0, 0, 0, 80)
+            hov_col = (QColor(255, 255, 255, 80) if dark
+                       else QColor(0, 102, 204, 200))
             self._draw_time_overlay_line(
-                p, scene, sx, _TITLE_H, w, hov_col,
+                p, scene, sx, _TITLE_H, plot_right, hov_col,
                 dashed=True, width=1.0,
             )
             ry_h = _TITLE_H
             for kind, key, _lbl_text, _color in rows:
                 rh = self._row_effective_h(kind, key)
                 collapsed = (kind == "core" and key in self._collapsed_cores)
-                if not collapsed and lw <= sx < w:
+                if not collapsed and lw <= sx < plot_right:
                     bins_h = self._bins_for_row(kind, key)
                     load = self._load_at_ns(bins_h, hover_ns)
                     load_pct = f"{load * 100:.0f}%"
@@ -12287,6 +12576,8 @@ class _CpuLoadGraph(QWidget):
         # Label column separator (full height)
         p.setPen(QPen(sepc, 1))
         p.drawLine(lw, 0, lw, h)
+        if w > plot_right:
+            p.fillRect(plot_right, 0, w - plot_right, h, bg)
 
         p.end()
 
@@ -12344,6 +12635,7 @@ class _TraceTab:
         win._wire_timeline_view(self.view)
 
         self.cpu_load_graph = _CpuLoadGraph(self.view)
+        self.cpu_load_graph.set_dark(win._is_dark)
         win._wire_cpu_load_graph(self.view, self.cpu_load_graph)
 
         self.cpu_load_scroll = QScrollArea()
@@ -12511,13 +12803,27 @@ class MainWindow(QMainWindow):
             lambda _val, v=view: self._on_view_scrolled(v))
 
     def _wire_cpu_load_graph(self, view: TimelineView, graph: _CpuLoadGraph) -> None:
-        view.zoom_changed.connect(graph.update)
-        view.horizontalScrollBar().valueChanged.connect(graph.update)
-        view.verticalScrollBar().valueChanged.connect(graph.update)
+        def _repaint_cpu_graph(*_args) -> None:
+            graph.update()
+
+        view.zoom_changed.connect(_repaint_cpu_graph)
+        view.horizontalScrollBar().valueChanged.connect(_repaint_cpu_graph)
+        view.verticalScrollBar().valueChanged.connect(_repaint_cpu_graph)
+        view.verticalScrollBar().rangeChanged.connect(_repaint_cpu_graph)
         view._scene.highlight_changed.connect(graph.set_task)
-        view._scene.hover_changed.connect(graph.update)
-        view._scene.marks_changed.connect(graph.update)
-        view.cursors_changed.connect(lambda _: graph.update())
+        view._scene.hover_changed.connect(_repaint_cpu_graph)
+        view._scene.marks_changed.connect(_repaint_cpu_graph)
+        view.cursors_changed.connect(lambda _: _repaint_cpu_graph())
+
+        class _CpuGraphViewportSync(QObject):
+            def eventFilter(self, obj, event):
+                if event.type() == QEvent.Resize:
+                    graph.update()
+                return False
+
+        filt = _CpuGraphViewportSync(graph)
+        graph._viewport_sync_filter = filt
+        view.viewport().installEventFilter(filt)
 
     def _apply_view_settings(self, view: TimelineView) -> None:
         view.set_font_size(self._font_size_val)
@@ -12541,6 +12847,7 @@ class MainWindow(QMainWindow):
     def _sync_cpu_load_graph(self, tab: _TraceTab) -> None:
         """Align one tab's CPU load graph with global view mode and timeline state."""
         graph = tab.cpu_load_graph
+        graph.set_dark(self._is_dark)
         mode = self._view_mode if hasattr(self, "_view_mode") else "task"
         graph.set_view_mode(mode)
         graph.set_row_h(self._cpu_load_row_h_val)
@@ -12712,6 +13019,8 @@ class MainWindow(QMainWindow):
         self._recompute_find_hits()
         self._refresh_find_marker()
         self._refresh_zoom_ui_unit()
+        self._on_cursors_changed(self._view._scene.cursor_times(), self._view)
+        self._sync_toolbar_to_active_tab()
         self._update_status_for_active_tab()
         self._update_tab_actions()
         if self._show_cpu_load:
@@ -13541,8 +13850,8 @@ class MainWindow(QMainWindow):
             for view in self._iter_tab_views():
                 view.setBackgroundBrush(QBrush(QColor(c['win_bg'])))
                 view._scene.set_theme(is_dark, rebuild=(view._scene._trace is not None))
-        if hasattr(self, '_cpu_load_graph'):
-            self._cpu_load_graph.set_dark(is_dark)
+        if hasattr(self, '_settings_cpu_graph'):
+            self._settings_cpu_graph.set_dark(is_dark)
         for tab in self._tabs:
             tab.cpu_load_graph.set_dark(is_dark)
         if hasattr(self, '_legend'):
@@ -13561,6 +13870,8 @@ class MainWindow(QMainWindow):
                 self._stats_panel.rebuild(self._trace)
         if hasattr(self, '_cursor_bar'):
             self._cursor_bar.update_theme(is_dark)
+            if self._trace is not None:
+                self._cursor_bar.rebuild(self._view._scene.cursor_times(), self._trace)
         if getattr(self, '_tb_icon_actions', None):
             _ic_color = "#CCCCCC" if is_dark else "#555555"
             for _act, _ic_path in self._tb_icon_actions:
@@ -13593,6 +13904,7 @@ class MainWindow(QMainWindow):
         self._settings_view = TimelineView(self)
         self._wire_timeline_view(self._settings_view)
         self._settings_cpu_graph = _CpuLoadGraph(self._settings_view)
+        self._settings_cpu_graph.set_dark(self._is_dark)
         self._wire_cpu_load_graph(self._settings_view, self._settings_cpu_graph)
         self._settings_cpu_scroll = QScrollArea()
         self._settings_cpu_scroll.setWidget(self._settings_cpu_graph)
@@ -13905,9 +14217,9 @@ class MainWindow(QMainWindow):
         # --- Cursors menu ---
         cm = mb.addMenu("&Cursors")
         cm.addAction("Place cursor at pointer\tC",
-                     self._view.add_cursor_at_hover_or_center, "C")
+                     lambda: self._view.add_cursor_at_hover_or_center(), "C")
         cm.addAction("Clear all cursors\tShift+C",
-                     self._view.clear_cursors, "Shift+C")
+                     lambda: self._view.clear_cursors(), "Shift+C")
         cm.addSeparator()
         cm.addAction("Tip: Left-click on timeline to place cursor").setEnabled(False)
         cm.addAction("Right-click on timeline to remove nearest cursor").setEnabled(False)
@@ -14032,13 +14344,6 @@ class MainWindow(QMainWindow):
         _clw = tb.widgetForAction(self._tb_cpu_load_btn)
         if _clw:
             _clw.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        tb.addSeparator()
-
-        # --- Cursor controls ---
-        _ia("Place Cursor", self._view.add_cursor_at_view_center, _IC_CURSOR,
-            "Place cursor at viewport centre  (C)")
-        _ia("Clear Cursors", self._view.clear_cursors, _IC_CLEAR,
-            "Clear all cursors  (Shift+C)")
         tb.addSeparator()
 
         # --- STI waveform scale toggle ---
@@ -14277,11 +14582,32 @@ class MainWindow(QMainWindow):
     def _toggle_cpu_load_graph(self) -> None:
         """Show or hide the CPU load graph panel."""
         visible = self._tb_cpu_load_btn.isChecked()
-        tab = self._active_tab
-        if tab is not None:
+        self._show_cpu_load = visible
+        for tab in self._tabs:
             tab.cpu_load_scroll.setVisible(visible)
-        if visible:
+        if visible and self._active_tab is not None:
             self._autofit_cpu_load_height()
+
+    def _sync_toolbar_to_active_tab(self) -> None:
+        """Refresh toolbar toggles that reflect per-tab view state."""
+        if hasattr(self, "_tb_cpu_load_btn"):
+            self._tb_cpu_load_btn.blockSignals(True)
+            self._tb_cpu_load_btn.setChecked(self._show_cpu_load)
+            self._tb_cpu_load_btn.blockSignals(False)
+        if hasattr(self, "_tb_log2_btn"):
+            log2 = bool(self._view._scene._sti_log_scale)
+            self._tb_log2_btn.blockSignals(True)
+            self._tb_log2_btn.setChecked(log2)
+            self._tb_log2_btn.blockSignals(False)
+        if hasattr(self, "_tb_expand_all_btn") and self._view_mode == "core":
+            scene = self._view._scene
+            trace = scene._trace
+            if trace and trace.core_names:
+                all_expanded = all(
+                    scene._core_expanded.get(c, True) for c in trace.core_names)
+                self._tb_expand_all_btn.blockSignals(True)
+                self._tb_expand_all_btn.setChecked(all_expanded)
+                self._tb_expand_all_btn.blockSignals(False)
 
     # -- File actions ---------------------------------------------------
 
@@ -15070,7 +15396,8 @@ class MainWindow(QMainWindow):
             self._marks_dock.setVisible(self._show_marks)
         if vals.get("show_cpu_load", self._show_cpu_load) != self._show_cpu_load:
             self._show_cpu_load = vals["show_cpu_load"]
-            self._cpu_load_scroll.setVisible(self._show_cpu_load)
+            for tab in self._tabs:
+                tab.cpu_load_scroll.setVisible(self._show_cpu_load)
             self._tb_cpu_load_btn.setChecked(self._show_cpu_load)
         if vals["show_hover_highlight"] != self._hover_highlight_val:
             self._hover_highlight_val = vals["show_hover_highlight"]
