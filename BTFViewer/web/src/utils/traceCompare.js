@@ -5,7 +5,7 @@
 
 import { formatTime, isStiTagChannel } from '../renderer/TimelineRenderer.js'
 import { parseTaskName, taskDisplayName, taskLabelForMergeKey, taskReprGet, isIdleTaskName } from './colors.js'
-import { schedulingStats } from './statsAnalysis.js'
+import { schedulingStats, maxNs } from './statsAnalysis.js'
 import { isMigratedTask, migrationRows } from './migrationAnalysis.js'
 import { getPlacedCursors } from './statsRange.js'
 
@@ -25,11 +25,11 @@ export function traceSummarySnapshot(trace, lo = null, hi = null) {
     if (lo != null && hi != null) return ev.time >= lo && ev.time <= hi
     return true
   }).length
-  const { contextSwitches, coreGaps } = schedulingStats(trace, lo, hi)
+  const { contextSwitches, coreGaps, gapMax } = schedulingStats(trace, lo, hi)
   const gapAvgNs = coreGaps.length
     ? Math.round(coreGaps.reduce((a, b) => a + b, 0) / coreGaps.length)
     : 0
-  const gapMaxNs = coreGaps.length ? Math.max(...coreGaps) : 0
+  const gapMaxNs = coreGaps.length ? gapMax : 0
   let migrations = trace.migrations?.length ?? 0
   let migratedTasks = (trace.tasks || []).filter(mk => isMigratedTask(trace, mk)).length
   if (lo != null && hi != null) {
@@ -217,4 +217,144 @@ export function buildMigrationCompareRows(traceA, traceB, tabA = null, tabB = nu
       pingB: rbRow?.pingPong ?? 0,
     }
   })
+}
+
+function csvCell(v) {
+  const s = String(v ?? '')
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+  return s
+}
+
+function htmlCell(v) {
+  return String(v ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+/** Build CSV text for a trace-compare export (all three tabs). */
+export function buildCompareCsv(nameA, nameB, summaryRows, topTaskRows, migrationRows, scopeEnabled) {
+  const lines = []
+  lines.push(`Trace A,${csvCell(nameA)}`)
+  lines.push(`Trace B,${csvCell(nameB)}`)
+  lines.push(`Cursor scope per tab,${scopeEnabled ? 'yes' : 'no'}`)
+  lines.push('')
+
+  lines.push('Summary')
+  lines.push('Metric,Trace A,Trace B,Δ')
+  for (const row of summaryRows) {
+    lines.push([csvCell(row.label), csvCell(row.a), csvCell(row.b), csvCell(row.delta)].join(','))
+  }
+
+  lines.push('')
+  lines.push('Top Tasks')
+  lines.push('Task,CPU% A,CPU% B,Δ')
+  for (const row of topTaskRows) {
+    lines.push([csvCell(row.name), csvCell(row.cpuA), csvCell(row.cpuB), csvCell(row.delta)].join(','))
+  }
+
+  lines.push('')
+  lines.push('Core Migrations')
+  lines.push('Task,Migrations A,Migrations B,Δ,Ping-pong A,Ping-pong B')
+  for (const row of migrationRows) {
+    lines.push([
+      csvCell(row.name),
+      csvCell(row.migrationsA),
+      csvCell(row.migrationsB),
+      csvCell(row.delta),
+      csvCell(row.pingA),
+      csvCell(row.pingB),
+    ].join(','))
+  }
+
+  return lines.join('\n')
+}
+
+const _COMPARE_HTML_STYLE = `
+  :root { --bg:#e9edf3; --paper:#fff; --ink:#182230; --muted:#5f6f82; --line:#d9e0ea; --header:#16324f; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:28px; font-family:"Segoe UI",Arial,sans-serif; color:var(--ink); background:var(--bg); }
+  .report { max-width:960px; margin:0 auto; }
+  .report-head { background:linear-gradient(135deg,var(--header),#21496f); color:#f3f7fd; border-radius:14px; padding:20px 24px; margin-bottom:18px; }
+  h1 { margin:0; font-size:26px; }
+  .sub { margin-top:6px; color:#cfe1f7; font-size:13px; }
+  .report-card { margin:14px 0; background:var(--paper); border:1px solid var(--line); border-radius:12px; padding:12px 14px; }
+  h2 { margin:0 0 10px; color:#123355; font-size:17px; }
+  table { border-collapse:collapse; width:100%; }
+  th,td { border-bottom:1px solid var(--line); padding:8px 10px; font-size:13px; text-align:right; }
+  th:first-child,td:first-child { text-align:left; }
+  thead th { background:#f1f5fb; font-weight:600; }
+  tbody tr:nth-child(even) td { background:#f7f9fc; }
+  .empty { text-align:center; color:var(--muted); }
+`
+
+/** Build standalone HTML report for trace compare. */
+export function buildCompareHtml(nameA, nameB, summaryRows, topTaskRows, migrationRows, scopeEnabled) {
+  const scopeNote = scopeEnabled
+    ? 'Each side uses its own tab cursor range (C1–Cn) when 2+ cursors are placed.'
+    : 'Full trace span on each side.'
+
+  const summaryHtml = summaryRows.length
+    ? summaryRows.map(r =>
+      `<tr><td>${htmlCell(r.label)}</td><td>${htmlCell(r.a)}</td><td>${htmlCell(r.b)}</td><td>${htmlCell(r.delta)}</td></tr>`,
+    ).join('')
+    : '<tr><td colspan="4" class="empty">No data</td></tr>'
+
+  const topHtml = topTaskRows.length
+    ? topTaskRows.map(r =>
+      `<tr><td>${htmlCell(r.name)}</td><td>${htmlCell(r.cpuA)}</td><td>${htmlCell(r.cpuB)}</td><td>${htmlCell(r.delta)}</td></tr>`,
+    ).join('')
+    : '<tr><td colspan="4" class="empty">No user tasks in either trace</td></tr>'
+
+  const migHtml = migrationRows.length
+    ? migrationRows.map(r =>
+      `<tr><td>${htmlCell(r.name)}</td><td>${htmlCell(r.migrationsA)}</td><td>${htmlCell(r.migrationsB)}</td><td>${htmlCell(r.delta)}</td><td>${htmlCell(r.pingA)}</td><td>${htmlCell(r.pingB)}</td></tr>`,
+    ).join('')
+    : '<tr><td colspan="6" class="empty">No migrated tasks in either trace</td></tr>'
+
+  return `<!doctype html>
+<html><head><meta charset="utf-8"/><title>BTF Trace Compare</title><style>${_COMPARE_HTML_STYLE}</style></head>
+<body><div class="report">
+  <header class="report-head">
+    <h1>Trace Compare</h1>
+    <div class="sub">${htmlCell(nameA)} vs ${htmlCell(nameB)} · ${htmlCell(scopeNote)}</div>
+  </header>
+  <section class="report-card"><h2>Summary</h2>
+    <table><thead><tr><th>Metric</th><th>Trace A</th><th>Trace B</th><th>Δ</th></tr></thead><tbody>${summaryHtml}</tbody></table>
+  </section>
+  <section class="report-card"><h2>Top Tasks</h2>
+    <table><thead><tr><th>Task</th><th>CPU% A</th><th>CPU% B</th><th>Δ</th></tr></thead><tbody>${topHtml}</tbody></table>
+  </section>
+  <section class="report-card"><h2>Core Migrations</h2>
+    <table><thead><tr><th>Task</th><th>Migr A</th><th>Migr B</th><th>Δ</th><th>Ping-pong A</th><th>Ping-pong B</th></tr></thead><tbody>${migHtml}</tbody></table>
+  </section>
+</div></body></html>`
+}
+
+export function downloadCompareCsv(nameA, nameB, summaryRows, topTaskRows, migrationRows, scopeEnabled) {
+  const text = buildCompareCsv(nameA, nameB, summaryRows, topTaskRows, migrationRows, scopeEnabled)
+  const blob = new Blob([text], { type: 'text/csv;charset=utf-8' })
+  _downloadBlob(`trace-compare-${_timestamp()}.csv`, blob)
+}
+
+export function downloadCompareHtml(nameA, nameB, summaryRows, topTaskRows, migrationRows, scopeEnabled) {
+  const html = buildCompareHtml(nameA, nameB, summaryRows, topTaskRows, migrationRows, scopeEnabled)
+  const blob = new Blob([html], { type: 'text/html;charset=utf-8' })
+  _downloadBlob(`trace-compare-${_timestamp()}.html`, blob)
+}
+
+function _downloadBlob(filename, blob) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function _timestamp() {
+  const d = new Date()
+  const pad = n => String(n).padStart(2, '0')
+  return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
 }

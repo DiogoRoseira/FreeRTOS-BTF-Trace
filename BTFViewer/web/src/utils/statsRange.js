@@ -41,6 +41,25 @@ export function scopeSuffix(range) {
   return range ? ' (cursor range)' : ''
 }
 
+/** Map lookup — parser uses Map; some paths may yield plain objects. */
+export function traceMapGet(mapLike, key) {
+  if (!mapLike) return undefined
+  if (typeof mapLike.get === 'function') return mapLike.get(key)
+  return mapLike[key]
+}
+
+/** Iterate Map or plain-object entries without spread. */
+export function* traceMapEntries(mapLike) {
+  if (!mapLike) return
+  if (typeof mapLike.entries === 'function') {
+    yield* mapLike.entries()
+    return
+  }
+  for (const key of Object.keys(mapLike)) {
+    yield [key, mapLike[key]]
+  }
+}
+
 /** Banner text for metrics plot dialogs. */
 export function plotScopeBanner(range, timeScale, formatTimeFn) {
   if (range) {

@@ -77,18 +77,23 @@
       </div>
       <template v-if="!coresCollapsed">
         <div
-          v-for="cs in coreStats"
-          :key="cs.core"
-          class="core-stat-row"
+          class="stats-util-scroll"
+          :style="utilScrollStyle(coreStats.length)"
         >
-          <span class="core-name">{{ cs.core }}</span>
-          <div class="prog-bar">
-            <div
-              class="prog-fill"
-              :style="{ width: clampPct(cs.pct) + '%' }"
-            />
+          <div
+            v-for="cs in coreStats"
+            :key="cs.core"
+            class="core-stat-row"
+          >
+            <span class="core-name">{{ cs.core }}</span>
+            <div class="prog-bar">
+              <div
+                class="prog-fill"
+                :style="{ width: clampPct(cs.pct) + '%' }"
+              />
+            </div>
+            <span class="core-pct">{{ cs.pct.toFixed(1) }}%</span>
           </div>
-          <span class="core-pct">{{ cs.pct.toFixed(1) }}%</span>
         </div>
       </template>
     </template>
@@ -125,25 +130,31 @@
         No user tasks found
       </div>
       <div
-        v-for="t in topTasks"
-        :key="t.mk"
-        class="task-stat-row"
+        v-else
+        class="stats-util-scroll"
+        :style="utilScrollStyle(topTasks.length)"
       >
-        <button
-          class="task-stat-name task-link"
-          type="button"
-          :title="`Highlight ${t.name} in the timeline`"
-          @click="emit('highlightTask', t.mk)"
+        <div
+          v-for="t in topTasks"
+          :key="t.mk"
+          class="task-stat-row"
         >
-          {{ t.name }}
-        </button>
-        <div class="prog-bar">
-          <div
-            class="prog-fill"
-            :style="{ width: clampPct(t.pct) + '%' }"
-          />
+          <button
+            class="task-stat-name task-link"
+            type="button"
+            :title="`Highlight ${t.name} in the timeline`"
+            @click="emit('highlightTask', t.mk)"
+          >
+            {{ t.name }}
+          </button>
+          <div class="prog-bar">
+            <div
+              class="prog-fill task-fill"
+              :style="{ width: clampPct(t.pct) + '%' }"
+            />
+          </div>
+          <span class="task-stat-pct">{{ t.pct.toFixed(1) }}%</span>
         </div>
-        <span class="task-stat-pct">{{ t.pct.toFixed(1) }}%</span>
       </div>
     </template>
 
@@ -517,14 +528,49 @@
     <div class="stats-export-row">
       <button
         class="action-btn"
+        title="Export statistics as CSV"
         @click="exportCsv"
       >
+        <svg
+          class="export-icon"
+          viewBox="0 0 16 16"
+          width="14"
+          height="14"
+          fill="currentColor"
+          aria-hidden="true"
+        >
+          <path d="M2 1h12a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1zm0 1v12h12V2H2zm2 2h8v1H4V4zm0 2h8v1H4V6zm0 2h5v1H4V8z" />
+        </svg>
         Export CSV
       </button>
       <button
         class="action-btn"
+        title="Export statistics as HTML report"
         @click="exportHtml"
       >
+        <svg
+          class="export-icon"
+          viewBox="0 0 16 16"
+          width="14"
+          height="14"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.2"
+          aria-hidden="true"
+        >
+          <rect
+            x="2.5"
+            y="2"
+            width="11"
+            height="12"
+            rx="1"
+          />
+          <path
+            d="M5.5 6.5 3.5 8.5l2 2M10.5 6.5l2 2-2 2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          />
+        </svg>
         Export HTML
       </button>
       <button
@@ -805,7 +851,7 @@
 import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { toBlob as domToBlob, toSvg as domToSvg } from 'html-to-image'
 import { formatTime, isStiTagChannel } from '../renderer/TimelineRenderer.js'
-import { taskDisplayName, parseTaskName, taskMergeKey, isIdleTaskName, taskColor } from '../utils/colors.js'
+import { taskDisplayName, parseTaskName, taskMergeKey, isIdleTaskName, taskColor, taskReprGet } from '../utils/colors.js'
 import {
   getPlacedCursors,
   getStatsRange,
@@ -814,11 +860,15 @@ import {
   segOverlapsRange,
   scopeSuffix,
   plotScopeBanner,
+  traceMapGet,
+  traceMapEntries,
 } from '../utils/statsRange.js'
 import {
   blockingTimeSamples,
   blockingTimePlotPoints,
   schedulingStats,
+  maxNs,
+  minNs,
   findWcetSegment,
   findBcetSegment,
   findExtremeBlockingSegment,
@@ -842,14 +892,32 @@ const blockingCollapsed = ref(false)
 const migrationCollapsed = ref(false)
 const interArrivalCollapsed = ref(false)
 const scopeToCursors = ref(true)
-const sectionHeights = ref({
-  migrations: 220,
-  exec: 220,
-  block: 220,
-  inter: 220,
-})
 const TABLE_MIN_H = 80
 const TABLE_MAX_H = 480
+const STATS_MAX_VISIBLE_ROWS = 8
+const STATS_UTIL_ROW_H = 16
+const STATS_UTIL_ROW_GAP = 3
+// Match .stats-table cell metrics: padding 3+3, border 1, line-height 14.
+const STATS_TABLE_ROW_H = 21
+const STATS_TABLE_HEADER_H = 22
+const STATS_TABLE_HSCROLL_H = 14
+const STATS_TABLE_WRAP_BORDER = 2
+
+function statsTableViewportHeight(visibleRows = STATS_MAX_VISIBLE_ROWS, reserveHScroll = false) {
+  let h = STATS_TABLE_HEADER_H + visibleRows * STATS_TABLE_ROW_H + STATS_TABLE_WRAP_BORDER
+  if (reserveHScroll) h += STATS_TABLE_HSCROLL_H
+  return h
+}
+
+const STATS_TABLE_DEFAULT_H = statsTableViewportHeight()
+const STATS_TABLE_MIG_DEFAULT_H = statsTableViewportHeight(STATS_MAX_VISIBLE_ROWS, true)
+
+const sectionHeights = ref({
+  migrations: STATS_TABLE_MIG_DEFAULT_H,
+  exec: STATS_TABLE_DEFAULT_H,
+  block: STATS_TABLE_DEFAULT_H,
+  inter: STATS_TABLE_DEFAULT_H,
+})
 let _tableResize = null
 const openPlotRef = ref(null)   // { mk, kind } when plot dialog is open
 const plotContentRef = ref(null)
@@ -862,7 +930,14 @@ const canCompareTabs = computed(() => loadedTabs.value.length >= 2)
 function clampPct(v) { return Math.max(0, Math.min(100, v)).toFixed(1) }
 
 function tableHeight(id) {
-  return sectionHeights.value[id] ?? 220
+  const fallback = id === 'migrations' ? STATS_TABLE_MIG_DEFAULT_H : STATS_TABLE_DEFAULT_H
+  return sectionHeights.value[id] ?? fallback
+}
+
+function utilScrollStyle(rowCount) {
+  const vis = Math.min(Math.max(rowCount, 1), STATS_MAX_VISIBLE_ROWS)
+  const h = vis * STATS_UTIL_ROW_H + Math.max(0, vis - 1) * STATS_UTIL_ROW_GAP + 2
+  return { height: `${h}px`, overflowY: 'auto', overflowX: 'hidden', flexShrink: '0' }
 }
 
 function onTableResizeStart(id, e) {
@@ -953,27 +1028,26 @@ const schedulingSummary = computed(() => {
   const r = statsRange.value
   const lo = r?.lo ?? null
   const hi = r?.hi ?? null
-  const { contextSwitches, coreGaps } = schedulingStats(tr, lo, hi)
+  const { contextSwitches, coreGaps, gapMax } = schedulingStats(tr, lo, hi)
   if (contextSwitches <= 0) return null
   const scale = tr.timeScale
   const avg = Math.round(coreGaps.reduce((a, b) => a + b, 0) / coreGaps.length)
   return {
     contextSwitches,
     gapAvg: formatTime(avg, scale),
-    gapMax: formatTime(Math.max(...coreGaps), scale),
+    gapMax: formatTime(gapMax, scale),
   }
 })
 
-// ---- Core utilisation (excl. IDLE/TICK) — only computed when visible ----
+// ---- Core utilisation (excl. IDLE/TICK) --------------------------------
 const coreStats = computed(() => {
-  if (coresCollapsed.value) return []
   const tr = props.trace
   if (!tr || !tr.coreNames || tr.coreNames.length === 0) return []
   const r = statsRange.value
   const total = r ? (r.hi - r.lo) : (tr.timeMax - tr.timeMin)
   if (total <= 0) return []
   return tr.coreNames.map(core => {
-    const segs = tr.coreSegs.get(core) || []
+    const segs = traceMapGet(tr.coreSegs, core) || []
     let active = 0
     for (const s of segs) {
       const { name } = parseTaskName(s.task)
@@ -984,17 +1058,16 @@ const coreStats = computed(() => {
   })
 })
 
-// ---- Top 10 tasks by CPU — only computed when visible ------------------
+// ---- Top 10 tasks by CPU -----------------------------------------------
 const topTasks = computed(() => {
-  if (tasksCollapsed.value) return []
   const tr = props.trace
   if (!tr || !tr.segByMergeKey) return []
   const r = statsRange.value
   const total = r ? (r.hi - r.lo) : (tr.timeMax - tr.timeMin)
   if (total <= 0) return []
   const accum = new Map()
-  for (const [mk, segs] of tr.segByMergeKey) {
-    const repr = tr.taskRepr.get(mk) || mk
+  for (const [mk, segs] of traceMapEntries(tr.segByMergeKey)) {
+    const repr = taskReprGet(tr, mk) || mk
     const { name } = parseTaskName(repr)
     if (isIdleTaskName(name) || name === 'TICK') continue
     let t = 0
@@ -1008,7 +1081,7 @@ const topTasks = computed(() => {
     .slice(0, 10)
     .map(([mk, t]) => ({
       mk,
-      name: taskDisplayName(tr.taskRepr.get(mk) || mk),
+      name: taskDisplayName(taskReprGet(tr, mk) || mk),
       pct: 100.0 * t / total,
     }))
 })
@@ -1481,7 +1554,7 @@ function exportCsv() {
   if (coreGaps.length > 0) {
     const gapAvg = Math.round(coreGaps.reduce((a, b) => a + b, 0) / coreGaps.length)
     lines.push(`Core gap avg${suffix},${_csvCell(formatTime(gapAvg, tr.timeScale))}`)
-    lines.push(`Core gap max${suffix},${_csvCell(formatTime(Math.max(...coreGaps), tr.timeScale))}`)
+    lines.push(`Core gap max${suffix},${_csvCell(formatTime(maxNs(coreGaps), tr.timeScale))}`)
   }
 
   if (rangeStats.value && !r) {
@@ -1751,7 +1824,7 @@ function _coreUtilRows(tr, range) {
   const total = range ? (range.hi - range.lo) : (tr.timeMax - tr.timeMin)
   if (total <= 0) return []
   return tr.coreNames.map(core => {
-    const segs = tr.coreSegs.get(core) || []
+    const segs = traceMapGet(tr.coreSegs, core) || []
     let active = 0
     for (const s of segs) {
       const { name } = parseTaskName(s.task)
@@ -1770,8 +1843,8 @@ function _taskCpuRows(tr, range) {
   const total = range ? (range.hi - range.lo) : (tr.timeMax - tr.timeMin)
   if (total <= 0) return []
   const accum = new Map()
-  for (const [mk, segs] of tr.segByMergeKey) {
-    const repr = tr.taskRepr.get(mk) || mk
+  for (const [mk, segs] of traceMapEntries(tr.segByMergeKey)) {
+    const repr = taskReprGet(tr, mk) || mk
     const { name } = parseTaskName(repr)
     if (isIdleTaskName(name) || name === 'TICK') continue
     let t = 0
@@ -1784,7 +1857,7 @@ function _taskCpuRows(tr, range) {
     .sort((a, b) => b[1] - a[1])
     .slice(0, 10)
     .map(([mk, t]) => ({
-      name: taskDisplayName(tr.taskRepr.get(mk) || mk),
+      name: taskDisplayName(taskReprGet(tr, mk) || mk),
       pct: (100.0 * t / total).toFixed(1),
     }))
 }
@@ -1998,8 +2071,8 @@ function _computeRangeStats(cursors) {
   }
 
   if (durations.length > 0) {
-    const minD = Math.min(...durations)
-    const maxD = Math.max(...durations)
+    const minD = minNs(durations)
+    const maxD = maxNs(durations)
     const avgD = Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
     result.dMin = formatTime(minD, scale)
     result.dMax = formatTime(maxD, scale)
@@ -2043,6 +2116,7 @@ watch(plotData, () => {
   font-family: monospace;
   overflow-y: auto;
   flex: 1;
+  min-height: 0;
   gap: 0;
 }
 
@@ -2147,12 +2221,25 @@ watch(plotData, () => {
   font-style: italic;
 }
 
+.stats-util-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex-shrink: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
 .core-stat-row,
 .task-stat-row {
   display: flex;
   align-items: center;
   gap: 5px;
-  margin-bottom: 3px;
+  height: 16px;
+  min-height: 16px;
+  max-height: 16px;
+  margin-bottom: 0;
+  flex-shrink: 0;
 }
 
 .core-name {
@@ -2203,9 +2290,19 @@ watch(plotData, () => {
   transition: width 0.2s;
 }
 
-.core-pct,
-.task-stat-pct {
+.prog-fill.task-fill {
+  background: #5B9BD5;
+}
+
+.core-pct {
   color: #77BB77;
+  min-width: 38px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.task-stat-pct {
+  color: #6AAADD;
   min-width: 38px;
   text-align: right;
   flex-shrink: 0;
@@ -2261,6 +2358,8 @@ watch(plotData, () => {
   border-bottom: 1px solid var(--border);
   text-align: right;
   white-space: nowrap;
+  line-height: 14px;
+  box-sizing: border-box;
 }
 
 .stats-table th {
@@ -2323,6 +2422,10 @@ watch(plotData, () => {
 
 .action-btn {
   flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
   padding: 3px 8px;
   background: transparent;
   border: 1px solid var(--border);
@@ -2330,6 +2433,11 @@ watch(plotData, () => {
   color: var(--fg-dim);
   font-size: 11px;
   cursor: pointer;
+}
+
+.action-btn .export-icon {
+  flex-shrink: 0;
+  opacity: 0.9;
 }
 
 .action-btn:hover {

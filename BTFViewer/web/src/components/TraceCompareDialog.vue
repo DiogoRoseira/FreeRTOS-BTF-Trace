@@ -172,6 +172,58 @@
           </tbody>
         </table>
       </div>
+
+      <div class="compare-dialog-footer">
+        <button
+          type="button"
+          class="compare-export-btn"
+          title="Export compare tables as CSV"
+          @click="onExportCsv"
+        >
+          <svg
+            class="export-icon"
+            viewBox="0 0 16 16"
+            width="14"
+            height="14"
+            fill="currentColor"
+            aria-hidden="true"
+          >
+            <path d="M2 1h12a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1zm0 1v12h12V2H2zm2 2h8v1H4V4zm0 2h8v1H4V6zm0 2h5v1H4V8z" />
+          </svg>
+          Export CSV
+        </button>
+        <button
+          type="button"
+          class="compare-export-btn"
+          title="Export compare report as HTML"
+          @click="onExportHtml"
+        >
+          <svg
+            class="export-icon"
+            viewBox="0 0 16 16"
+            width="14"
+            height="14"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.2"
+            aria-hidden="true"
+          >
+            <rect
+              x="2.5"
+              y="2"
+              width="11"
+              height="12"
+              rx="1"
+            />
+            <path
+              d="M5.5 6.5 3.5 8.5l2 2M10.5 6.5l2 2-2 2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          Export HTML
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -182,6 +234,8 @@ import {
   buildSummaryCompareRows,
   buildTopTasksCompareRows,
   buildMigrationCompareRows,
+  downloadCompareCsv,
+  downloadCompareHtml,
 } from '../utils/traceCompare.js'
 
 const props = defineProps({
@@ -223,6 +277,28 @@ const topTaskRows = computed(() =>
   buildTopTasksCompareRows(traceA.value, traceB.value, tabA.value, tabB.value, scopeToCursors.value))
 const migrationRows = computed(() =>
   buildMigrationCompareRows(traceA.value, traceB.value, tabA.value, tabB.value, scopeToCursors.value))
+
+function onExportCsv() {
+  downloadCompareCsv(
+    tabA.value?.name ?? 'Trace A',
+    tabB.value?.name ?? 'Trace B',
+    summaryRows.value,
+    topTaskRows.value,
+    migrationRows.value,
+    scopeToCursors.value,
+  )
+}
+
+function onExportHtml() {
+  downloadCompareHtml(
+    tabA.value?.name ?? 'Trace A',
+    tabB.value?.name ?? 'Trace B',
+    summaryRows.value,
+    topTaskRows.value,
+    migrationRows.value,
+    scopeToCursors.value,
+  )
+}
 </script>
 
 <style scoped>
@@ -387,5 +463,36 @@ const migrationRows = computed(() =>
   text-align: center !important;
   color: var(--fg-dim);
   padding: 16px 6px !important;
+}
+
+.compare-dialog-footer {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+}
+
+.compare-export-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 11px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+
+.compare-export-btn:hover {
+  background: var(--tb-btn-hover);
+  color: var(--fg);
+}
+
+.export-icon {
+  flex-shrink: 0;
+  opacity: 0.9;
 }
 </style>

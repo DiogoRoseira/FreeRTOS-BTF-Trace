@@ -11,6 +11,8 @@
       :expanded="expanded"
       :sti-expanded="stiExpanded"
       :scroll-y="viewport.scrollY"
+      :body-h="labelBodyH"
+      :row-layout="cachedRowLayout"
       :highlight-key="options.highlightKey"
       :show-sti="options.showSti !== false"
       :migrated-only-filter="!!options.migratedOnlyFilter"
@@ -163,7 +165,7 @@ import { toBlob as domToBlob } from 'html-to-image'
 import LabelColumn from './LabelColumn.vue'
 import StiTooltip  from './StiTooltip.vue'
 import SegmentTooltip from './SegmentTooltip.vue'
-import { render as renderTimeline, renderVertical, buildRowLayout, buildColumnLayout, drawHoverLine, drawHoverLineVertical, drawCursors, drawCursorsVertical, drawMarksHorizontal, drawMarksVertical, RULER_H, ROW_H, STI_ROW_H, STI_WAVEFORM_H, ROW_GAP, isStiTagChannel, RULER_W, COL_W, HEADER_H, formatTime } from '../renderer/TimelineRenderer.js'
+import { render as renderTimeline, renderVertical, buildRowLayout, buildColumnLayout, drawHoverLine, drawHoverLineVertical, drawCursors, drawCursorsVertical, drawMarksHorizontal, drawMarksVertical, RULER_H, ROW_H, STI_ROW_H, STI_WAVEFORM_H, ROW_GAP, isStiTagChannel, RULER_W, COL_W, HEADER_H, formatTime, OVERVIEW_MICRO_ROWS, rowBandHeight, visibleRowIndexRange } from '../renderer/TimelineRenderer.js'
 import { renderToSvg } from '../renderer/SvgExporter.js'
 import { InteractionHandler } from '../renderer/InteractionHandler.js'
 import { taskMergeKey, taskColor, coreColor, coreTint, stiNoteColor, parseTaskName, stiChannelColor, taskDisplayName } from '../utils/colors.js'
@@ -190,7 +192,29 @@ const overlayEl   = ref(null)
 const expanded    = reactive(new Set())
 const stiExpanded = reactive(new Set())
 
+/** Auto-expand all cores only on small traces; large SMP traces stay collapsed. */
+const AUTO_EXPAND_CORES_MAX = 8
+
 const orientation = computed(() => props.options.orientation || 'h')
+
+// Cached row/column structure (scroll-independent — offset applied at paint time).
+const cachedRowLayout = computed(() => {
+  if (!props.trace) return null
+  return buildRowLayout(
+    props.trace, props.options.viewMode, expanded, 0,
+    props.options.showSti !== false, stiExpanded,
+    !!props.options.migratedOnlyFilter,
+  )
+})
+
+const cachedColumnLayout = computed(() => {
+  if (!props.trace) return null
+  return buildColumnLayout(
+    props.trace, props.options.viewMode, expanded, 0,
+    props.options.showSti !== false, stiExpanded,
+    !!props.options.migratedOnlyFilter,
+  )
+})
 
 // ---- Scrollbar geometry --------------------------------------------------
 const traceBounds = computed(() => {
@@ -201,21 +225,14 @@ const traceBounds = computed(() => {
 
 const totalRowHeight = computed(() => {
   if (!props.trace || orientation.value !== 'h') return 0
-  const { totalHeight } = buildRowLayout(
-    props.trace, props.options.viewMode, expanded, 0,
-    props.options.showSti !== false, stiExpanded,
-  )
-  return totalHeight
+  return cachedRowLayout.value?.totalHeight ?? 0
 })
 
-// Cached column-layout total width for vertical mode (avoids calling
-// buildColumnLayout twice per reactive update for showHScrollbar + hThumbStyle).
+const labelBodyH = computed(() => Math.max(0, viewport.canvasH - RULER_H))
+
 const totalColumnWidth = computed(() => {
   if (!props.trace || orientation.value !== 'v') return 0
-  const { totalWidth } = buildColumnLayout(
-    props.trace, props.options.viewMode, expanded, 0, props.options.showSti !== false, stiExpanded,
-  )
-  return totalWidth
+  return cachedColumnLayout.value?.totalWidth ?? 0
 })
 
 const showHScrollbar = computed(() => {
@@ -379,6 +396,8 @@ function paint() {
     darkMode:         props.options.darkMode,
     migratedOnlyFilter: !!props.options.migratedOnlyFilter,
     lockedTaskKey:    props.options.viewMode === 'core' ? (props.options.lockedTaskKey ?? null) : null,
+    rowLayout:        cachedRowLayout.value,
+    columnLayout:     cachedColumnLayout.value,
   }
   if (orientation.value === 'v') {
     renderVertical(ctx, props.trace, viewport, renderOpts)
@@ -456,6 +475,9 @@ function setupHandler() {
       stiExpanded,
       orientation: orientation.value,
       showSti: props.options.showSti !== false,
+      migratedOnlyFilter: !!props.options.migratedOnlyFilter,
+      rowLayout: cachedRowLayout.value,
+      columnLayout: cachedColumnLayout.value,
     }),
     getMarks:    () => props.options.marks || [],
     onViewportChange(vp) {
@@ -463,7 +485,7 @@ function setupHandler() {
       viewport.timeEnd   = vp.timeEnd
       if (vp.scrollY != null) {
         if (props.trace) {
-          const { totalHeight } = buildRowLayout(props.trace, props.options.viewMode, expanded, 0, props.options.showSti !== false, stiExpanded)
+          const totalHeight = cachedRowLayout.value?.totalHeight ?? 0
           const maxScrollY = Math.max(0, totalHeight - (viewport.canvasH - RULER_H))
           viewport.scrollY = Math.max(0, Math.min(vp.scrollY, maxScrollY))
         } else {
@@ -930,9 +952,10 @@ function collapseAll() {
 // ---- Watchers ------------------------------------------------------------
 watch(() => props.trace, (trace) => {
   if (!trace) return
-  // Default: expand all cores so task rows are visible on startup
   expanded.clear()
-  for (const coreName of trace.coreNames) expanded.add(coreName)
+  if (trace.coreNames.length <= AUTO_EXPAND_CORES_MAX) {
+    for (const coreName of trace.coreNames) expanded.add(coreName)
+  }
   nextTick(() => {
     const saved = props.persistedViewport
     if (isRestorableViewport(saved, trace)) {
@@ -963,16 +986,24 @@ watch(() => props.options.selectedMarkId, () => {
   paintHoverOverlay()
 })
 
-// Show navigator popup on scroll / pan when content overflows the viewport
+let _overviewRaf = null
+
+// Show navigator popup on scroll / pan when content overflows the viewport (rAF-coalesced).
 watch(
   [() => viewport.timeStart, () => viewport.timeEnd, () => viewport.scrollY, () => viewport.scrollX],
   () => {
     if (!props.trace) return
-    if (showHScrollbar.value || showVScrollbar.value) {
-      showOverviewPopup()
-    } else {
-      clearTimeout(_overviewHideTimer)
-      overviewVisible.value = false
+    if (!_overviewRaf) {
+      _overviewRaf = requestAnimationFrame(() => {
+        _overviewRaf = null
+        if (!props.trace) return
+        if (showHScrollbar.value || showVScrollbar.value) {
+          showOverviewPopup()
+        } else {
+          clearTimeout(_overviewHideTimer)
+          overviewVisible.value = false
+        }
+      })
     }
   },
 )
@@ -995,15 +1026,11 @@ watch(stiHover, (ev) => {
     const w = canvasEl.value.clientWidth
     const pxPerNs = w / (viewport.timeEnd - viewport.timeStart)
     stiHoverPos.x = (ev.time - viewport.timeStart) * pxPerNs
-    const { rows } = buildRowLayout(
-      props.trace,
-      props.options.viewMode,
-      expanded,
-      RULER_H - viewport.scrollY,
-      props.options.showSti !== false,
-    )
-    const row = rows.find(r => r.type === 'sti' && r.key === ev.target)
-    stiHoverPos.y = row ? (row.y + STI_ROW_H / 2) : (canvasEl.value.clientHeight / 2)
+    const rows = cachedRowLayout.value?.rows
+    const row = rows?.find(r => r.type === 'sti' && r.key === ev.target)
+    stiHoverPos.y = row
+      ? (RULER_H + row.y - viewport.scrollY + rowBandHeight(row) / 2)
+      : (canvasEl.value.clientHeight / 2)
   }
 })
 
@@ -1013,35 +1040,42 @@ watch(segmentHover, (seg) => {
     const bodyH = viewport.canvasH - HEADER_H
     const pxPerNs = bodyH / (viewport.timeEnd - viewport.timeStart)
     segmentHoverPos.y = HEADER_H + (seg.start - viewport.timeStart) * pxPerNs
-    const { cols } = buildColumnLayout(
-      props.trace, props.options.viewMode, expanded, viewport.scrollX,
-      props.options.showSti !== false, stiExpanded,
-    )
+    const cols = cachedColumnLayout.value?.cols
     let col = null
-    for (const c of cols) {
-      if (c.type !== 'task' && c.type !== 'core-task') continue
-      const match = c.type === 'task'
-        ? taskMergeKey(seg.task) === c.key
-        : (c.coreKey === seg.core && c.taskKey === seg.task)
-      if (match) { col = c; break }
+    if (cols) {
+      const scrollX = viewport.scrollX || 0
+      const mk = taskMergeKey(seg.task)
+      for (const c of cols) {
+        if (c.type !== 'task' && c.type !== 'core-task') continue
+        const match = c.type === 'task'
+          ? mk === c.key
+          : (c.coreKey === seg.core && c.taskKey === seg.task)
+        if (match) { col = c; break }
+      }
+      segmentHoverPos.x = col ? (col.x - scrollX + COL_W / 2) : (canvasEl.value.clientWidth / 2)
+    } else {
+      segmentHoverPos.x = canvasEl.value.clientWidth / 2
     }
-    segmentHoverPos.x = col ? (col.x + COL_W / 2) : (canvasEl.value.clientWidth / 2)
   } else {
     const pxPerNs = viewport.canvasW / (viewport.timeEnd - viewport.timeStart)
     segmentHoverPos.x = (seg.start - viewport.timeStart) * pxPerNs
-    const { rows } = buildRowLayout(
-      props.trace, props.options.viewMode, expanded,
-      RULER_H - viewport.scrollY, props.options.showSti !== false, stiExpanded,
-    )
+    const rows = cachedRowLayout.value?.rows
     let row = null
-    for (const r of rows) {
-      if (r.type !== 'task' && r.type !== 'core-task') continue
-      const match = r.type === 'task'
-        ? taskMergeKey(seg.task) === r.key
-        : (r.coreKey === seg.core && r.taskKey === seg.task)
-      if (match) { row = r; break }
+    if (rows) {
+      const mk = taskMergeKey(seg.task)
+      const { i0, i1 } = visibleRowIndexRange(rows, viewport.scrollY, viewport.canvasH - RULER_H, 4)
+      for (let i = i0; i < i1; i++) {
+        const r = rows[i]
+        if (r.type !== 'task' && r.type !== 'core-task') continue
+        const match = r.type === 'task'
+          ? r.key === mk
+          : (r.coreKey === seg.core && r.taskKey === seg.task)
+        if (match) { row = r; break }
+      }
     }
-    segmentHoverPos.y = row ? (row.y + ROW_H / 2) : (canvasEl.value.clientHeight / 2)
+    segmentHoverPos.y = row
+      ? (RULER_H + row.y - viewport.scrollY + ROW_H / 2)
+      : (canvasEl.value.clientHeight / 2)
   }
 })
 
@@ -1208,12 +1242,20 @@ function _paintOverviewBg(bgCanvas, tr, lo, hi, span, W, H, totH) {
 
   if (rowDefs.length) {
     const rowH = taskAreaH / rowDefs.length
-    // Colour cache keyed by task string for per-segment core-header lookups.
+    const microOverview = rowDefs.length > OVERVIEW_MICRO_ROWS
     const segColorCache = new Map()
     for (let i = 0; i < rowDefs.length; i++) {
       const rd = rowDefs[i]
       const y  = i * rowH
       const rh = Math.max(1, rowH - 0.3)
+      if (microOverview) {
+        if (!rd.segs.length) continue
+        ctx.globalAlpha = 0.55
+        ctx.fillStyle = rd.color || '#888'
+        ctx.fillRect(0, y + rh * 0.25, W, rh * 0.5)
+        ctx.globalAlpha = 1
+        continue
+      }
       for (const seg of rd.segs) {
         const x  = (seg.start - lo) * pxPerNs
         const sw = Math.max(0.5, (seg.end - seg.start) * pxPerNs)

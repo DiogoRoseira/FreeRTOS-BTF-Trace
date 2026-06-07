@@ -49,7 +49,56 @@ export const COL_W      =  26  // column width per task/core – vertical mode
 // merged via lodReduce; below it, individual segments are drawn with outlines.
 // visibleSegs() already selects the right LOD bin tier automatically.
 const PAINT_LOD_COARSE = 200    // ns/px: use coarse (merged) paint above this zoom level
+/** Max segment rectangles drawn per frame; beyond this, paint degrades to coarse/micro. */
+const PAINT_SEG_BUDGET   = 5000
+/** Fraction of budget at which outlines, labels, and core tint are skipped. */
+const PAINT_BUDGET_LITE  = 0.40
+/** Task rows above this count use micro bars in the navigator thumbnail. */
+export const OVERVIEW_MICRO_ROWS = 128
+/** Fraction of budget at which only a single activity bar is drawn per row. */
+const PAINT_BUDGET_MICRO = 1.0
 const TICK_COLOR = '#E8C84A'
+
+function createPaintBudget() {
+  return { n: 0, max: PAINT_SEG_BUDGET }
+}
+
+function budgetMicro(b) {
+  return b.n >= b.max * PAINT_BUDGET_MICRO
+}
+
+function budgetLite(b) {
+  return b.n >= b.max * PAINT_BUDGET_LITE
+}
+
+function budgetFull(b) {
+  return b.n >= b.max
+}
+
+/** Single tinted activity bar when the per-frame segment budget is exhausted. */
+function paintMicroBar(ctx, timeStart, timeEnd, pxPerNs, rowY, rowH, baseColor) {
+  const w = Math.max(1, (timeEnd - timeStart) * pxPerNs)
+  const barH = Math.max(1, rowH * 0.5)
+  const barY = rowY + (rowH - barH) / 2
+  ctx.save()
+  ctx.globalAlpha = 0.55
+  ctx.fillStyle = baseColor
+  ctx.fillRect(0, barY, w, barH)
+  ctx.restore()
+}
+
+/** Single activity bar for vertical mode (time on Y axis). */
+function paintMicroBarVertical(ctx, timeStart, timeEnd, pxPerNs, headerH, colX, colW, baseColor) {
+  const y1 = headerH
+  const h  = Math.max(1, (timeEnd - timeStart) * pxPerNs)
+  const barW = Math.max(1, colW * 0.5)
+  const barX = colX + (colW - barW) / 2
+  ctx.save()
+  ctx.globalAlpha = 0.55
+  ctx.fillStyle = baseColor
+  ctx.fillRect(barX, y1, barW, h)
+  ctx.restore()
+}
 
 // ---- Time formatting -------------------------------------------------------
 
@@ -152,6 +201,59 @@ export function buildRowLayout(trace, viewMode, expanded, yStart, showSti = true
   return { rows, totalHeight: y - yStart }
 }
 
+/** Row band height in px (excludes inter-row gap — gap is encoded in row.y spacing). */
+export function rowBandHeight(row) {
+  if (row.type === 'sti') return row.isExpanded ? STI_WAVEFORM_H : STI_ROW_H
+  return ROW_H
+}
+
+/**
+ * Index range [i0, i1) of rows that intersect the vertical viewport.
+ * Rows use scroll-independent y (yStart=0 layout).
+ */
+export function visibleRowIndexRange(rows, scrollY, bodyH, buffer = 2) {
+  if (!rows || rows.length === 0) return { i0: 0, i1: 0 }
+  const visTop = scrollY
+  const visBot = scrollY + bodyH
+
+  let i0 = 0
+  while (i0 < rows.length && rows[i0].y + rowBandHeight(rows[i0]) <= visTop) i0++
+  i0 = Math.max(0, i0 - buffer)
+
+  let i1 = i0
+  while (i1 < rows.length && rows[i1].y <= visBot) i1++
+  i1 = Math.min(rows.length, i1 + buffer)
+
+  return { i0, i1 }
+}
+
+/** Apply scroll offset to a layout built with yStart=0. Prefer inline yOff in hot paths. */
+export function offsetRowLayout(layout, yStart) {
+  if (!layout || !yStart) return layout
+  return {
+    rows: layout.rows.map(r => ({ ...r, y: r.y + yStart })),
+    totalHeight: layout.totalHeight,
+  }
+}
+
+/** Pick segment LOD tier; use coarse bins when paint would merge sub-pixel segments anyway. */
+function segsForPaint(lodData, timeStart, timeEnd, nsPerPx, lodTpp, ultraTpp) {
+  const tpp = (nsPerPx > PAINT_LOD_COARSE && nsPerPx < lodTpp) ? lodTpp : nsPerPx
+  return visibleSegs(lodData, timeStart, timeEnd, tpp, lodTpp, ultraTpp)
+}
+
+/** Cached scroll-independent row list from options, or build on demand. */
+function resolveRows(trace, options, viewMode, expanded, showSti, stiExpanded, migratedOnlyFilter) {
+  if (options.rowLayout?.rows) return options.rowLayout.rows
+  return buildRowLayout(trace, viewMode, expanded, 0, showSti, stiExpanded, migratedOnlyFilter).rows
+}
+
+/** Cached scroll-independent column list from options, or build on demand. */
+function resolveCols(trace, options, viewMode, expanded, showSti, stiExpanded, migratedOnlyFilter) {
+  if (options.columnLayout?.cols) return options.columnLayout.cols
+  return buildColumnLayout(trace, viewMode, expanded, 0, showSti, stiExpanded, migratedOnlyFilter).cols
+}
+
 // ---- Main render function --------------------------------------------------
 
 /**
@@ -199,8 +301,13 @@ export function render(ctx, trace, viewport, options = {}) {
   ctx.fillStyle = darkMode ? '#2D2D2D' : '#F0F0F0'
   ctx.fillRect(0, 0, canvasW, RULER_H)
 
-  // ---- Row layout ----
-  const { rows } = buildRowLayout(trace, viewMode, expanded, RULER_H - scrollY, showSti, stiExpanded, migratedOnlyFilter)
+  // ---- Row layout (scroll offset applied inline — no per-frame row copy) ----
+  const rowLayoutBase = options.rowLayout
+  const rows = rowLayoutBase?.rows
+    ?? buildRowLayout(trace, viewMode, expanded, 0, showSti, stiExpanded, migratedOnlyFilter).rows
+  const yOff = RULER_H - scrollY
+  const { i0, i1 } = visibleRowIndexRange(rows, scrollY, bodyH)
+  const budget = createPaintBudget()
 
   // ---- Grid lines (optional) ----
   if (showGrid) {
@@ -226,27 +333,27 @@ export function render(ctx, trace, viewport, options = {}) {
   ctx.rect(0, RULER_H, canvasW, bodyH)
   ctx.clip()
 
-  // ---- Task / Core rows ----
-  for (const row of rows) {
-    const rowY = row.y
-    const rowH = row.type === 'sti' ? (row.isExpanded ? STI_WAVEFORM_H : STI_ROW_H) : ROW_H
-    if (rowY + rowH < RULER_H || rowY > canvasH) continue  // row not visible
+  // ---- Task / Core rows (visible range only) ----
+  for (let ri = i0; ri < i1; ri++) {
+    const row = rows[ri]
+    const rowY = row.y + yOff
+    const rowH = rowBandHeight(row)
 
     if (row.type === 'task') {
-      drawTaskRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasW, darkMode, highlightSegment)
+      drawTaskRow(ctx, trace, row, rowY, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasW, darkMode, highlightSegment, budget)
     } else if (row.type === 'core') {
-      drawCoreRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, canvasW, darkMode)
+      drawCoreRow(ctx, trace, row, rowY, timeStart, timeEnd, pxPerNs, nsPerPx, canvasW, darkMode, budget)
     } else if (row.type === 'core-task') {
-      drawCoreTaskRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasW, darkMode, highlightSegment, lockedTaskKey)
+      drawCoreTaskRow(ctx, trace, row, rowY, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasW, darkMode, highlightSegment, lockedTaskKey, budget)
     } else if (row.type === 'sti') {
-      drawStiRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, canvasW, darkMode, stiLogScale)
+      drawStiRow(ctx, trace, row, rowY, timeStart, timeEnd, pxPerNs, canvasW, darkMode, stiLogScale)
     }
   }
 
   ctx.restore()
 
   // ---- Locked segment enlarged pass (unclipped, draws over row gap) ----
-  drawLockedSegmentHoriz(ctx, trace, rows, highlightSegment, timeStart, timeEnd, pxPerNs, nsPerPx, darkMode)
+  drawLockedSegmentHoriz(ctx, trace, rows, yOff, highlightSegment, timeStart, timeEnd, pxPerNs, nsPerPx, darkMode)
 
   // ---- Marks (bookmarks) ----
   drawMarksHorizontal(ctx, marks, trace, timeStart, pxPerNs, canvasW, canvasH, darkMode)
@@ -407,27 +514,38 @@ function coreLodData(trace, coreName) {
 /**
  * Paint segments for a row.
  * Handles LOD selection, sub-pixel merging, segment fill + optional core tint.
+ * Degrades to coarse / micro when the per-frame paint budget is exhausted.
  */
 function paintSegments(ctx, segs, timeStart, timeEnd, pxPerNs, nsPerPx, rowY, rowH,
-                       baseColor, trace, applyCoreTint, highlightKey, rowMk, darkMode, segLabel, hlSeg) {
+                       baseColor, trace, applyCoreTint, highlightKey, rowMk, darkMode, segLabel, hlSeg, budget) {
+  if (budgetMicro(budget)) {
+    if (segs.length > 0) {
+      paintMicroBar(ctx, timeStart, timeEnd, pxPerNs, rowY, rowH, baseColor)
+      budget.n++
+    }
+    return
+  }
+
   const isHighlighted = (highlightKey && rowMk === highlightKey) && !hlSeg
+  const forceCoarse = budgetLite(budget) || nsPerPx > PAINT_LOD_COARSE
+  const drawOutlines = !forceCoarse
+  const drawLabels   = drawOutlines && !budgetLite(budget)
+  const drawTint     = !budgetLite(budget)
 
-  const lod = nsPerPx > PAINT_LOD_COARSE ? 'coarse' : 'fine'
+  const reduced = forceCoarse ? lodReduce(segs, nsPerPx, trace.timeMin) : segs
+  const viewW = (timeEnd - timeStart) * pxPerNs
 
-  const reduced = lod === 'coarse' ? lodReduce(segs, nsPerPx, trace.timeMin) : segs
-
-  // Collect label rects for a deferred single-setup text pass.
   const labelRects = []
 
   for (const seg of reduced) {
+    if (budgetFull(budget)) break
+
     const x1 = (seg.start - timeStart) * pxPerNs
     const x2 = (seg.end   - timeStart) * pxPerNs
     let w = Math.max(MIN_SEG_W, x2 - x1)
 
-    // Skip completely off-screen (derive width from time params, not DOM, to avoid racing a resize)
-    if (x1 > (timeEnd - timeStart) * pxPerNs + 2 || x1 + w < -2) continue
+    if (x1 > viewW + 2 || x1 + w < -2) continue
 
-    // Base colour
     const isSegLocked = hlSeg && seg.start === hlSeg.start && seg.end === hlSeg.end && seg.task === hlSeg.task
     const drawX  = Math.round(x1)
     const drawW  = Math.ceil(w)
@@ -435,9 +553,9 @@ function paintSegments(ctx, segs, timeStart, timeEnd, pxPerNs, nsPerPx, rowY, ro
     const drawH  = rowH
     ctx.fillStyle = baseColor
     ctx.fillRect(drawX, drawY, drawW, drawH)
+    budget.n++
 
-    // Core tint
-    if (applyCoreTint) {
+    if (drawTint && applyCoreTint) {
       const tint = coreTint(seg.core)
       if (tint) {
         ctx.fillStyle = tint
@@ -445,14 +563,12 @@ function paintSegments(ctx, segs, timeStart, timeEnd, pxPerNs, nsPerPx, rowY, ro
       }
     }
 
-    // Highlight overlay
     if (isHighlighted) {
       ctx.fillStyle = 'rgba(255,255,200,0.25)'
       ctx.fillRect(drawX, drawY, drawW, drawH)
     }
 
-    // Outline (fine LOD only, wide enough segments)
-    if (lod === 'fine' && w >= 3) {
+    if (drawOutlines && w >= 3) {
       if (isSegLocked) {
         ctx.strokeStyle = complementaryColor(baseColor)
         ctx.lineWidth = 2.5
@@ -463,8 +579,7 @@ function paintSegments(ctx, segs, timeStart, timeEnd, pxPerNs, nsPerPx, rowY, ro
       ctx.strokeRect(drawX + 0.5, drawY + 0.5, drawW - 1, drawH - 1)
     }
 
-    // Collect label info for deferred pass
-    if (segLabel && w >= 40) {
+    if (drawLabels && segLabel && w >= 40) {
       labelRects.push({ drawX, drawW })
     }
   }
@@ -493,7 +608,7 @@ function paintSegments(ctx, segs, timeStart, timeEnd, pxPerNs, nsPerPx, rowY, ro
  * Draw the locked (highlighted) segment enlarged by 10% vertically,
  * unclipped, over the body area. Called after ctx.restore() in render().
  */
-function drawLockedSegmentHoriz(ctx, trace, rows, hlSeg, timeStart, timeEnd, pxPerNs, nsPerPx, darkMode) {
+function drawLockedSegmentHoriz(ctx, trace, rows, yOff, hlSeg, timeStart, timeEnd, pxPerNs, nsPerPx, darkMode) {
   if (!hlSeg) return
   const mk = taskMergeKey(hlSeg.task)
   for (const row of rows) {
@@ -505,7 +620,8 @@ function drawLockedSegmentHoriz(ctx, trace, rows, hlSeg, timeStart, timeEnd, pxP
     const baseColor = row.color
     const slot       = ROW_H + ROW_GAP            // full row slot including gap
     const newH       = slot * 1.10                // 10% of slot
-    const rowCenter  = row.y + ROW_H / 2         // center of the row band
+    const canvasRowY = row.y + yOff
+    const rowCenter  = canvasRowY + ROW_H / 2         // center of the row band
     const drawY     = rowCenter - newH / 2
     const drawX     = Math.round(x1)
     const drawW     = Math.ceil(w)
@@ -577,31 +693,41 @@ function drawLockedSegmentVert(ctx, trace, cols, hlSeg, timeStart, timeEnd, pxPe
   }
 }
 
-function drawTaskRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasW, darkMode, hlSeg) {
+function drawTaskRow(ctx, trace, row, canvasRowY, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasW, darkMode, hlSeg, budget) {
   const mk = row.key
   const ld = taskLodData(trace, mk)
-  const segs = visibleSegs(ld, timeStart, timeEnd, nsPerPx, trace.lodTimescalePerPx, trace.lodUltraTimescalePerPx)
+  const segs = segsForPaint(ld, timeStart, timeEnd, nsPerPx, trace.lodTimescalePerPx, trace.lodUltraTimescalePerPx)
 
-  const rowY = row.y + 1
+  const rowY = canvasRowY + 1
   const rowH = ROW_H - 2
 
   // Row background (zebra stripe)
   ctx.fillStyle = darkMode ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)'
-  ctx.fillRect(0, row.y, canvasW, ROW_H)
+  ctx.fillRect(0, canvasRowY, canvasW, ROW_H)
 
   paintSegments(ctx, segs, timeStart, timeEnd, pxPerNs, nsPerPx,
-    rowY, rowH, row.color, trace, /* coreTint */ true, highlightKey, mk, darkMode, row.label, hlSeg)
+    rowY, rowH, row.color, trace, /* coreTint */ true, highlightKey, mk, darkMode, row.label, hlSeg, budget)
 }
 
-function drawCoreRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, canvasW, darkMode) {
+function drawCoreRow(ctx, trace, row, canvasRowY, timeStart, timeEnd, pxPerNs, nsPerPx, canvasW, darkMode, budget) {
   const ld = coreLodData(trace, row.key)
-  const segs = visibleSegs(ld, timeStart, timeEnd, nsPerPx, trace.lodTimescalePerPx, trace.lodUltraTimescalePerPx)
+  const segs = segsForPaint(ld, timeStart, timeEnd, nsPerPx, trace.lodTimescalePerPx, trace.lodUltraTimescalePerPx)
 
   ctx.fillStyle = darkMode ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)'
-  ctx.fillRect(0, row.y, canvasW, ROW_H)
+  ctx.fillRect(0, canvasRowY, canvasW, ROW_H)
 
-  const rowY = row.y + 1
+  if (budgetMicro(budget)) {
+    if (segs.length > 0) {
+      paintMicroBar(ctx, timeStart, timeEnd, pxPerNs, canvasRowY + 1, ROW_H - 2, row.color)
+      budget.n++
+    }
+    return
+  }
+
+  const rowY = canvasRowY + 1
   const rowH = ROW_H - 2
+  const forceCoarse = budgetLite(budget) || nsPerPx > PAINT_LOD_COARSE
+  const drawLabels = !forceCoarse && !budgetLite(budget)
   const reduced = lodReduce(segs, nsPerPx, trace.timeMin)
 
   // Cache seg.task → fill-color to avoid repeated taskMergeKey + taskColor hash
@@ -611,6 +737,7 @@ function drawCoreRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, canv
   const midY = rowY + rowH / 2
 
   for (const seg of reduced) {
+    if (budgetFull(budget)) break
     if (isCoreName(seg.task)) continue
     // TICK is shown as ruler band marks – skip it in the core summary row.
     if (parseTaskName(seg.task).name === 'TICK') continue
@@ -628,8 +755,9 @@ function drawCoreRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, canv
     const drawW = Math.ceil(w)
     ctx.fillStyle = color
     ctx.fillRect(drawX, rowY, drawW, rowH)
+    budget.n++
 
-    if (w >= 40) {
+    if (drawLabels && w >= 40) {
       labelRects.push({ drawX, drawW, name: taskDisplayName(seg.task) })
     }
   }
@@ -651,29 +779,29 @@ function drawCoreRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, canv
   }
 }
 
-function drawCoreTaskRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasW, darkMode, hlSeg, lockedTaskKey = null) {
+function drawCoreTaskRow(ctx, trace, row, canvasRowY, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasW, darkMode, hlSeg, lockedTaskKey, budget) {
   const ld = coreTaskLodData(trace, row.coreKey, row.taskKey)
-  const segs = visibleSegs(ld, timeStart, timeEnd, nsPerPx, trace.lodTimescalePerPx, trace.lodUltraTimescalePerPx)
+  const segs = segsForPaint(ld, timeStart, timeEnd, nsPerPx, trace.lodTimescalePerPx, trace.lodUltraTimescalePerPx)
 
   ctx.fillStyle = darkMode ? 'rgba(255,255,255,0.01)' : 'rgba(0,0,0,0.01)'
-  ctx.fillRect(0, row.y, canvasW, ROW_H)
+  ctx.fillRect(0, canvasRowY, canvasW, ROW_H)
 
   const mk = taskMergeKey(row.taskKey)
   const dim = lockedTaskKey && mk !== lockedTaskKey
   if (dim) ctx.save()
   if (dim) ctx.globalAlpha = 45 / 255
   paintSegments(ctx, segs, timeStart, timeEnd, pxPerNs, nsPerPx,
-    row.y + 1, ROW_H - 2, row.color, trace, false, highlightKey, mk, darkMode, row.label, hlSeg)
+    canvasRowY + 1, ROW_H - 2, row.color, trace, false, highlightKey, mk, darkMode, row.label, hlSeg, budget)
   if (dim) ctx.restore()
 }
 
-function drawStiRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, canvasW, darkMode, logScale = false) {
+function drawStiRow(ctx, trace, row, canvasRowY, timeStart, timeEnd, pxPerNs, canvasW, darkMode, logScale = false) {
   if (row.isExpanded) {
-    drawStiWaveformRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, canvasW, darkMode, logScale)
+    drawStiWaveformRow(ctx, trace, row, canvasRowY, timeStart, timeEnd, pxPerNs, canvasW, darkMode, logScale)
     return
   }
 
-  const rowY = row.y
+  const rowY = canvasRowY
   const evs = trace.stiEventsByTarget.get(row.key) || []
   const starts = trace.stiStartsByTarget.get(row.key) || []
 
@@ -714,8 +842,8 @@ function drawStiRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, canvasW, darkM
  * Points outside [0,100] are clamped. The line holds the last value (step-hold)
  * until the next event.
  */
-function drawStiWaveformRow(ctx, trace, row, timeStart, timeEnd, pxPerNs, canvasW, darkMode, logScale = false) {
-  const rowY = row.y
+function drawStiWaveformRow(ctx, trace, row, canvasRowY, timeStart, timeEnd, pxPerNs, canvasW, darkMode, logScale = false) {
+  const rowY = canvasRowY
   const rowH = STI_WAVEFORM_H
 
   const evs = trace.stiEventsByTarget.get(row.key) || []
@@ -974,18 +1102,22 @@ export function drawHoverLine(ctx, t, trace, timeStart, pxPerNs, canvasW, canvas
  * @returns {object|null}
  */
 export function hitTestSti(trace, viewport, options, cx, cy, radius = 8) {
-  const { timeStart, timeEnd, scrollY, canvasW } = viewport
+  const { timeStart, timeEnd, scrollY, canvasW, canvasH } = viewport
   const pxPerNs = canvasW / (timeEnd - timeStart)
-  const { viewMode = 'task', expanded = new Set(), showSti = true, stiExpanded = new Set() } = options
-  if (!showSti) return null
+  const { viewMode = 'task', expanded = new Set(), showSti = true, stiExpanded = new Set(), migratedOnlyFilter = false } = options
+  if (!showSti || cy < RULER_H) return null
 
-  const { rows } = buildRowLayout(trace, viewMode, expanded, RULER_H - scrollY, showSti, stiExpanded)
+  const rows = resolveRows(trace, options, viewMode, expanded, showSti, stiExpanded, migratedOnlyFilter)
+  const bodyH = canvasH - RULER_H
+  const { i0, i1 } = visibleRowIndexRange(rows, scrollY, bodyH, 2)
+  const yOff = RULER_H - scrollY
 
-  for (const row of rows) {
+  for (let i = i0; i < i1; i++) {
+    const row = rows[i]
     if (row.type !== 'sti') continue
-    const rowH = row.isExpanded ? STI_WAVEFORM_H : STI_ROW_H
-    const cy_row = row.y + rowH / 2
-    if (Math.abs(cy - cy_row) > rowH) continue
+    const rowH = rowBandHeight(row)
+    const cyRow = row.y + yOff + rowH / 2
+    if (Math.abs(cy - cyRow) > rowH) continue
 
     const evs = trace.stiEventsByTarget.get(row.key) || []
     const starts = trace.stiStartsByTarget.get(row.key) || []
@@ -994,8 +1126,8 @@ export function hitTestSti(trace, viewport, options, cx, cy, radius = 8) {
     const hi = bisectRight(starts, tAtCx + radius / pxPerNs) + 1
 
     let best = null, bestDist = radius + 1
-    for (let i = lo; i < Math.min(hi, evs.length); i++) {
-      const ev = evs[i]
+    for (let j = lo; j < Math.min(hi, evs.length); j++) {
+      const ev = evs[j]
       const ex = (ev.time - timeStart) * pxPerNs
       const d = Math.abs(ex - cx)
       if (d < bestDist) { bestDist = d; best = ev }
@@ -1009,14 +1141,19 @@ export function hitTestSti(trace, viewport, options, cx, cy, radius = 8) {
  * Return the row descriptor under canvas point (cx, cy), or null.
  */
 export function hitTestRow(trace, viewport, options, cx, cy) {
-  const { scrollY } = viewport
-  const { viewMode = 'task', expanded = new Set(), showSti = true, stiExpanded = new Set() } = options
-  const { rows } = buildRowLayout(trace, viewMode, expanded, RULER_H - scrollY, showSti, stiExpanded)
-  for (const row of rows) {
-    const rowH = row.type === 'sti' ? (row.isExpanded ? STI_WAVEFORM_H : STI_ROW_H) : ROW_H
-    if (cy >= row.y && cy < row.y + rowH) {
-      return row
-    }
+  const { scrollY, canvasH } = viewport
+  const { viewMode = 'task', expanded = new Set(), showSti = true, stiExpanded = new Set(), migratedOnlyFilter = false } = options
+  if (cy < RULER_H) return null
+
+  const rows = resolveRows(trace, options, viewMode, expanded, showSti, stiExpanded, migratedOnlyFilter)
+  const bodyH = canvasH - RULER_H
+  const targetY = cy - RULER_H + scrollY
+  const { i0, i1 } = visibleRowIndexRange(rows, scrollY, bodyH, 2)
+
+  for (let i = i0; i < i1; i++) {
+    const row = rows[i]
+    const rh = rowBandHeight(row)
+    if (targetY >= row.y && targetY < row.y + rh) return row
   }
   return null
 }
@@ -1030,16 +1167,21 @@ export function hitTestRow(trace, viewport, options, cx, cy) {
  * horizontal mode, or null if no segment bar was clicked.
  */
 export function hitTestSegment(trace, viewport, options, cx, cy) {
-  const { timeStart, timeEnd, scrollY, canvasW } = viewport
-  const { viewMode = 'task', expanded = new Set(), showSti = true, stiExpanded = new Set() } = options
+  const { timeStart, timeEnd, scrollY, canvasW, canvasH } = viewport
+  const { viewMode = 'task', expanded = new Set(), showSti = true, stiExpanded = new Set(), migratedOnlyFilter = false } = options
   if (cy < RULER_H) return null
   const pxPerNs = canvasW / (timeEnd - timeStart)
-  const { rows } = buildRowLayout(trace, viewMode, expanded, RULER_H - scrollY, showSti, stiExpanded)
+
+  const rows = resolveRows(trace, options, viewMode, expanded, showSti, stiExpanded, migratedOnlyFilter)
+  const bodyH = canvasH - RULER_H
+  const targetY = cy - RULER_H + scrollY
+  const { i0, i1 } = visibleRowIndexRange(rows, scrollY, bodyH, 1)
 
   let row = null
-  for (const r of rows) {
+  for (let i = i0; i < i1; i++) {
+    const r = rows[i]
     if (r.type !== 'task' && r.type !== 'core-task') continue
-    if (cy >= r.y && cy < r.y + ROW_H) { row = r; break }
+    if (targetY >= r.y && targetY < r.y + ROW_H) { row = r; break }
   }
   if (!row) return null
 
@@ -1069,17 +1211,19 @@ export function hitTestSegment(trace, viewport, options, cx, cy) {
  */
 export function hitTestSegmentVertical(trace, viewport, options, cx, cy) {
   const { timeStart, timeEnd, scrollX = 0, canvasH } = viewport
-  const { viewMode = 'task', expanded = new Set(), showSti = true } = options
+  const { viewMode = 'task', expanded = new Set(), showSti = true, stiExpanded = new Set(), migratedOnlyFilter = false } = options
   if (cy < HEADER_H || cx < RULER_W) return null
   const bodyH   = canvasH - HEADER_H
   const pxPerNs = bodyH / (timeEnd - timeStart)
   const tAtCy   = timeStart + (cy - HEADER_H) / pxPerNs
 
-  const { cols } = buildColumnLayout(trace, viewMode, expanded, scrollX, showSti)
+  const cols = resolveCols(trace, options, viewMode, expanded, showSti, stiExpanded, migratedOnlyFilter)
   let col = null
   for (const c of cols) {
     if (c.type !== 'task' && c.type !== 'core-task') continue
-    if (cx >= c.x && cx < c.x + COL_W) { col = c; break }
+    const x = c.x - scrollX
+    const cw = c.colWidth ?? COL_W
+    if (cx >= x && cx < x + cw) { col = c; break }
   }
   if (!col) return null
 
@@ -1295,6 +1439,15 @@ export function buildColumnLayout(trace, viewMode, expanded, scrollX = 0, showSt
   return { cols, totalWidth: RULER_W + xAcc }
 }
 
+/** Apply horizontal scroll offset to a layout built with scrollX=0. */
+export function offsetColumnLayout(layout, scrollX) {
+  if (!layout || !scrollX) return layout
+  return {
+    cols: layout.cols.map(c => ({ ...c, x: c.x - scrollX })),
+    totalWidth: layout.totalWidth,
+  }
+}
+
 // ---- Vertical ruler (left side) -------------------------------------------
 
 function drawVerticalRuler(ctx, trace, timeStart, timeEnd, pxPerNs, canvasH, headerH, rulerW, darkMode) {
@@ -1430,19 +1583,31 @@ function drawColumnHeaders(ctx, cols, headerH, colW, highlightKey, darkMode) {
 
 // ---- Segment drawing helpers (vertical) ------------------------------------
 
-function paintSegmentsVertical(ctx, segs, timeStart, pxPerNs, nsPerPx, colX, colW, headerH,
-                               baseColor, trace, applyCoreTint, highlightKey, colMk, darkMode, segLabel, hlSeg, canvasH) {
+function paintSegmentsVertical(ctx, segs, timeStart, timeEnd, pxPerNs, nsPerPx, colX, colW, headerH,
+                               baseColor, trace, applyCoreTint, highlightKey, colMk, darkMode, segLabel, hlSeg, canvasH, budget) {
+  if (budgetMicro(budget)) {
+    if (segs.length > 0) {
+      paintMicroBarVertical(ctx, timeStart, timeEnd, pxPerNs, headerH, colX, colW, baseColor)
+      budget.n++
+    }
+    return
+  }
+
   const isHighlighted = (highlightKey && colMk === highlightKey) && !hlSeg
-  const lod = nsPerPx > PAINT_LOD_COARSE ? 'coarse' : 'fine'
-  const reduced = lod === 'coarse' ? lodReduce(segs, nsPerPx, trace.timeMin) : segs
+  const forceCoarse = budgetLite(budget) || nsPerPx > PAINT_LOD_COARSE
+  const drawOutlines = !forceCoarse
+  const drawLabels   = drawOutlines && !budgetLite(budget)
+  const drawTint     = !budgetLite(budget)
+  const reduced = forceCoarse ? lodReduce(segs, nsPerPx, trace.timeMin) : segs
 
   const segX = colX + 1
   const segW = colW - 2
 
-  // Collect label rects for a deferred single-setup text pass.
   const labelRects = []
 
   for (const seg of reduced) {
+    if (budgetFull(budget)) break
+
     const y1 = headerH + (seg.start - timeStart) * pxPerNs
     const y2 = headerH + (seg.end   - timeStart) * pxPerNs
     const h  = Math.max(1, y2 - y1)
@@ -1456,8 +1621,9 @@ function paintSegmentsVertical(ctx, segs, timeStart, pxPerNs, nsPerPx, colX, col
     const drawW2 = segW
     ctx.fillStyle = baseColor
     ctx.fillRect(drawX2, drawY2, drawW2, drawH2)
+    budget.n++
 
-    if (applyCoreTint) {
+    if (drawTint && applyCoreTint) {
       const tint = coreTint(seg.core)
       if (tint) {
         ctx.fillStyle = tint
@@ -1470,7 +1636,7 @@ function paintSegmentsVertical(ctx, segs, timeStart, pxPerNs, nsPerPx, colX, col
       ctx.fillRect(drawX2, drawY2, drawW2, drawH2)
     }
 
-    if (lod === 'fine' && h >= 3) {
+    if (drawOutlines && h >= 3) {
       if (isSegLocked) {
         ctx.strokeStyle = complementaryColor(baseColor)
         ctx.lineWidth = 2.5
@@ -1481,8 +1647,7 @@ function paintSegmentsVertical(ctx, segs, timeStart, pxPerNs, nsPerPx, colX, col
       ctx.strokeRect(drawX2 + 0.5, drawY2 + 0.5, drawW2 - 1, drawH2 - 1)
     }
 
-    // Collect label info for deferred pass
-    if (segLabel && h >= 40) {
+    if (drawLabels && segLabel && h >= 40) {
       labelRects.push({ topY: drawY2 + 3 })
     }
   }
@@ -1506,10 +1671,10 @@ function paintSegmentsVertical(ctx, segs, timeStart, pxPerNs, nsPerPx, colX, col
 
 // ---- Column drawing functions ----------------------------------------------
 
-function drawTaskColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasH, darkMode, hlSeg) {
+function drawTaskColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasH, darkMode, hlSeg, budget) {
   const mk = col.key
   const ld = taskLodData(trace, mk)
-  const segs = visibleSegs(ld, timeStart, timeEnd, nsPerPx, trace.lodTimescalePerPx, trace.lodUltraTimescalePerPx)
+  const segs = segsForPaint(ld, timeStart, timeEnd, nsPerPx, trace.lodTimescalePerPx, trace.lodUltraTimescalePerPx)
 
   // Column background stripe
   ctx.fillStyle = col.colIdx % 2 === 0
@@ -1517,32 +1682,40 @@ function drawTaskColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, h
     : (darkMode ? '#2D2D2D' : '#F5F5F5')
   ctx.fillRect(col.x, HEADER_H, COL_W, canvasH)
 
-  paintSegmentsVertical(ctx, segs, timeStart, pxPerNs, nsPerPx,
-    col.x, COL_W, HEADER_H, col.color, trace, true, highlightKey, mk, darkMode, col.label, hlSeg, canvasH)
+  paintSegmentsVertical(ctx, segs, timeStart, timeEnd, pxPerNs, nsPerPx,
+    col.x, COL_W, HEADER_H, col.color, trace, true, highlightKey, mk, darkMode, col.label, hlSeg, canvasH, budget)
 }
 
-function drawCoreColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, canvasH, darkMode) {
+function drawCoreColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, canvasH, darkMode, budget) {
   const ld = coreLodData(trace, col.key)
-  const segs = visibleSegs(ld, timeStart, timeEnd, nsPerPx, trace.lodTimescalePerPx, trace.lodUltraTimescalePerPx)
+  const segs = segsForPaint(ld, timeStart, timeEnd, nsPerPx, trace.lodTimescalePerPx, trace.lodUltraTimescalePerPx)
 
   ctx.fillStyle = col.colIdx % 2 === 0
     ? (darkMode ? '#252526' : '#FAFAFA')
     : (darkMode ? '#2D2D2D' : '#F5F5F5')
   ctx.fillRect(col.x, HEADER_H, COL_W, canvasH)
 
+  if (budgetMicro(budget)) {
+    if (segs.length > 0) {
+      paintMicroBarVertical(ctx, timeStart, timeEnd, pxPerNs, HEADER_H, col.x, COL_W, col.color)
+      budget.n++
+    }
+    return
+  }
+
+  const forceCoarse = budgetLite(budget) || nsPerPx > PAINT_LOD_COARSE
+  const drawLabels = !forceCoarse && !budgetLite(budget)
   const reduced = lodReduce(segs, nsPerPx, trace.timeMin)
   const segX = col.x + 1
   const segW = COL_W - 2
   const cx = segX + segW / 2
 
-  // Cache seg.task → color to avoid repeated taskMergeKey + taskColor hash calls.
   const colorCache = new Map()
-  // Collect label draws for a deferred single-setup text pass.
   const labelRects = []
 
   for (const seg of reduced) {
+    if (budgetFull(budget)) break
     if (isCoreName(seg.task)) continue
-    // TICK is shown as ruler band marks – skip it in the core summary column.
     if (parseTaskName(seg.task).name === 'TICK') continue
     const y1 = HEADER_H + (seg.start - timeStart) * pxPerNs
     const y2 = HEADER_H + (seg.end   - timeStart) * pxPerNs
@@ -1558,13 +1731,13 @@ function drawCoreColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, c
     const drawH2 = Math.ceil(h)
     ctx.fillStyle = color
     ctx.fillRect(segX, drawY2, segW, drawH2)
+    budget.n++
 
-    if (h >= 40) {
+    if (drawLabels && h >= 40) {
       labelRects.push({ topY: drawY2 + 3, name: taskDisplayName(seg.task) })
     }
   }
 
-  // Deferred text pass: single font/color setup for all labels.
   if (labelRects.length > 0) {
     ctx.font = '10px sans-serif'
     ctx.fillStyle = darkMode ? 'rgba(255,255,255,0.85)' : 'rgba(0,0,0,0.75)'
@@ -1580,9 +1753,9 @@ function drawCoreColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, c
   }
 }
 
-function drawCoreTaskColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasH, darkMode, hlSeg, lockedTaskKey = null) {
+function drawCoreTaskColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasH, darkMode, hlSeg, lockedTaskKey, budget) {
   const ld = coreTaskLodData(trace, col.coreKey, col.taskKey)
-  const segs = visibleSegs(ld, timeStart, timeEnd, nsPerPx, trace.lodTimescalePerPx, trace.lodUltraTimescalePerPx)
+  const segs = segsForPaint(ld, timeStart, timeEnd, nsPerPx, trace.lodTimescalePerPx, trace.lodUltraTimescalePerPx)
 
   ctx.fillStyle = col.colIdx % 2 === 0
     ? (darkMode ? '#252526' : '#FAFAFA')
@@ -1593,8 +1766,8 @@ function drawCoreTaskColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerP
   const dim = lockedTaskKey && mk !== lockedTaskKey
   if (dim) ctx.save()
   if (dim) ctx.globalAlpha = 45 / 255
-  paintSegmentsVertical(ctx, segs, timeStart, pxPerNs, nsPerPx,
-    col.x, COL_W, HEADER_H, col.color, trace, false, highlightKey, mk, darkMode, col.label, hlSeg, canvasH)
+  paintSegmentsVertical(ctx, segs, timeStart, timeEnd, pxPerNs, nsPerPx,
+    col.x, COL_W, HEADER_H, col.color, trace, false, highlightKey, mk, darkMode, col.label, hlSeg, canvasH, budget)
   if (dim) ctx.restore()
 }
 
@@ -1987,7 +2160,10 @@ export function renderVertical(ctx, trace, viewport, options = {}) {
   ctx.fillRect(RULER_W, 0, canvasW - RULER_W, HEADER_H)
 
   // Build column layout
-  const { cols } = buildColumnLayout(trace, viewMode, expanded, scrollX, showSti, stiExpanded, migratedOnlyFilter)
+  const colLayoutBase = options.columnLayout
+  const { cols } = colLayoutBase
+    ? offsetColumnLayout(colLayoutBase, scrollX)
+    : buildColumnLayout(trace, viewMode, expanded, scrollX, showSti, stiExpanded, migratedOnlyFilter)
 
   // Grid lines (horizontal, optional)
   if (showGrid) {
@@ -2013,14 +2189,16 @@ export function renderVertical(ctx, trace, viewport, options = {}) {
   ctx.rect(RULER_W, HEADER_H, canvasW - RULER_W, bodyH + 1)
   ctx.clip()
 
+  const budget = createPaintBudget()
+
   for (const col of cols) {
     if (col.x + COL_W < RULER_W || col.x >= canvasW) continue
     if (col.type === 'task') {
-      drawTaskColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasH, darkMode, highlightSegment)
+      drawTaskColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasH, darkMode, highlightSegment, budget)
     } else if (col.type === 'core') {
-      drawCoreColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, canvasH, darkMode)
+      drawCoreColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, canvasH, darkMode, budget)
     } else if (col.type === 'core-task') {
-      drawCoreTaskColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasH, darkMode, highlightSegment, lockedTaskKey)
+      drawCoreTaskColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, nsPerPx, highlightKey, canvasH, darkMode, highlightSegment, lockedTaskKey, budget)
     } else if (col.type === 'sti') {
       drawStiColumn(ctx, trace, col, timeStart, timeEnd, pxPerNs, canvasH, darkMode)
     }
@@ -2065,17 +2243,17 @@ export function renderVertical(ctx, trace, viewport, options = {}) {
  */
 export function hitTestStiVertical(trace, viewport, options, cx, cy, radius = 8) {
   const { timeStart, timeEnd, scrollX = 0, canvasH } = viewport
-  const { viewMode = 'task', expanded = new Set(), showSti = true, stiExpanded = new Set() } = options
-  if (!showSti) return null
-  if (cy < HEADER_H) return null
+  const { viewMode = 'task', expanded = new Set(), showSti = true, stiExpanded = new Set(), migratedOnlyFilter = false } = options
+  if (!showSti || cy < HEADER_H) return null
   const pxPerNs = (canvasH - HEADER_H) / (timeEnd - timeStart)
   const tAtCy = timeStart + (cy - HEADER_H) / pxPerNs
 
-  const { cols } = buildColumnLayout(trace, viewMode, expanded, scrollX, showSti, stiExpanded)
+  const cols = resolveCols(trace, options, viewMode, expanded, showSti, stiExpanded, migratedOnlyFilter)
   for (const col of cols) {
     if (col.type !== 'sti') continue
     const cw = col.colWidth ?? COL_W
-    if (Math.abs(cx - (col.x + cw / 2)) > cw) continue
+    const colCx = col.x - scrollX + cw / 2
+    if (Math.abs(cx - colCx) > cw) continue
 
     const evs    = trace.stiEventsByTarget.get(col.key) || []
     const starts = trace.stiStartsByTarget.get(col.key) || []
@@ -2099,11 +2277,13 @@ export function hitTestStiVertical(trace, viewport, options, cx, cy, radius = 8)
  */
 export function hitTestColumn(trace, viewport, options, cx, _cy) {
   const { scrollX = 0 } = viewport
-  const { viewMode = 'task', expanded = new Set(), showSti = true, stiExpanded = new Set() } = options
+  const { viewMode = 'task', expanded = new Set(), showSti = true, stiExpanded = new Set(), migratedOnlyFilter = false } = options
   if (cx < RULER_W) return null
-  const { cols } = buildColumnLayout(trace, viewMode, expanded, scrollX, showSti, stiExpanded)
+  const cols = resolveCols(trace, options, viewMode, expanded, showSti, stiExpanded, migratedOnlyFilter)
   for (const col of cols) {
-    if (cx >= col.x && cx < col.x + (col.colWidth ?? COL_W)) return col
+    const x = col.x - scrollX
+    const cw = col.colWidth ?? COL_W
+    if (cx >= x && cx < x + cw) return col
   }
   return null
 }

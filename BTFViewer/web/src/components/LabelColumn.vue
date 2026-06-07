@@ -10,22 +10,23 @@
       :style="{ height: RULER_H + 'px' }"
     />
 
-    <!-- Task / Core label rows -->
-    <div
-      class="labels-body"
-      :style="{ transform: `translateY(${-scrollY}px)` }"
-    >
-      <template
-        v-for="row in rows"
-        :key="row.key"
+    <!-- Task / Core label rows (virtualised — only visible rows in DOM) -->
+    <div class="labels-body">
+      <div
+        class="labels-scroll"
+        :style="labelsScrollStyle"
       >
-        <!-- Core header row -->
-        <div
-          v-if="row.type === 'core'"
-          class="label-row label-core"
-          :style="{ height: ROW_H + 'px', marginBottom: ROW_GAP + 'px' }"
-          @click="toggleExpand(row.key)"
+        <template
+          v-for="row in visibleRows"
+          :key="row.key"
         >
+          <!-- Core header row -->
+          <div
+            v-if="row.type === 'core'"
+            class="label-row label-core"
+            :style="labelRowStyle(row)"
+            @click="toggleExpand(row.key)"
+          >
           <span
             class="core-dot"
             :style="{ background: row.color }"
@@ -38,7 +39,7 @@
         <div
           v-else-if="row.type === 'core-task'"
           class="label-row label-core-task"
-          :style="{ height: ROW_H + 'px', marginBottom: ROW_GAP + 'px' }"
+          :style="labelRowStyle(row)"
           :class="{ highlighted: highlightKey === taskRowKey(row) }"
           @mouseenter="emit('highlightChange', taskRowKey(row))"
           @mouseleave="emit('highlightChange', null)"
@@ -55,7 +56,7 @@
         <div
           v-else-if="row.type === 'task'"
           class="label-row label-task"
-          :style="{ height: ROW_H + 'px', marginBottom: ROW_GAP + 'px' }"
+          :style="labelRowStyle(row)"
           :class="{ highlighted: highlightKey === row.key }"
           @mouseenter="emit('highlightChange', row.key)"
           @mouseleave="emit('highlightChange', null)"
@@ -72,7 +73,7 @@
         <div
           v-else-if="row.type === 'sti' && !row.isTag"
           class="label-row label-sti"
-          :style="{ height: STI_ROW_H + 'px', marginBottom: ROW_GAP + 'px' }"
+          :style="labelRowStyle(row)"
         >
           <span class="sti-dot">◆</span>
           <span class="label-text sti">{{ row.label }}</span>
@@ -82,7 +83,7 @@
         <div
           v-else-if="row.type === 'sti' && row.isTag"
           class="label-row label-sti label-sti-tag"
-          :style="{ height: (row.isExpanded ? STI_WAVEFORM_H : STI_ROW_H) + 'px', marginBottom: ROW_GAP + 'px' }"
+          :style="labelRowStyle(row)"
           @click="emit('stiExpandToggle', row.key)"
         >
           <span class="expand-arrow">{{ row.isExpanded ? '▼' : '▶' }}</span>
@@ -90,13 +91,14 @@
           <span class="label-text sti">{{ row.label }}</span>
         </div>
       </template>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
 import { computed } from 'vue'
-import { buildRowLayout, LABEL_W, RULER_H, ROW_H, ROW_GAP, STI_ROW_H, STI_WAVEFORM_H } from '../renderer/TimelineRenderer.js'
+import { rowBandHeight, visibleRowIndexRange, LABEL_W, RULER_H, ROW_H, STI_ROW_H, STI_WAVEFORM_H } from '../renderer/TimelineRenderer.js'
 import { taskMergeKey } from '../utils/colors.js'
 
 const props = defineProps({
@@ -105,6 +107,8 @@ const props = defineProps({
   expanded:     { type: Object, default: () => new Set() },   // Set
   stiExpanded:  { type: Object, default: () => new Set() },   // Set of expanded tag-event STI channels
   scrollY:      { type: Number, default: 0 },
+  bodyH:        { type: Number, default: 400 },
+  rowLayout:    { type: Object, default: null },
   highlightKey: { type: [String, null], default: null },
   showSti:      { type: Boolean, default: true },
   migratedOnlyFilter: { type: Boolean, default: false },
@@ -112,10 +116,29 @@ const props = defineProps({
 
 const emit = defineEmits(['expandToggle', 'highlightChange', 'highlightClick', 'stiExpandToggle'])
 
-const rows = computed(() => {
-  if (!props.trace) return []
-  return buildRowLayout(props.trace, props.viewMode, props.expanded, 0, props.showSti, props.stiExpanded, props.migratedOnlyFilter).rows
+const totalHeight = computed(() => props.rowLayout?.totalHeight ?? 0)
+
+const visibleRows = computed(() => {
+  const rows = props.rowLayout?.rows
+  if (!rows?.length) return []
+  const { i0, i1 } = visibleRowIndexRange(rows, props.scrollY, props.bodyH, 5)
+  return rows.slice(i0, i1)
 })
+
+const labelsScrollStyle = computed(() => ({
+  height: `${totalHeight.value}px`,
+  transform: `translateY(${-props.scrollY}px)`,
+}))
+
+function labelRowStyle(row) {
+  return {
+    position: 'absolute',
+    top: `${row.y}px`,
+    left: 0,
+    right: 0,
+    height: `${rowBandHeight(row)}px`,
+  }
+}
 
 function toggleExpand(coreName) {
   emit('expandToggle', coreName)
@@ -145,6 +168,14 @@ function taskRowKey(row) {
 }
 
 .labels-body {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.labels-scroll {
+  position: relative;
   will-change: transform;
 }
 

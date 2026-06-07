@@ -62,10 +62,30 @@ export function blockingTimePlotPoints(segs, lo, hi) {
   return points
 }
 
+/** Max/min without spread — safe for very large arrays (e.g. 500k-line traces). */
+export function maxNs(values) {
+  if (!values?.length) return 0
+  let m = values[0]
+  for (let i = 1; i < values.length; i++) {
+    if (values[i] > m) m = values[i]
+  }
+  return m
+}
+
+export function minNs(values) {
+  if (!values?.length) return 0
+  let m = values[0]
+  for (let i = 1; i < values.length; i++) {
+    if (values[i] < m) m = values[i]
+  }
+  return m
+}
+
 /** Context-switch count and inter-slice core gaps within optional scope. */
 export function schedulingStats(trace, lo, hi) {
-  const ctxSwitches = { value: 0 }
+  let contextSwitches = 0
   const gaps = []
+  let gapMax = 0
   const cores = trace.coreNames || []
   for (const core of cores) {
     const segs = trace.coreSegs?.get(core) || []
@@ -73,12 +93,14 @@ export function schedulingStats(trace, lo, hi) {
       const prev = segs[i - 1]
       const curr = segs[i]
       if (lo != null && hi != null && !(curr.start >= lo && curr.start <= hi)) continue
-      ctxSwitches.value += 1
+      contextSwitches += 1
       const gap = curr.start - prev.end
-      gaps.push(gap > 0 ? gap : 0)
+      const g = gap > 0 ? gap : 0
+      gaps.push(g)
+      if (g > gapMax) gapMax = g
     }
   }
-  return { contextSwitches: ctxSwitches.value, coreGaps: gaps }
+  return { contextSwitches, coreGaps: gaps, gapMax }
 }
 
 /** Longest-duration slice in segs (respecting cursor scope). */

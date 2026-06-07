@@ -1,5 +1,9 @@
 <template>
-  <div class="cpu-load-panel">
+  <div
+    ref="panelRef"
+    class="cpu-load-panel"
+    @wheel="onWheel"
+  >
     <div class="cpu-load-title-row">
       <div class="cpu-load-title">CPU LOAD</div>
       <button
@@ -11,7 +15,10 @@
         Clear Selection
       </button>
     </div>
-    <div class="cpu-load-rows">
+    <div
+      ref="rowsRef"
+      class="cpu-load-rows"
+    >
       <div
         v-for="row in rowModels"
         :key="row.key"
@@ -194,11 +201,20 @@ import {
   getPlacedCursorRange,
   loadAtNs,
 } from '../utils/cpuLoadHelpers.js'
+import {
+  applyPanPlotX,
+  applyPanPlotY,
+  applyZoomAroundPlotX,
+  applyZoomAroundPlotY,
+} from '../utils/viewportWheel.js'
 
 const NUM_BINS = 1024
 const ROW_H = 60
 const COLLAPSED_H = 22
 const ROW_GAP = 2
+const LABEL_W = 156
+const TITLE_H = 22
+const TIMELINE_ROW_H = 26
 const PLOT_W = 1000
 const CURSOR_COLORS = ['#FF4444', '#44FF88', '#4499FF', '#FFAA22', '#FF44FF', '#44FFFF', '#FFFF44', '#CC44FF']
 const BOOKMARK_COLOR = '#FFD700'
@@ -208,6 +224,7 @@ const props = defineProps({
   trace: { type: Object, default: null },
   viewport: { type: Object, required: true },
   viewMode: { type: String, default: 'task' },
+  orientation: { type: String, default: 'h' },
   darkMode: { type: Boolean, default: true },
   selectedTask: { type: String, default: null },
   allExpanded: { type: Boolean, default: true },
@@ -215,8 +232,10 @@ const props = defineProps({
   hoverTime: { type: Number, default: null },
   marks: { type: Array, default: () => [] },
 })
-const emit = defineEmits(['clearSelection'])
+const emit = defineEmits(['clearSelection', 'viewportChange'])
 
+const panelRef = ref(null)
+const rowsRef = ref(null)
 const collapsedCores = ref(new Set())
 
 const binsState = computed(() => {
@@ -470,6 +489,62 @@ function onRowLabelClick(row) {
   if (next.has(row.key)) next.delete(row.key)
   else next.add(row.key)
   collapsedCores.value = next
+}
+
+function onWheel(e) {
+  if (!props.trace || !props.viewport) return
+  e.preventDefault()
+  e.stopPropagation()
+
+  const rowsEl = rowsRef.value
+  if (rowsEl
+      && rowsEl.scrollHeight > rowsEl.clientHeight + 1
+      && !e.ctrlKey && !e.metaKey && !e.shiftKey
+      && Math.abs(e.deltaY) >= Math.abs(e.deltaX)) {
+    rowsEl.scrollTop += e.deltaY
+    return
+  }
+
+  const panel = panelRef.value
+  if (!panel) return
+  const rect = panel.getBoundingClientRect()
+  const vert = props.orientation === 'v'
+  const plotLeft = vert ? rect.left : rect.left + LABEL_W
+  const plotTop = rect.top + (vert ? TITLE_H : 0)
+  const plotWidth = vert ? rect.width : Math.max(1, rect.right - plotLeft)
+  const plotHeight = vert ? Math.max(1, rect.bottom - plotTop) : rect.height
+  const plotX = e.clientX - plotLeft
+  const plotY = e.clientY - plotTop
+
+  let vp = { ...props.viewport }
+
+  if (e.ctrlKey || e.metaKey) {
+    const factor = e.deltaY > 0 ? 1.15 : 0.87
+    vp = vert
+      ? applyZoomAroundPlotY(vp, props.trace, plotY, plotHeight, TITLE_H, factor)
+      : applyZoomAroundPlotX(vp, props.trace, plotX, plotWidth, factor)
+  } else if (vert) {
+    const isHorizInput = e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)
+    if (isHorizInput) {
+      const dx = e.shiftKey ? e.deltaY : e.deltaX
+      vp = { ...vp, scrollX: Math.max(0, (vp.scrollX || 0) + dx) }
+    } else {
+      const dy = e.deltaMode === 1 ? e.deltaY * TIMELINE_ROW_H : e.deltaY
+      vp = applyPanPlotY(vp, props.trace, dy, plotHeight, TITLE_H)
+    }
+  } else {
+    const isHorizInput = Math.abs(e.deltaX) > Math.abs(e.deltaY)
+    if (isHorizInput) {
+      vp = applyPanPlotX(vp, props.trace, e.deltaX, plotWidth)
+    } else if (e.shiftKey) {
+      vp = applyPanPlotX(vp, props.trace, e.deltaY, plotWidth)
+    } else {
+      const dy = e.deltaMode === 1 ? e.deltaY * TIMELINE_ROW_H : e.deltaY
+      vp = { ...vp, scrollY: Math.max(0, (vp.scrollY || 0) + dy) }
+    }
+  }
+
+  emit('viewportChange', vp)
 }
 
 function timeToPlotX(ns, visibleStart, visibleEnd, visibleSpan) {

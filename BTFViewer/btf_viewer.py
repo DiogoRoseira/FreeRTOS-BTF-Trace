@@ -157,7 +157,7 @@ from PyQt5.QtWidgets import (
     QGraphicsEllipseItem, QGraphicsItem, QGraphicsLineItem, QGraphicsOpacityEffect,
     QGraphicsPixmapItem,
     QGraphicsPolygonItem, QGraphicsRectItem, QGraphicsScene, QGraphicsTextItem, QGraphicsView,
-    QHBoxLayout, QLabel, QLineEdit, QListView, QMainWindow, QMenu, QMessageBox, QProgressBar,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListView, QMainWindow, QMenu, QMessageBox, QProgressBar,
     QProgressDialog,
     QListWidget, QListWidgetItem,
     QPushButton, QScrollArea, QShortcut, QDoubleSpinBox, QSpinBox, QStackedWidget,
@@ -195,9 +195,28 @@ STI_ROW_H                =  18  # Height of a collapsed STI row (px)
 CPU_LOAD_ROW_H           =  60  # CPU load graph row height (px) - independent of timeline rows.
 CPU_LOAD_ROW_GAP         =   2  # Gap between CPU load rows (px).
 CPU_LOAD_COLLAPSED_H     =  20  # Height of a collapsed CPU load row (px - enough to show label).
+CPU_LOAD_PANE_MAX_H      = 480  # Max CPU load pane height before inner vertical scroll (web parity).
 STATS_UTIL_BAR_H         =   8  # Core/task CPU % bar height in Statistics panel (px).
 STATS_UTIL_ROW_H         =  16  # Row height; matches stats-table row size (px).
 STATS_UTIL_ROW_GAP       =   1  # Vertical gap between utilisation rows (px).
+STATS_TABLE_HEADER_H     =  18  # QTableWidget header row height (px).
+STATS_TABLE_ROW_H        =  16  # QTableWidget body row height (px).
+STATS_TABLE_HSCROLL_H    =  14  # Horizontal scrollbar strip inside wide tables (px).
+STATS_MAX_VISIBLE_ROWS   =   8  # Default viewport shows this many rows before v-scroll.
+
+def _stats_table_viewport_height(visible_rows: int = STATS_MAX_VISIBLE_ROWS,
+                                 *, reserve_h_scroll: bool = False) -> int:
+    """Pixel height for a stats table showing *visible_rows* body rows."""
+    h = STATS_TABLE_HEADER_H + visible_rows * STATS_TABLE_ROW_H + 2
+    if reserve_h_scroll:
+        h += STATS_TABLE_HSCROLL_H
+    return h
+
+
+STATS_TABLE_DEFAULT_H    = _stats_table_viewport_height()
+STATS_TABLE_MIG_DEFAULT_H = _stats_table_viewport_height(reserve_h_scroll=True)
+STATS_UTIL_DEFAULT_H     = ( STATS_MAX_VISIBLE_ROWS * STATS_UTIL_ROW_H
+                             + max(0, STATS_MAX_VISIBLE_ROWS - 1) * STATS_UTIL_ROW_GAP + 2 )
 STI_WAVEFORM_H           =  80  # Height of an expanded STI waveform row (px).
 STI_LINE_STYLE           = "linear"  # Default STI waveform draw style: "step" or "linear".
 
@@ -351,6 +370,18 @@ def _svg_icon(path_data: str, color: str = "#9E9E9E", size: int = 16) -> "QIcon"
     pm.loadFromData(ba, "SVG")
     return QIcon(pm)
 
+
+def _svg_icon_markup(inner: str, size: int = 16) -> "QIcon":
+    """Build a QIcon from raw SVG markup (supports stroke icons)."""
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" '
+        f'viewBox="0 0 16 16">{inner}</svg>'
+    )
+    ba = QByteArray(svg.encode())
+    pm = QPixmap()
+    pm.loadFromData(ba, "SVG")
+    return QIcon(pm)
+
 # Icon path data (16x16 viewBox, single-path SVG outlines)
 _IC_OPEN   = ("M1 3.5A1.5 1.5 0 0 1 2.5 2h2.764c.958 0 1.76.56 2.311 1.184C7.985 3.648 8.48 4 9 4h4.5A1.5 1.5 0 0 1 15 5.5v.64c.57.265.94.876.856 1.546l-.64 5.124A2.5 2.5 0 0 1 12.733 15H3.267a2.5 2.5 0 0 1-2.483-2.19l-.64-5.124A1.5 1.5 0 0 1 1 6.14V3.5z"
               "M2 6h12v-.5a.5.5 0 0 0-.5-.5H9c-.964 0-1.71-.629-2.174-1.154C6.374 3.334 5.82 3 5.264 3H2.5a.5.5 0 0 0-.5.5V6z"
@@ -386,6 +417,7 @@ _IC_CPU_LOAD = ("M1 11a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H2a1 1 0 0 1
                 "M5 7a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V7z"
                 "M9 3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-2a1 1 0 0 1-1-1V3z"
                 "M13 1a1 1 0 0 1 1-1h1a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1V1z")
+_IC_EXPORT_CSV = ("M2 1h12a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H2a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1zm0 1v12h12V2H2zm2 2h8v1H4V4zm0 2h8v1H4V6zm0 2h5v1H4V8z")
 _IC_THEME_DARK = ("M8 1.2a.5.5 0 0 1 .47.66A5.8 5.8 0 1 0 14.14 9a.5.5 0 0 1 .66.47"
                   "A6.8 6.8 0 1 1 8 1.2z")
 _IC_THEME_LIGHT = ("M8 1.5a.5.5 0 0 1 .5.5V3a.5.5 0 0 1-1 0V2a.5.5 0 0 1 .5-.5z"
@@ -958,6 +990,122 @@ def _fmt_signed_pct_delta(delta: float) -> str:
         return "0.0"
     sign = "+" if delta >= 0 else ""
     return f"{sign}{delta:.1f}"
+
+
+def _compare_csv_cell(v: object) -> str:
+    s = str(v)
+    if any(c in s for c in '",\n\r'):
+        return '"' + s.replace('"', '""') + '"'
+    return s
+
+
+def _table_widget_rows(table: "QTableWidget") -> List[List[str]]:
+    rows: List[List[str]] = []
+    for ri in range(table.rowCount()):
+        row: List[str] = []
+        for ci in range(table.columnCount()):
+            item = table.item(ri, ci)
+            row.append(item.text() if item else "")
+        rows.append(row)
+    return rows
+
+
+def _build_compare_csv(name_a: str, name_b: str, scope_enabled: bool,
+                         summary: List[List], top: List[List],
+                         mig: List[List]) -> str:
+    lines: List[str] = []
+    lines.append(f"Trace A,{_compare_csv_cell(name_a)}")
+    lines.append(f"Trace B,{_compare_csv_cell(name_b)}")
+    lines.append(f"Cursor scope per tab,{'yes' if scope_enabled else 'no'}")
+    lines.append("")
+
+    lines.append("Summary")
+    lines.append("Metric,Trace A,Trace B,Δ")
+    for row in summary:
+        if len(row) >= 4:
+            lines.append(",".join(_compare_csv_cell(c) for c in row[:4]))
+
+    lines.append("")
+    lines.append("Top Tasks")
+    lines.append("Task,CPU% A,CPU% B,Δ")
+    for row in top:
+        if len(row) >= 4:
+            lines.append(",".join(_compare_csv_cell(c) for c in row[:4]))
+
+    lines.append("")
+    lines.append("Core Migrations")
+    lines.append("Task,Migrations A,Migrations B,Δ,Ping-pong A,Ping-pong B")
+    for row in mig:
+        if len(row) >= 6:
+            lines.append(",".join(_compare_csv_cell(c) for c in row[:6]))
+
+    return "\n".join(lines)
+
+
+_COMPARE_HTML_STYLE = """
+  :root { --bg:#e9edf3; --paper:#fff; --ink:#182230; --muted:#5f6f82; --line:#d9e0ea; --header:#16324f; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:28px; font-family:"Segoe UI",Arial,sans-serif; color:var(--ink); background:var(--bg); }
+  .report { max-width:960px; margin:0 auto; }
+  .report-head { background:linear-gradient(135deg,var(--header),#21496f); color:#f3f7fd; border-radius:14px; padding:20px 24px; margin-bottom:18px; }
+  h1 { margin:0; font-size:26px; }
+  .sub { margin-top:6px; color:#cfe1f7; font-size:13px; }
+  .report-card { margin:14px 0; background:var(--paper); border:1px solid var(--line); border-radius:12px; padding:12px 14px; }
+  h2 { margin:0 0 10px; color:#123355; font-size:17px; }
+  table { border-collapse:collapse; width:100%; }
+  th,td { border-bottom:1px solid var(--line); padding:8px 10px; font-size:13px; text-align:right; }
+  th:first-child,td:first-child { text-align:left; }
+  thead th { background:#f1f5fb; font-weight:600; }
+  tbody tr:nth-child(even) td { background:#f7f9fc; }
+  .empty { text-align:center; color:var(--muted); }
+"""
+
+
+def _build_compare_html(name_a: str, name_b: str, scope_enabled: bool,
+                        summary: List[List], top: List[List],
+                        mig: List[List]) -> str:
+    scope_note = (
+        "Each side uses its own tab cursor range (C1–Cn) when 2+ cursors are placed."
+        if scope_enabled else "Full trace span on each side.")
+
+    def _esc(v: object) -> str:
+        return html.escape(str(v), quote=True)
+
+    def _rows_html(rows: List[List], cols: int, empty: str) -> str:
+        if not rows:
+            return f'<tr><td colspan="{cols}" class="empty">{_esc(empty)}</td></tr>'
+        parts = []
+        for row in rows:
+            cells = "".join(f"<td>{_esc(c)}</td>" for c in row[:cols])
+            parts.append(f"<tr>{cells}</tr>")
+        return "".join(parts)
+
+    summary_body = _rows_html(summary, 4, "No data")
+    top_body = _rows_html(top, 4, "No user tasks in either trace")
+    mig_body = _rows_html(mig, 6, "No migrated tasks in either trace")
+
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"/><title>BTF Trace Compare</title>
+<style>{_COMPARE_HTML_STYLE}</style></head>
+<body><div class="report">
+  <header class="report-head">
+    <h1>Trace Compare</h1>
+    <div class="sub">{_esc(name_a)} vs {_esc(name_b)} · {_esc(scope_note)}</div>
+  </header>
+  <section class="report-card"><h2>Summary</h2>
+    <table><thead><tr><th>Metric</th><th>Trace A</th><th>Trace B</th><th>Δ</th></tr></thead>
+    <tbody>{summary_body}</tbody></table>
+  </section>
+  <section class="report-card"><h2>Top Tasks</h2>
+    <table><thead><tr><th>Task</th><th>CPU% A</th><th>CPU% B</th><th>Δ</th></tr></thead>
+    <tbody>{top_body}</tbody></table>
+  </section>
+  <section class="report-card"><h2>Core Migrations</h2>
+    <table><thead><tr><th>Task</th><th>Migr A</th><th>Migr B</th><th>Δ</th><th>Ping-pong A</th><th>Ping-pong B</th></tr></thead>
+    <tbody>{mig_body}</tbody></table>
+  </section>
+</div></body></html>"""
+
 
 def _core_sort_key_tuple(c: str) -> tuple:
     if c.startswith("Core_"):
@@ -8943,7 +9091,7 @@ class _StatsSectionGrip(QWidget):
         self._get_height = get_height_fn
         self._dragging = False
         self._start_y = 0
-        self._start_h = 220
+        self._start_h = STATS_TABLE_DEFAULT_H
         self.setFixedHeight(8)
         self.setCursor(Qt.SizeVerCursor)
         self.setToolTip("Drag to resize table height")
@@ -9033,6 +9181,28 @@ class _TraceCompareDialog(QDialog):
         self._pages.addTab(self._top_table, "Top Tasks")
         self._pages.addTab(self._mig_table, "Core Migrations")
         lay.addWidget(self._pages, 1)
+
+        exp_row = QHBoxLayout()
+        exp_row.setContentsMargins(8, 6, 8, 8)
+        exp_row.setSpacing(8)
+        _ic = "#9E9E9E"
+        self._btn_export_csv = QPushButton("Export CSV")
+        self._btn_export_csv.setIcon(_svg_icon(_IC_EXPORT_CSV, _ic))
+        self._btn_export_csv.setToolTip("Export compare tables as CSV")
+        self._btn_export_csv.clicked.connect(self._export_csv)
+        exp_row.addWidget(self._btn_export_csv)
+        self._btn_export_html = QPushButton("Export HTML")
+        self._btn_export_html.setIcon(_svg_icon_markup(
+            '<rect x="2.5" y="2" width="11" height="12" rx="1" fill="none" '
+            f'stroke="{_ic}" stroke-width="1.2"/>'
+            '<path d="M5.5 6.5 3.5 8.5l2 2M10.5 6.5l2 2-2 2" fill="none" '
+            f'stroke="{_ic}" stroke-width="1.2" stroke-linecap="round"/>',
+        ))
+        self._btn_export_html.setToolTip("Export compare report as HTML")
+        self._btn_export_html.clicked.connect(self._export_html)
+        exp_row.addWidget(self._btn_export_html)
+        exp_row.addStretch(1)
+        lay.addLayout(exp_row)
 
         btns = QDialogButtonBox(QDialogButtonBox.Close)
         btns.rejected.connect(self.reject)
@@ -9159,6 +9329,81 @@ class _TraceCompareDialog(QDialog):
             mig_rows.append([name, ma, mb, ma - mb, pa, pb])
         self._fill_table(self._mig_table, mig_rows)
 
+    def _tab_name(self, combo: QComboBox) -> str:
+        return combo.currentText() or "Trace"
+
+    def _export_csv(self) -> None:
+        ta = self._trace_for_combo(self._combo_a)
+        tb = self._trace_for_combo(self._combo_b)
+        if ta is None or tb is None:
+            QMessageBox.warning(self, "Export CSV", "Select two loaded traces to export.")
+            return
+
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Trace Compare CSV",
+            f"trace-compare-{stamp}.csv",
+            "CSV files (*.csv);;All files (*)",
+        )
+        if not path:
+            return
+
+        text = _build_compare_csv(
+            self._tab_name(self._combo_a),
+            self._tab_name(self._combo_b),
+            self._scope_cb.isChecked(),
+            _table_widget_rows(self._summary_table),
+            _table_widget_rows(self._top_table),
+            _table_widget_rows(self._mig_table),
+        )
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+                fh.write(text)
+        except OSError as exc:
+            QMessageBox.critical(self, "Export Error", f"Could not export CSV:\n{exc}")
+            return
+
+        wnd = self.window()
+        if isinstance(wnd, QMainWindow):
+            wnd.statusBar().showMessage(f"Exported trace compare: {path}", 4000)
+
+    def _export_html(self) -> None:
+        ta = self._trace_for_combo(self._combo_a)
+        tb = self._trace_for_combo(self._combo_b)
+        if ta is None or tb is None:
+            QMessageBox.warning(self, "Export HTML", "Select two loaded traces to export.")
+            return
+
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Trace Compare HTML",
+            f"trace-compare-{stamp}.html",
+            "HTML files (*.html);;All files (*)",
+        )
+        if not path:
+            return
+
+        report = _build_compare_html(
+            self._tab_name(self._combo_a),
+            self._tab_name(self._combo_b),
+            self._scope_cb.isChecked(),
+            _table_widget_rows(self._summary_table),
+            _table_widget_rows(self._top_table),
+            _table_widget_rows(self._mig_table),
+        )
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(report)
+        except OSError as exc:
+            QMessageBox.critical(self, "Export Error", f"Could not export HTML:\n{exc}")
+            return
+
+        wnd = self.window()
+        if isinstance(wnd, QMainWindow):
+            wnd.statusBar().showMessage(f"Exported trace compare: {path}", 4000)
+
 
 class _StatsPanel(QWidget):
     """Dock panel showing trace statistics (span, core utilisation, top tasks)."""
@@ -9186,10 +9431,10 @@ class _StatsPanel(QWidget):
             "inter": False,
         }
         self._section_table_heights: Dict[str, int] = {
-            "migrations": 220,
-            "exec": 220,
-            "block": 220,
-            "inter": 220,
+            "migrations": STATS_TABLE_MIG_DEFAULT_H,
+            "exec": STATS_TABLE_DEFAULT_H,
+            "block": STATS_TABLE_DEFAULT_H,
+            "inter": STATS_TABLE_DEFAULT_H,
         }
         self._table_grips: List[_StatsSectionGrip] = []
         outer = QVBoxLayout(self)
@@ -9272,7 +9517,9 @@ class _StatsPanel(QWidget):
     def _wrap_table_with_resizer(self, lay: QVBoxLayout, table: QTableWidget,
                                  section_id: str) -> None:
         """Add *table* plus a drag grip; height is stored in *_section_table_heights*."""
-        h = self._section_table_heights.get(section_id, 220)
+        default_h = (STATS_TABLE_MIG_DEFAULT_H if section_id == "migrations"
+                     else STATS_TABLE_DEFAULT_H)
+        h = self._section_table_heights.get(section_id, default_h)
         h = self._apply_table_display_height(table, h)
         self._section_table_heights[section_id] = h
 
@@ -9354,6 +9601,24 @@ class _StatsPanel(QWidget):
         hlay.addStretch(1)
 
         blay.addWidget(row)
+
+    def _wrap_util_rows_scroll(self, blay: QVBoxLayout, inner: QWidget,
+                              row_count: int) -> None:
+        """Scroll utilisation rows vertically when there are more than 8."""
+        scroll = QScrollArea()
+        scroll.setWidget(inner)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarAsNeeded if row_count > STATS_MAX_VISIBLE_ROWS
+            else Qt.ScrollBarAlwaysOff)
+        vis = min(max(row_count, 1), STATS_MAX_VISIBLE_ROWS)
+        scroll_h = (vis * STATS_UTIL_ROW_H
+                    + max(0, vis - 1) * STATS_UTIL_ROW_GAP + 2)
+        scroll.setFixedHeight(scroll_h)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        blay.addWidget(scroll)
 
     def rebuild_with_font(self, trace: "BtfTrace", ui_font_size: int) -> None:
         """Re-build using the given *ui_font_size* so labels pick it up."""
@@ -9899,8 +10164,9 @@ class _StatsPanel(QWidget):
         table.horizontalHeader().setStretchLastSection(migrations)
         table.setShowGrid(False)
         table.setFrameShape(QFrame.NoFrame)
-        table.verticalHeader().setDefaultSectionSize(16)
-        table.verticalHeader().setMinimumSectionSize(14)
+        table.verticalHeader().setDefaultSectionSize(STATS_TABLE_ROW_H)
+        table.verticalHeader().setMinimumSectionSize(STATS_TABLE_ROW_H)
+        table.verticalHeader().setSectionResizeMode(QHeaderView.Fixed)
         table.horizontalHeader().setFixedHeight(18)
         if migrations:
             table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -10025,6 +10291,9 @@ class _StatsPanel(QWidget):
             host._stats_hover_filter = _hover_filter  # prevent GC
 
         table.setWordWrap(False)
+
+        for r in range(table.rowCount()):
+            table.setRowHeight(r, STATS_TABLE_ROW_H)
 
         table.horizontalHeader().setStyleSheet("QHeaderView::section { border: none; }")
         table.verticalHeader().setStyleSheet("QHeaderView::section { border: none; }")
@@ -10492,13 +10761,18 @@ class _StatsPanel(QWidget):
         # -- Core utilisation (excl. IDLE) ---------------------------------
         if trace.core_names:
             def _populate_cores(blay: QVBoxLayout) -> None:
-                blay.setSpacing(STATS_UTIL_ROW_GAP)
-                for core, pct in self._core_util_rows(trace, lo, hi):
+                inner = QWidget()
+                ilay = QVBoxLayout(inner)
+                ilay.setContentsMargins(0, 0, 0, 0)
+                ilay.setSpacing(STATS_UTIL_ROW_GAP)
+                core_rows = self._core_util_rows(trace, lo, hi)
+                for core, pct in core_rows:
                     self._add_utilisation_row(
-                        blay, _fs, f"  {core}:", pct,
+                        ilay, _fs, f"  {core}:", pct,
                         chunk_color="#5FCF6F", pct_color="#77BB77",
                         label_min_width=72,
                     )
+                self._wrap_util_rows_scroll(blay, inner, len(core_rows))
 
             self._add_collapsible_section(
                 "cores",
@@ -10509,19 +10783,23 @@ class _StatsPanel(QWidget):
 
         # -- Top tasks by CPU time (excl. IDLE, top 10) -------------------
         def _populate_tasks(blay: QVBoxLayout) -> None:
-            blay.setSpacing(STATS_UTIL_ROW_GAP)
             task_rows = self._task_cpu_rows(trace, lo=lo, hi=hi)
             if not task_rows:
                 blay.addWidget(self._lbl("No user tasks found", color="#888888", ui_fs=_fs))
                 return
+            inner = QWidget()
+            ilay = QVBoxLayout(inner)
+            ilay.setContentsMargins(0, 0, 0, 0)
+            ilay.setSpacing(STATS_UTIL_ROW_GAP)
             for mk, disp, pct in task_rows:
                 self._add_utilisation_row(
-                    blay, _fs, f"  {disp}", pct,
+                    ilay, _fs, f"  {disp}", pct,
                     chunk_color="#5B9BD5", pct_color="#6AAADD",
                     label_min_width=100,
                     on_click=lambda key=mk: self.task_clicked.emit(key),
                     click_tip=f"Click to highlight \u2018{disp}\u2019 in the timeline",
                 )
+            self._wrap_util_rows_scroll(blay, inner, len(task_rows))
 
         self._add_collapsible_section(
             "tasks",
@@ -12958,8 +13236,9 @@ class _CpuLoadGraph(QWidget):
         self._font_size: int                                = 8
         self._hover_y: int                                  = -1
         self.setMinimumSize(40, 40)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         self.setMouseTracking(True)
+        self._scroll_area: Optional["QScrollArea"] = None
         self.setToolTip(
             "CPU load over time - synchronised with timeline\n"
             "Core view: click a label to collapse/expand that core row"
@@ -13036,6 +13315,23 @@ class _CpuLoadGraph(QWidget):
         total_h = _TITLE_H + sum(self._row_effective_h(k, key) + CPU_LOAD_ROW_GAP
                                   for k, key, _, _ in rows)
         return QSize(200, max(40, total_h))
+
+    def _sync_scroll_size(self) -> None:
+        """Resize to full content height so QScrollArea can scroll when cores overflow."""
+        scroll = self._scroll_area
+        if scroll is None:
+            return
+        vp = scroll.viewport()
+        w = vp.width()
+        if w <= 0:
+            return
+        h = self.minimumSizeHint().height()
+        if self.width() != w or self.height() != h:
+            self.resize(w, h)
+
+    def updateGeometry(self) -> None:  # noqa: N802
+        super().updateGeometry()
+        self._sync_scroll_size()
 
     # ------------------------------------------------------------------
     # Pre-computation  (difference-array trick - O(n_segs + n_bins))
@@ -13349,30 +13645,65 @@ class _CpuLoadGraph(QWidget):
         super().leaveEvent(event)
 
     def wheelEvent(self, event) -> None:  # noqa: N802
+        self._handle_wheel(event)
+
+    def _graph_pos_from(self, pos: QPoint, source: QWidget) -> QPoint:
+        scroll = self._scroll_area
+        if scroll is not None and source is scroll.viewport():
+            return self.mapFrom(scroll.viewport(), pos)
+        if scroll is not None and source is scroll:
+            return self.mapFrom(scroll, pos)
+        return pos
+
+    def _handle_wheel(self, event, graph_pos: Optional[QPoint] = None,
+                      source: Optional[QWidget] = None) -> None:
         scene = self._view._scene
         if self._trace is None or scene is None:
-            super().wheelEvent(event)
+            if source is None:
+                super().wheelEvent(event)
             return
-        if event.modifiers() & Qt.ControlModifier:
-            anchor_ns = self._time_ns_at_pos(event.position().toPoint())
-            if anchor_ns is None:
-                anchor_ns = self._view.view_center_ns()
-            factor = 1.15 if event.angleDelta().y() > 0 else 1 / 1.15
-            vp_center = self._view.viewport().rect().center()
-            anchor_coord = self._view._scene.ns_to_scene_coord(anchor_ns)
-            if scene._horizontal:
-                anchor_pt = self._view.mapFromScene(QPointF(anchor_coord, self._view.mapToScene(vp_center).y()))
-            else:
-                anchor_pt = self._view.mapFromScene(QPointF(self._view.mapToScene(vp_center).x(), anchor_coord))
-            self._view._do_zoom(factor, anchor_pt)
+
+        pos = graph_pos
+        if pos is None:
+            pos = (event.position().toPoint()
+                   if hasattr(event, "position") else event.pos())
+        if source is not None:
+            pos = self._graph_pos_from(pos, source)
+
+        mods = event.modifiers()
+        zoom_mod = Qt.ControlModifier | Qt.MetaModifier
+        if mods & zoom_mod:
+            angle = event.angleDelta().y()
+            if angle == 0:
+                event.accept()
+                return
+            factor = 1.15 if angle > 0 else 1 / 1.15
+            global_pos = self.mapToGlobal(pos)
+            anchor = self._view.mapFromGlobal(global_pos)
+            self._view._fit_mode = False
+            self._view._zoom_accum *= factor
+            if self._view._zoom_anchor_pos is None:
+                self._view._zoom_anchor_pos = anchor
+            self._view._zoom_timer.start()
             event.accept()
             return
 
         dy = event.angleDelta().y()
         dx = event.angleDelta().x()
+        scroll = self._scroll_area
+        if (scroll is not None and dy != 0
+                and not (mods & Qt.ShiftModifier)
+                and abs(dy) >= abs(dx)):
+            vp = scroll.viewport()
+            if self.height() > vp.height():
+                vsb = scroll.verticalScrollBar()
+                vsb.setValue(vsb.value() - dy)
+                event.accept()
+                return
+
         hsb = self._view.horizontalScrollBar()
         vsb = self._view.verticalScrollBar()
-        if event.modifiers() & Qt.ShiftModifier:
+        if mods & Qt.ShiftModifier:
             if dy != 0:
                 hsb.setValue(hsb.value() - dy)
         else:
@@ -13653,10 +13984,7 @@ class _TraceTab:
         win._wire_cpu_load_graph(self.view, self.cpu_load_graph)
 
         self.cpu_load_scroll = QScrollArea()
-        self.cpu_load_scroll.setWidget(self.cpu_load_graph)
-        self.cpu_load_scroll.setWidgetResizable(True)
-        self.cpu_load_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.cpu_load_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        win._setup_cpu_load_scroll(self.cpu_load_scroll, self.cpu_load_graph)
 
         self.cpu_splitter = QSplitter(Qt.Vertical)
         self.cpu_splitter.addWidget(self.view)
@@ -13820,6 +14148,52 @@ class MainWindow(QMainWindow):
             lambda _val, v=view: self._on_view_scrolled(v))
         view.verticalScrollBar().valueChanged.connect(
             lambda _val, v=view: self._on_view_scrolled(v))
+
+    def _setup_cpu_load_scroll(self, scroll: QScrollArea, graph: _CpuLoadGraph) -> None:
+        """Wire CPU load graph into a scroll area with vertical scroll when cores overflow."""
+        scroll.setWidget(graph)
+        scroll.setWidgetResizable(False)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        graph._scroll_area = scroll
+
+        class _CpuLoadScrollSync(QObject):
+            def __init__(self, g: _CpuLoadGraph, v: "TimelineView", sa: QScrollArea) -> None:
+                super().__init__(g)
+                self._graph = g
+                self._view = v
+                self._scroll = sa
+
+            def eventFilter(self, obj, event):  # noqa: N802
+                if event.type() == QEvent.Resize:
+                    self._graph._sync_scroll_size()
+                    return False
+                if event.type() == QEvent.Wheel:
+                    pos = (event.position().toPoint()
+                           if hasattr(event, "position") else event.pos())
+                    self._graph._handle_wheel(event, pos, obj)
+                    return True
+                if event.type() == QEvent.NativeGesture:
+                    _ZOOM_GESTURE = getattr(Qt, "ZoomNativeGesture", 3)
+                    try:
+                        if int(event.gestureType()) == int(_ZOOM_GESTURE):
+                            pt = event.pos()
+                            global_pos = self._scroll.viewport().mapToGlobal(pt)
+                            anchor = self._view.mapFromGlobal(global_pos)
+                            factor = 1.0 + event.value()
+                            if factor > 0.1:
+                                self._view._fit_mode = False
+                                self._view._do_zoom(factor, anchor)
+                            return True
+                    except AttributeError:
+                        pass
+                return False
+
+        filt = _CpuLoadScrollSync(graph, graph._view, scroll)
+        graph._scroll_sync_filter = filt
+        scroll.viewport().installEventFilter(filt)
+        scroll.installEventFilter(filt)
+        graph._sync_scroll_size()
 
     def _wire_cpu_load_graph(self, view: TimelineView, graph: _CpuLoadGraph) -> None:
         def _repaint_cpu_graph(*_args) -> None:
@@ -14332,7 +14706,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_stats_panel"):
             _stats_heights: Dict[str, int] = {}
             for _sid in ("migrations", "exec", "block", "inter"):
-                _h = s.get_int("stats", f"table_height_{_sid}", 220)
+                _default = (STATS_TABLE_MIG_DEFAULT_H if _sid == "migrations"
+                            else STATS_TABLE_DEFAULT_H)
+                _h = s.get_int("stats", f"table_height_{_sid}", _default)
                 _stats_heights[_sid] = _h
             self._stats_panel.apply_section_table_heights(_stats_heights)
 
@@ -14967,7 +15343,7 @@ class MainWindow(QMainWindow):
         self._settings_cpu_graph.set_dark(self._is_dark)
         self._wire_cpu_load_graph(self._settings_view, self._settings_cpu_graph)
         self._settings_cpu_scroll = QScrollArea()
-        self._settings_cpu_scroll.setWidget(self._settings_cpu_graph)
+        self._setup_cpu_load_scroll(self._settings_cpu_scroll, self._settings_cpu_graph)
         self._settings_cpu_scroll.hide()
 
         # Undo / Redo stacks (cursor + mark state; synced per tab on switch)
@@ -15647,18 +16023,21 @@ class MainWindow(QMainWindow):
         splitter.setSizes([total - bottom, bottom])
 
     def _autofit_cpu_load_height(self) -> None:
-        """Resize the CPU load splitter pane to fit the graph's preferred height."""
+        """Resize the CPU load splitter pane; cap height so extra cores scroll inside."""
         if self._cpu_splitter_user_sized:
             return
         if not self._show_cpu_load or not self._cpu_load_scroll.isVisible():
             return
         preferred = self._cpu_load_graph.sizeHint().height()
-        # Add a small margin for the scroll-area frame / horizontal scrollbar track
+        # Small margin for the scroll-area frame / horizontal scrollbar track.
         preferred = preferred + 6
+        # Do not grow the pane without bound — match web CPU_LOAD_MAX_H and scroll inside.
+        fit_h = min(preferred, CPU_LOAD_PANE_MAX_H)
         sizes = self._cpu_splitter.sizes()
         total = sum(sizes)
-        new_bottom = max(40, min(preferred, total - 100))
+        new_bottom = max(40, min(fit_h, total - 100))
         self._cpu_splitter.setSizes([total - new_bottom, new_bottom])
+        self._cpu_load_graph._sync_scroll_size()
 
     def _toggle_expand_all_cores(self) -> None:
         """Expand or collapse all cores based on the button's checked state."""

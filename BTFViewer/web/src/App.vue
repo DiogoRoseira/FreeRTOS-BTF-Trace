@@ -117,6 +117,7 @@
           :trace="trace"
           :viewport="timelineViewport"
           :view-mode="timelineOptions.viewMode"
+          :orientation="timelineOptions.orientation"
           :dark-mode="timelineOptions.darkMode"
           :selected-task="cpuLoadSelectedTask"
           :all-expanded="cpuLoadExpanded"
@@ -124,6 +125,7 @@
           :hover-time="cpuLoadHoverTime"
           :marks="marks"
           @clear-selection="clearCpuLoadSelection"
+          @viewport-change="onCpuLoadViewportChange"
         />
       </div>
 
@@ -1083,6 +1085,11 @@ function onCollapseAll() {
 
 function onTimelineViewportChange(vp) {
   if (activeTab.value) Object.assign(activeTab.value.timelineViewport, vp)
+}
+
+function onCpuLoadViewportChange(vp) {
+  onTimelineViewportChange(vp)
+  timelinePanelRef.value?.applyViewport?.(vp)
 }
 
 function syncTimelineViewport() {

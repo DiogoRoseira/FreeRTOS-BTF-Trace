@@ -72,6 +72,15 @@ export class InteractionHandler {
     this._boundDblClick    = this._onDblClick.bind(this)
     this._boundContextMenu = this._onContextMenu.bind(this)
 
+    // Coalesce wheel-driven viewport updates to one emit per animation frame.
+    this._vpQueue    = null
+    this._vpFlushRaf = null
+
+    // Coalesce hover hit-tests to one pass per animation frame.
+    this._hoverRaf = null
+    this._hoverCx  = 0
+    this._hoverCy  = 0
+
     canvas.addEventListener('wheel',       this._boundWheel,     { passive: false })
     canvas.addEventListener('mousedown',   this._boundMouseDown)
     canvas.addEventListener('mousemove',   this._boundMouseMove)
@@ -83,6 +92,15 @@ export class InteractionHandler {
 
   destroy() {
     const c = this._canvas
+    if (this._vpFlushRaf) {
+      cancelAnimationFrame(this._vpFlushRaf)
+      this._vpFlushRaf = null
+      this._vpQueue = null
+    }
+    if (this._hoverRaf) {
+      cancelAnimationFrame(this._hoverRaf)
+      this._hoverRaf = null
+    }
     c.removeEventListener('wheel',       this._boundWheel)
     c.removeEventListener('mousedown',   this._boundMouseDown)
     c.removeEventListener('mousemove',   this._boundMouseMove)
@@ -135,10 +153,27 @@ export class InteractionHandler {
 
   // ---- Zoom helpers -------------------------------------------------------
 
+  /** Queue viewport mutations from wheel — chained and flushed once per frame. */
+  _queueViewport(updateFn) {
+    if (!this._vpQueue) this._vpQueue = []
+    this._vpQueue.push(updateFn)
+    if (!this._vpFlushRaf) {
+      this._vpFlushRaf = requestAnimationFrame(() => {
+        this._vpFlushRaf = null
+        const queue = this._vpQueue
+        this._vpQueue = null
+        let vp = this._opts.getViewport()
+        if (!vp) return
+        for (const fn of queue) {
+          vp = fn(vp) ?? vp
+        }
+        this._opts.onViewportChange?.(vp)
+      })
+    }
+  }
+
   /** Zoom around a canvas pivot (horizontal mode – pivot on X axis). */
-  _zoomAroundH(pivotX, factor) {
-    const vp = this._opts.getViewport()
-    if (!vp) return
+  _applyZoomAroundH(vp, pivotX, factor) {
     const { timeStart, timeEnd, canvasW } = vp
     const timeSpan = timeEnd - timeStart
     const pivotT = timeStart + (pivotX / canvasW) * timeSpan
@@ -154,13 +189,17 @@ export class InteractionHandler {
 
     const newStart = pivotT - (pivotX / canvasW) * newSpan
     const { s, e } = this._clampPan(newStart, newStart + newSpan)
-    this._opts.onViewportChange?.({ ...vp, timeStart: s, timeEnd: e })
+    return { ...vp, timeStart: s, timeEnd: e }
+  }
+
+  _zoomAroundH(pivotX, factor) {
+    const vp = this._opts.getViewport()
+    if (!vp) return
+    this._opts.onViewportChange?.(this._applyZoomAroundH(vp, pivotX, factor))
   }
 
   /** Zoom around a canvas pivot (vertical mode – pivot on Y axis). */
-  _zoomAroundV(pivotY, factor) {
-    const vp = this._opts.getViewport()
-    if (!vp) return
+  _applyZoomAroundV(vp, pivotY, factor) {
     const { timeStart, timeEnd, canvasH } = vp
     const bodyH   = canvasH - HEADER_H
     const timeSpan = timeEnd - timeStart
@@ -178,28 +217,42 @@ export class InteractionHandler {
     const relPos = Math.max(0, pivotY - HEADER_H) / bodyH
     const newStart = pivotT - relPos * newSpan
     const { s, e } = this._clampPan(newStart, newStart + newSpan)
-    this._opts.onViewportChange?.({ ...vp, timeStart: s, timeEnd: e })
+    return { ...vp, timeStart: s, timeEnd: e }
+  }
+
+  _zoomAroundV(pivotY, factor) {
+    const vp = this._opts.getViewport()
+    if (!vp) return
+    this._opts.onViewportChange?.(this._applyZoomAroundV(vp, pivotY, factor))
+  }
+
+  _applyPanH(vp, deltaX) {
+    const { timeStart, timeEnd, canvasW } = vp
+    const nsPerPx = (timeEnd - timeStart) / canvasW
+    const deltaNs = deltaX * nsPerPx
+    const { s, e } = this._clampPan(timeStart - deltaNs, timeEnd - deltaNs)
+    return { ...vp, timeStart: s, timeEnd: e }
   }
 
   _panH(deltaX) {
     const vp = this._opts.getViewport()
     if (!vp) return
-    const { timeStart, timeEnd, canvasW } = vp
-    const nsPerPx = (timeEnd - timeStart) / canvasW
-    const deltaNs = deltaX * nsPerPx
-    const { s, e } = this._clampPan(timeStart - deltaNs, timeEnd - deltaNs)
-    this._opts.onViewportChange?.({ ...vp, timeStart: s, timeEnd: e })
+    this._opts.onViewportChange?.(this._applyPanH(vp, deltaX))
   }
 
-  _panV(deltaY) {
-    const vp = this._opts.getViewport()
-    if (!vp) return
+  _applyPanV(vp, deltaY) {
     const { timeStart, timeEnd, canvasH } = vp
     const bodyH   = canvasH - HEADER_H
     const nsPerPx = (timeEnd - timeStart) / bodyH
     const deltaNs = deltaY * nsPerPx
     const { s, e } = this._clampPan(timeStart + deltaNs, timeEnd + deltaNs)
-    this._opts.onViewportChange?.({ ...vp, timeStart: s, timeEnd: e })
+    return { ...vp, timeStart: s, timeEnd: e }
+  }
+
+  _panV(deltaY) {
+    const vp = this._opts.getViewport()
+    if (!vp) return
+    this._opts.onViewportChange?.(this._applyPanV(vp, deltaY))
   }
 
   /**
@@ -221,18 +274,24 @@ export class InteractionHandler {
     return { s: newStart, e: newEnd }
   }
 
+  _applyScrollY(vp, delta) {
+    return { ...vp, scrollY: Math.max(0, (vp.scrollY || 0) + delta) }
+  }
+
   _scrollY(delta) {
     const vp = this._opts.getViewport()
     if (!vp) return
-    const newScrollY = Math.max(0, (vp.scrollY || 0) + delta)
-    this._opts.onViewportChange?.({ ...vp, scrollY: newScrollY })
+    this._opts.onViewportChange?.(this._applyScrollY(vp, delta))
+  }
+
+  _applyScrollX(vp, delta) {
+    return { ...vp, scrollX: Math.max(0, (vp.scrollX || 0) + delta) }
   }
 
   _scrollX(delta) {
     const vp = this._opts.getViewport()
     if (!vp) return
-    const newScrollX = Math.max(0, (vp.scrollX || 0) + delta)
-    this._opts.onViewportChange?.({ ...vp, scrollX: newScrollX })
+    this._opts.onViewportChange?.(this._applyScrollX(vp, delta))
   }
 
   // ---- Event handlers -----------------------------------------------------
@@ -247,32 +306,28 @@ export class InteractionHandler {
     if (e.ctrlKey || e.metaKey) {
       // Pinch-to-zoom (Ctrl-wheel)
       const factor = e.deltaY > 0 ? 1.15 : 0.87
-      if (vert) this._zoomAroundV(cy, factor)
-      else       this._zoomAroundH(cx, factor)
+      if (vert) this._queueViewport(vp => this._applyZoomAroundV(vp, cy, factor))
+      else       this._queueViewport(vp => this._applyZoomAroundH(vp, cx, factor))
     } else if (vert) {
       // === Vertical mode ===
       const isHorizInput = e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)
       if (isHorizInput) {
-        // Horizontal input (trackpad swipe or Shift+scroll) → scroll columns
         const dx = e.shiftKey ? e.deltaY : e.deltaX
-        this._scrollX(dx)
+        this._queueViewport(vp => this._applyScrollX(vp, dx))
       } else {
-        // Vertical scroll → pan time
-        this._panV(e.deltaMode === 1 ? e.deltaY * (ROW_H + ROW_GAP) : e.deltaY)
+        const dy = e.deltaMode === 1 ? e.deltaY * (ROW_H + ROW_GAP) : e.deltaY
+        this._queueViewport(vp => this._applyPanV(vp, dy))
       }
     } else {
       // === Horizontal mode ===
       const isHorizInput = Math.abs(e.deltaX) > Math.abs(e.deltaY)
       if (isHorizInput) {
-        // Trackpad horizontal swipe → pan time left/right
-        this._panH(e.deltaX)
+        this._queueViewport(vp => this._applyPanH(vp, e.deltaX))
       } else if (e.shiftKey) {
-        // Shift + vertical scroll → pan time left/right
-        this._panH(e.deltaY)
+        this._queueViewport(vp => this._applyPanH(vp, e.deltaY))
       } else {
-        // Plain vertical scroll → scroll rows up/down
         const deltaY = e.deltaMode === 1 ? e.deltaY * (ROW_H + ROW_GAP) : e.deltaY
-        this._scrollY(deltaY)
+        this._queueViewport(vp => this._applyScrollY(vp, deltaY))
       }
     }
   }
@@ -460,7 +515,18 @@ export class InteractionHandler {
 
     this._updateHoverCursor(cx, cy)
 
-    // Hover: detect STI marker and row/column
+    this._hoverCx = cx
+    this._hoverCy = cy
+    if (!this._hoverRaf) {
+      this._hoverRaf = requestAnimationFrame(() => {
+        this._hoverRaf = null
+        this._runHoverHitTests(this._hoverCx, this._hoverCy)
+      })
+    }
+  }
+
+  _runHoverHitTests(cx, cy) {
+    const vert = this._isVertical()
     const trace = this._opts.getTrace()
     const ropts = this._opts.getOptions?.()
     if (trace && this._opts.getViewport()) {
