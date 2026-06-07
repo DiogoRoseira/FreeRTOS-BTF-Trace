@@ -103,7 +103,7 @@ void btf_traceEND(void) {
     btf_dump();
 #endif
 
-    printf("%lu events generated.\n", (unsigned long)trace_data.h.event_count);
+    printf("%" PRIu32 " events generated.\n", trace_data.h.event_count);
 }
 
 void btf_traceTAG(int t, int v) {
@@ -248,7 +248,7 @@ void btf_dump(
 
     // Emit an initial clock-frequency event for each core.
     for(i=0; i < configNUMBER_OF_CORES; i++) {
-        printf("%" PRIu64 ",Core_%d,0,C,Core_%d,0,set_frequency,%ld\n",
+        printf("%" PRIu64 ",Core_%d,0,C,Core_%d,0,set_frequency,%" PRIu32 "\n",
                 current_time, i, i, trace_data.h.core_clock);
     }
 
@@ -268,7 +268,7 @@ void btf_dump(
 
         switch(event->types & EVENT_MASK) {
             case TRACE_EVENT_TASK_SWITCHED_IN:
-                printf( "%" PRIu64 ",[%d/%04d]%s,0,T,[%d/%04ld]%s,0,%s,%s\n",
+                printf( "%" PRIu64 ",[%d/%04d]%s,0,T,[%d/%04" PRIu32 "]%s,0,%s,%s\n",
                         current_time,
                         coreid,
                         current_task[coreid], get_taskname(trace_data, current_task[coreid]),
@@ -278,7 +278,7 @@ void btf_dump(
                         "");
                 break;
             case TRACE_EVENT_TASK_SWITCHED_OUT:
-                printf( "%" PRIu64 ",Core_%d,0,T,[%d/%04ld]%s,0,%s,%s\n",
+                printf( "%" PRIu64 ",Core_%d,0,T,[%d/%04" PRIu32 "]%s,0,%s,%s\n",
                         current_time,
                         coreid,
                         coreid,
@@ -288,7 +288,7 @@ void btf_dump(
                 current_task[coreid] = (int)event->value;
                 break;
             case TRACE_EVENT_TASK_CREATE:
-                printf( "%" PRIu64 ",Core_%d,0,T,[%d/%04ld]%s,0,%s,%s\n",
+                printf( "%" PRIu64 ",Core_%d,0,T,[%d/%04" PRIu32 "]%s,0,%s,%s\n",
                         current_time,
                         coreid,
                         coreid,
@@ -314,7 +314,7 @@ void btf_dump(
                         "trigger",
                         "suspend",
                         get_taskname(trace_data, event->value),
-		        (int)event->value);
+                        (int)event->value);
                 break;
             case TRACE_EVENT_TASK_RESUME:
                 printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%s %s[%d]\n",
@@ -448,10 +448,10 @@ void btf_dump(
                             "queue",
                             "trigger",
                             "delete");
-		}
+                }
                 break;
             case TRACE_EVENT_TASK_INCREMENT_TICK:
-                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%ld\n",
+                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%" PRIu32 "\n",
                         current_time,
                         coreid,
                         "TICK",
@@ -459,7 +459,7 @@ void btf_dump(
                         event->value);
                 break;
             case TRACE_EVENT_TAG:
-                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%ld\n",
+                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%" PRIu32 "\n",
                         current_time,
                         coreid,
                         "tag0_event",
@@ -467,7 +467,7 @@ void btf_dump(
                         event->value);
                 break;
             case TRACE_EVENT_TAG1:
-                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%ld\n",
+                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%" PRIu32 "\n",
                         current_time,
                         coreid,
                         "tag1_event",
@@ -475,7 +475,7 @@ void btf_dump(
                         event->value);
                 break;
             case TRACE_EVENT_TAG2:
-                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%ld\n",
+                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%" PRIu32 "\n",
                         current_time,
                         coreid,
                         "tag2_event",
@@ -483,7 +483,7 @@ void btf_dump(
                         event->value);
                 break;
             case TRACE_EVENT_TAG3:
-                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%ld\n",
+                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%" PRIu32 "\n",
                         current_time,
                         coreid,
                         "tag3_event",
@@ -491,7 +491,7 @@ void btf_dump(
                         event->value);
                 break;
             case TRACE_EVENT_TAG4:
-                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%ld\n",
+                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%" PRIu32 "\n",
                         current_time,
                         coreid,
                         "tag4_event",
@@ -499,7 +499,7 @@ void btf_dump(
                         event->value);
                 break;
             case TRACE_EVENT_TAG5:
-                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%ld\n",
+                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%" PRIu32 "\n",
                         current_time,
                         coreid,
                         "tag5_event",
@@ -507,7 +507,7 @@ void btf_dump(
                         event->value);
                 break;
             case TRACE_EVENT_TAG6:
-                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%ld\n",
+                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%" PRIu32 "\n",
                         current_time,
                         coreid,
                         "tag6_event",
@@ -515,7 +515,7 @@ void btf_dump(
                         event->value);
                 break;
             case TRACE_EVENT_TAG7:
-                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%ld\n",
+                printf( "%" PRIu64 ",Core_%d,0,STI,%s,0,%s,%" PRIu32 "\n",
                         current_time,
                         coreid,
                         "tag7_event",
