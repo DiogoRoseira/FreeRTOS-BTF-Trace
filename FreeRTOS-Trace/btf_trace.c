@@ -68,6 +68,7 @@
 
 static volatile uint32_t trace_en;
 static TRACE trace_data;
+static int trace_wrap_warned;
 
 static uint32_t last_timestamp;
 static uint64_t cyc_to_time_acc;
@@ -91,6 +92,7 @@ void btf_traceSTART(void) {
 
     last_timestamp = 0;
     cyc_to_time_acc = 0;
+    trace_wrap_warned = 0;
 }
 
 void btf_traceEND(void) {
@@ -143,7 +145,10 @@ void btf_trace_add_task (
     trace_data.h.current_index++;
     if (trace_data.h.current_index == configMAX_TRACE_EVENTS) {
         trace_data.h.current_index = 0;
-        printf("\nWarning: trace data wrap, only last events will be recorded.\n");
+        if (!trace_wrap_warned) {
+            trace_wrap_warned = 1;
+            printf("\nWarning: trace data wrap, only last events will be recorded.\n");
+        }
     }
     if (trace_data.h.event_count < configMAX_TRACE_EVENTS) {
         trace_data.h.event_count++;
@@ -170,7 +175,10 @@ void btf_trace_add_event (
     trace_data.h.current_index++;
     if (trace_data.h.current_index == configMAX_TRACE_EVENTS) {
         trace_data.h.current_index = 0;
-        printf("\nWarning: trace data wrap, only last events will be recorded.\n");
+        if (!trace_wrap_warned) {
+            trace_wrap_warned = 1;
+            printf("\nWarning: trace data wrap, only last events will be recorded.\n");
+        }
     }
     if (trace_data.h.event_count < configMAX_TRACE_EVENTS) {
         trace_data.h.event_count++;
